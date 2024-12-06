@@ -1,0 +1,89 @@
+[[bin]]
+name = 'spatial'
+test = false
+
+[dependencies]
+docopt = '1'
+
+[dependencies.anyhow]
+workspace = true
+
+[dependencies.barcode]
+path = '../barcode'
+
+[dependencies.cr_bam]
+path = '../cr_bam'
+
+[dependencies.cr_h5]
+path = '../cr_h5'
+
+[dependencies.cr_lib]
+path = '../cr_lib'
+
+[dependencies.cr_types]
+path = '../cr_types'
+
+[dependencies.cr_websummary]
+path = '../cr_websummary'
+
+[dependencies.hd_feature_slice]
+path = '../hd_feature_slice'
+
+[dependencies.itertools]
+workspace = true
+
+[dependencies.martian]
+workspace = true
+
+[dependencies.martian-derive]
+workspace = true
+
+[dependencies.martian-filetypes]
+workspace = true
+
+[dependencies.metric]
+path = '../metric'
+
+[dependencies.parquet]
+workspace = true
+
+[dependencies.parquet_derive]
+workspace = true
+
+[dependencies.rand]
+workspace = true
+
+[dependencies.rand_pcg]
+workspace = true
+
+[dependencies.serde]
+workspace = true
+
+[dependencies.serde_json]
+workspace = true
+
+[dependencies.shardio]
+workspace = true
+
+[dependencies.slide_design]
+path = '../slide_design'
+
+[dependencies.statrs]
+workspace = true
+
+[dependencies.tenx-websummary]
+features = ['derive', 'image_base64_encode', 'image_proc']
+workspace = true
+
+[dependencies.websummary_build]
+path = '../websummary_build'
+
+[lib]
+test = false
+
+[package]
+authors = ['10x Genomics']
+edition = '2021'
+name = 'spatial'
+publish = false
+version = '0.1.0'

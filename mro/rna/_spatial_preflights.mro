@@ -1,0 +1,70 @@
+#
+# Copyright (c) 2020 10X Genomics, Inc. All rights reserved.
+#
+
+@include "_cr_lib_stages.mro"
+@include "_v1_pattern_fix.mro"
+
+filetype gpr;
+filetype csv;
+filetype h5;
+filetype tgz;
+filetype vlf;
+
+stage SPACERANGER_PREFLIGHT(
+    in  map[]            sample_def,
+    in  csv              target_set,
+    in  path             reference_path,
+    in  csv              feature_reference,
+    in  int              recovered_cells,
+    in  int              force_cells,
+    in  int              r1_length,
+    in  int              r2_length,
+    in  file[]           tissue_image_paths,
+    in  int              dark_images,
+    in  int              dapi_channel_index,
+    in  path             loupe_alignment_file,
+    in  bool             override_id,
+    in  gpr              gpr_file,
+    in  vlf              hd_layout_file,
+    in  file[]           cytassist_image_paths,
+    in  tgz              cytassist_tgz_path,
+    in  bool             check_cytassist_sizes,
+    in  string           slide_serial_capture_area,
+    in  string           targeting_method,
+    in  float            image_scale,
+    in  string           chemistry,
+    in  ChemistryDef     custom_chemistry_def,
+    in  V1PatternFixArgs v1_pattern_fix,
+    in  path             hd_log_umi_image,
+    in  bool             is_pd,
+    src py               "stages/common/spaceranger_preflight",
+) split (
+) using (
+    mem_gb  = 3,
+    vmem_gb = 32,
+)
+
+stage SPACERANGER_PREFLIGHT_LOCAL(
+    in  map[]            sample_def,
+    in  csv              target_set,
+    in  path             reference_path,
+    in  csv              feature_reference,
+    in  int              recovered_cells,
+    in  int              force_cells,
+    in  int              r1_length,
+    in  int              r2_length,
+    in  file[]           tissue_image_paths,
+    in  int              dark_images,
+    in  path             loupe_alignment_file,
+    in  gpr              gpr_file,
+    in  vlf              hd_layout_file,
+    in  file[]           cytassist_image_paths,
+    in  string           slide_serial_capture_area,
+    in  string           targeting_method,
+    in  string           chemistry,
+    in  ChemistryDef     custom_chemistry_def,
+    in  V1PatternFixArgs v1_pattern_fix,
+    in  bool             is_pd,
+    src py               "stages/common/spaceranger_preflight_local",
+)

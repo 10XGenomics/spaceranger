@@ -1,0 +1,21 @@
+[dependencies]
+numpy = '*'
+
+[dependencies.fiducial]
+branch = 'main'
+git = 'https://github.com/10XGenomics/image-analysis-rs/'
+
+[dependencies.pyo3]
+workspace = true
+
+[lib]
+crate-type = ['staticlib']
+name = 'hd_fiducial'
+test = false
+
+[package]
+authors = ['10x Genomics']
+edition = '2021'
+name = 'hd_fiducial'
+publish = false
+version = '0.1.0'

@@ -1,0 +1,123 @@
+#
+# Copyright (c) 2017 10X Genomics, Inc. All rights reserved.
+#
+
+@include "sc_rna_aggregator.mro"
+@include "_common_cloupe_stages.mro"
+@include "_deconvolve_spots.mro"
+@include "_sc_rna_aggregator_stages.mro"
+@include "_spatial_cloupe_stages.mro"
+
+pipeline SPATIAL_RNA_AGGREGATOR_CS(
+    in  string sample_id,
+    in  string sample_desc,
+    in  path   pipestance_root,
+    in  csv    aggregation_csv,
+    in  string normalization_mode,
+    out html   web_summary                    "Aggregation metrics summary HTML",
+    out json   summary                        "Aggregation metrics summary JSON",
+    out path   analysis                       "Secondary analysis output CSV",
+    out path   filtered_feature_bc_matrix     "Filtered feature-barcode matrices MEX",
+    out h5     filtered_feature_bc_matrix_h5  "Filtered feature-barcode matrices HDF5"  "filtered_feature_bc_matrix.h5",
+    out csv    aggregation_csv                "Copy of the input aggregation CSV"  "aggregation.csv",
+    out cloupe cloupe                         "Loupe Browser file",
+    out csv    aggr_tissue_positions          "Aggregated tissue positions list",
+    out path   spatial                        "Spatial folder containing spatial images and scalefactors",
+    out path   deconvolution                  "Reference free spot deconvolution",
+)
+{
+    call PARSE_CSV(
+        pipestance_root = self.pipestance_root,
+        aggregation_csv = self.aggregation_csv,
+        reanalyze       = false,
+        matrix_h5       = null,
+        product_type    = "sp",
+    )
+
+    call VERIFY_SPATIAL_CLOUPES(
+        sample_defs = PARSE_CSV.sample_defs,
+    )
+
+    call MERGE_TISSUE_FILES(
+        sample_defs = PARSE_CSV.sample_defs,
+    )
+
+    call SC_RNA_AGGREGATOR as SPATIAL_RNA_AGGREGATOR(
+        sample_id                = self.sample_id,
+        sample_desc              = self.sample_desc,
+        sample_defs              = PARSE_CSV.sample_defs,
+        normalization_mode       = self.normalization_mode,
+        no_secondary_analysis    = false,
+        min_crispr_umi_threshold = null,
+        num_analysis_bcs         = null,
+        num_pca_bcs              = null,
+        num_pca_genes            = null,
+        num_principal_comps      = null,
+        cbc_knn                  = null,
+        cbc_alpha                = null,
+        cbc_sigma                = null,
+        cbc_realign_panorama     = null,
+        max_clusters             = null,
+        graphclust_neighbors     = null,
+        neighbor_a               = null,
+        neighbor_b               = null,
+        tsne_perplexity          = null,
+        tsne_input_pcs           = null,
+        tsne_theta               = null,
+        random_seed              = null,
+        tsne_max_dims            = null,
+        tsne_max_iter            = null,
+        tsne_stop_lying_iter     = null,
+        tsne_mom_switch_iter     = null,
+        product_type             = "sp",
+        is_pd                    = false,
+    )
+
+    call CLOUPE_PREPROCESS(
+        pipestance_type              = "SPATIAL_RNA_AGGREGATOR_CS",
+        sample_id                    = self.sample_id,
+        sample_desc                  = self.sample_desc,
+        analysis                     = SPATIAL_RNA_AGGREGATOR.analysis,
+        filtered_gene_bc_matrices_h5 = SPATIAL_RNA_AGGREGATOR.filtered_gene_bc_matrices_h5,
+        metrics_json                 = SPATIAL_RNA_AGGREGATOR.summary,
+        aggregation_csv              = PARSE_CSV.aggregation_csv,
+        gem_group_index_json         = SPATIAL_RNA_AGGREGATOR.gem_group_index_json,
+        image_page_names             = null,
+        tissue_image_paths           = null,
+        dark_images                  = null,
+        tissue_positions             = null,
+        fiducial_positions_list      = null,
+        dzi_info                     = null,
+        dzi_tiles_paths              = null,
+        scale_factors_json           = null,
+        no_secondary_analysis        = false,
+        barcode_whitelist            = null,
+        hd_slide_name                = null,
+        loupe_map                    = MERGE_TISSUE_FILES.loupe_map,
+        product_type                 = "sp",
+        cells_per_sample             = null,
+        cells_per_tag                = null,
+        cells_per_protospacer        = null,
+        spatial_enrichment           = null,
+        spatial_deconvolution_path   = null,
+        disable_cloupe               = null,
+    )
+
+    call DECONVOLVE_SPOTS(
+        filtered_matrix = SPATIAL_RNA_AGGREGATOR.filtered_gene_bc_matrices_h5,
+        analysis        = SPATIAL_RNA_AGGREGATOR.analysis,
+    )
+
+    return (
+        aggregation_csv               = PARSE_CSV.aggregation_csv,
+        filtered_feature_bc_matrix_h5 = SPATIAL_RNA_AGGREGATOR.filtered_gene_bc_matrices_h5,
+        filtered_feature_bc_matrix    = SPATIAL_RNA_AGGREGATOR.filtered_gene_bc_matrices_mex,
+        analysis                      = SPATIAL_RNA_AGGREGATOR.analysis_csv,
+        summary                       = SPATIAL_RNA_AGGREGATOR.summary,
+        web_summary                   = SPATIAL_RNA_AGGREGATOR.web_summary,
+        cloupe                        = CLOUPE_PREPROCESS.output_for_cloupe,
+        aggr_tissue_positions         = MERGE_TISSUE_FILES.aggr_tissue_positions,
+        spatial                       = MERGE_TISSUE_FILES.spatial,
+        deconvolution                 = DECONVOLVE_SPOTS.deconvolution,
+    )
+}

@@ -1,0 +1,36 @@
+#
+# Copyright (c) 2019 10X Genomics, Inc. All rights reserved.
+#
+
+filetype csv;
+filetype json;
+
+stage CLOUPE_TILE_IMAGES(
+    in  file[] tissue_image_paths,
+    in  int    tile_size,
+    in  bool   skip_stage,
+    in  bool   no_secondary_analysis,
+    in  path   loupe_alignment_file,
+    out json   dzi_info,
+    out path[] dzi_tiles_paths,
+    src py     "stages/cloupe/cloupe_tile_images",
+) split (
+) using (
+    mem_gb  = 3,
+    vmem_gb = 12,
+)
+
+stage MERGE_TISSUE_FILES(
+    in  map[] sample_defs,
+    out csv   aggr_tissue_positions,
+    out path  spatial,
+    out json  loupe_map,
+    src py    "stages/spatial/merge_tissue_files",
+)
+
+stage VERIFY_SPATIAL_CLOUPES(
+    in  map[] sample_defs,
+    src py    "stages/cloupe/verify_spatial_cloupes",
+) using (
+    volatile = strict,
+)

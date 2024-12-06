@@ -1,0 +1,191 @@
+[profile]
+[profile.dev]
+debug = 1
+opt-level = 3
+split-debuginfo = 'unpacked'
+
+[profile.release]
+codegen-units = 1
+debug = 1
+lto = true
+
+[profile.test]
+debug = 1
+opt-level = 3
+split-debuginfo = 'unpacked'
+
+[workspace]
+members = ['barcode', 'barcode_extensions', 'barcodes_folder', 'bazel_utils', 'byteseq', 'cloud_utils', 'cr_aggr', 'cr_ana', 'cr_bam', 'cr_h5', 'cr_lib', 'cr_types', 'cr_websummary', 'cr_wrap', 'dzi', 'fast_utils', 'hd_feature_slice', 'hd_fiducial', 'jibes_o3', 'json_report_derive', 'metric', 'metric_derive', 'multi', 'par_proc', 'parameters_toml', 'pyanyhow', 'slide_design', 'slide_design_o3', 'spatial', 'stats', 'tenkit2', 'transcriptome', 'tx_annotation', 'umi', 'vdj_asm_asm', 'vdj_asm_utils', 'vdj_proto', 'vdj_reference', 'websummary_build', 'websummary_derive']
+resolver = '2'
+
+[workspace.dependencies]
+criterion = '0.5'
+ctor = '0.2'
+derive_more = '0.99'
+flate2 = '1'
+itertools = '0.10'
+libc = '0.2'
+log = '0.4'
+ndarray = '0.15'
+nom_locate = '4'
+parquet_derive = '51'
+plotly = '0.9'
+rand = '0.8'
+rand_distr = '0.4'
+rand_pcg = '0.3'
+rayon = '1'
+serde_json = '1'
+shardio = '0.8'
+statrs = '0.16'
+strum = '0.25'
+strum_macros = '0.25'
+tempfile = '3.14'
+toml = '0.8'
+
+[workspace.dependencies.align_tools]
+branch = 'main'
+git = 'https://github.com/10XGenomics/enclone_ranger'
+
+[workspace.dependencies.amino]
+branch = 'main'
+git = 'https://github.com/10XGenomics/enclone_ranger'
+
+[workspace.dependencies.anyhow]
+features = ['backtrace']
+version = '1'
+
+[workspace.dependencies.arrayvec]
+features = ['serde']
+version = '0.5'
+
+[workspace.dependencies.blas-src]
+branch = 'main'
+git = 'https://github.com/10XGenomics/scan-rs'
+
+[workspace.dependencies.clap]
+features = ['derive', 'wrap_help']
+version = '4'
+
+[workspace.dependencies.enclone_core]
+branch = 'main'
+git = 'https://github.com/10XGenomics/enclone_ranger'
+
+[workspace.dependencies.enclone_proto]
+branch = 'main'
+git = 'https://github.com/10XGenomics/enclone_ranger'
+
+[workspace.dependencies.enclone_ranger]
+branch = 'main'
+git = 'https://github.com/10XGenomics/enclone_ranger'
+
+[workspace.dependencies.equiv]
+branch = 'main'
+git = 'https://github.com/10XGenomics/enclone_ranger'
+
+[workspace.dependencies.fastq_set]
+branch = 'master'
+git = 'https://github.com/10XGenomics/fastq_set'
+
+[workspace.dependencies.graph_simple]
+branch = 'main'
+git = 'https://github.com/10XGenomics/enclone_ranger'
+
+[workspace.dependencies.hdf5]
+branch = 'conda_nov2021'
+features = ['conda']
+git = 'https://github.com/10XGenomics/hdf5-rust'
+
+[workspace.dependencies.hyperbase]
+branch = 'main'
+git = 'https://github.com/10XGenomics/enclone_ranger'
+
+[workspace.dependencies.insta]
+features = ['json', 'redactions', 'ron', 'yaml']
+version = '1'
+
+[workspace.dependencies.io_utils]
+branch = 'main'
+git = 'https://github.com/10XGenomics/enclone_ranger'
+
+[workspace.dependencies.kmer_lookup]
+branch = 'main'
+git = 'https://github.com/10XGenomics/enclone_ranger'
+
+[workspace.dependencies.martian]
+branch = 'master'
+git = 'https://github.com/martian-lang/martian-rust'
+
+[workspace.dependencies.martian-derive]
+branch = 'master'
+git = 'https://github.com/martian-lang/martian-rust'
+
+[workspace.dependencies.martian-filetypes]
+branch = 'master'
+git = 'https://github.com/martian-lang/martian-rust'
+
+[workspace.dependencies.nom]
+default-features = false
+version = '7'
+
+[workspace.dependencies.ordered-float]
+features = ['serde']
+version = '>=3, < 5'
+
+[workspace.dependencies.parquet]
+default-features = false
+features = ['zstd', 'json']
+version = '51'
+
+[workspace.dependencies.pyo3]
+features = ['extension-module', 'abi3-py310']
+version = '0.19'
+
+[workspace.dependencies.regex]
+default-features = false
+features = ['std', 'perf']
+version = '1'
+
+[workspace.dependencies.rust-htslib]
+default-features = false
+features = ['serde_feature', 'libdeflate']
+version = '0.47'
+
+[workspace.dependencies.serde]
+features = ['derive']
+version = '1.0'
+
+[workspace.dependencies.stats_utils]
+branch = 'main'
+git = 'https://github.com/10XGenomics/enclone_ranger'
+
+[workspace.dependencies.string_utils]
+branch = 'main'
+git = 'https://github.com/10XGenomics/enclone_ranger'
+
+[workspace.dependencies.tables]
+branch = 'main'
+git = 'https://github.com/10XGenomics/enclone_ranger'
+
+[workspace.dependencies.tenx-websummary]
+branch = 'master'
+git = 'https://github.com/10XGenomics/websummary'
+
+[workspace.dependencies.vdj_ann]
+branch = 'main'
+git = 'https://github.com/10XGenomics/enclone_ranger'
+
+[workspace.dependencies.vdj_ann_ref]
+branch = 'main'
+git = 'https://github.com/10XGenomics/enclone_ranger'
+
+[workspace.dependencies.vdj_types]
+branch = 'main'
+git = 'https://github.com/10XGenomics/enclone_ranger'
+
+[workspace.dependencies.vector_utils]
+branch = 'main'
+git = 'https://github.com/10XGenomics/enclone_ranger'
+
+[workspace.dependencies.zip]
+default-features = false
+version = '0.6'

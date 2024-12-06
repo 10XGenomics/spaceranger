@@ -1,0 +1,60 @@
+#
+# Copyright (c) 2019 10X Genomics, Inc. All rights reserved.
+#
+
+@include "_cr_lib_stages.mro"
+
+pipeline SPATIAL_RNA_COUNTER_PREP(
+    in  string            sample_id,
+    in  map[]             sample_def,
+    in  string            chemistry,
+    in  ChemistryDef      custom_chemistry_def,
+    in  path              reference_path,
+    in  int               r1_length             "Trim input R1 to this length (optional)",
+    in  int               r2_length             "Trim input R2 to this length (optional)",
+    in  bool              is_pd,
+    in  string[]          allowed_chems,
+    out map[]             chunks,
+    out map<ChemistryDef> chemistry_defs,
+    out string            barcode_whitelist,
+    out string            visium_hd_slide_name,
+    out bool              is_antibody_only,
+)
+{
+    call COPY_CHEMISTRY_SPEC(
+        sample_defs    = self.sample_def,
+        chemistry_spec = self.chemistry,
+    )
+
+    call DETECT_CHEMISTRY(
+        sample_def           = self.sample_def,
+        reference_path       = self.reference_path,
+        chemistry_specs      = COPY_CHEMISTRY_SPEC.chemistry_specs,
+        custom_chemistry_def = self.custom_chemistry_def,
+        allowed_chems        = self.allowed_chems,
+        r1_length            = self.r1_length,
+        r2_length            = self.r2_length,
+        is_pd                = self.is_pd,
+        feature_reference    = null,
+        multi_config         = null,
+        feature_config       = null,
+    )
+
+    call MULTI_SETUP_CHUNKS(
+        sample_id            = self.sample_id,
+        sample_def           = self.sample_def,
+        chemistry_defs       = DETECT_CHEMISTRY.chemistry_defs,
+        default_library_type = null,
+    ) using (
+        local    = true,
+        volatile = true,
+    )
+
+    return (
+        chunks               = MULTI_SETUP_CHUNKS.chunks,
+        chemistry_defs       = DETECT_CHEMISTRY.chemistry_defs,
+        barcode_whitelist    = MULTI_SETUP_CHUNKS.barcode_whitelist,
+        visium_hd_slide_name = MULTI_SETUP_CHUNKS.visium_hd_slide_name,
+        is_antibody_only     = DETECT_CHEMISTRY.is_antibody_only,
+    )
+}

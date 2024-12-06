@@ -1,0 +1,74 @@
+[dependencies]
+md5 = '0.7'
+numpy = '0.19'
+
+[dependencies.anyhow]
+workspace = true
+
+[dependencies.arrayvec]
+workspace = true
+
+[dependencies.barcodes_folder]
+path = '../barcodes_folder'
+
+[dependencies.blas-src]
+workspace = true
+
+[dependencies.itertools]
+workspace = true
+
+[dependencies.martian]
+workspace = true
+
+[dependencies.martian-derive]
+workspace = true
+
+[dependencies.martian-filetypes]
+workspace = true
+
+[dependencies.metric]
+path = '../metric'
+
+[dependencies.ndarray]
+workspace = true
+
+[dependencies.prost]
+optional = true
+version = '0.13'
+
+[dependencies.prost-build]
+optional = true
+version = '0.13'
+
+[dependencies.pyanyhow]
+path = '../pyanyhow'
+
+[dependencies.pyo3]
+workspace = true
+
+[dependencies.regex]
+workspace = true
+
+[dependencies.serde]
+workspace = true
+
+[dependencies.serde_json]
+workspace = true
+
+[dependencies.strum_macros]
+workspace = true
+
+[features]
+default = ['tenx_source_available']
+tenx_internal = ['prost', 'prost-build']
+tenx_source_available = []
+
+[lib]
+test = false
+
+[package]
+authors = ['10x Genomics']
+edition = '2021'
+name = 'slide_design'
+publish = false
+version = '0.1.0'

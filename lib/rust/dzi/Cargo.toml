@@ -1,0 +1,26 @@
+[dependencies]
+serde_json = '1'
+
+[dependencies.anyhow]
+workspace = true
+
+[dependencies.image]
+default-features = false
+features = ['png']
+version = '0.25'
+
+[dependencies.serde]
+workspace = true
+
+[dependencies.zip]
+workspace = true
+
+[lib]
+test = false
+
+[package]
+authors = ['10x Genomics']
+edition = '2021'
+name = 'dzi'
+publish = false
+version = '0.1.0'

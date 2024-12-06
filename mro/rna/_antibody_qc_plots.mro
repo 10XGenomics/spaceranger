@@ -1,0 +1,19 @@
+#
+# Copyright (c) 2023 10X Genomics, Inc. All rights reserved.
+#
+
+filetype h5;
+filetype json;
+
+stage ANTIBODY_QC_PLOTS(
+    in  h5   filtered_matrix,
+    in  h5   raw_matrix,
+    out json raw_normalized_heatmap,
+    out json isotype_scatter,
+    out json gex_fbc_correlation_heatmap,
+    out json ab_qc_summary,
+    src py   "stages/spatial/antibody_qc_plots",
+) split (
+) using (
+    volatile = strict,
+)

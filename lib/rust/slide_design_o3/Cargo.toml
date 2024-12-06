@@ -1,0 +1,23 @@
+[dependencies]
+numpy = '0.19'
+
+[dependencies.pyanyhow]
+path = '../pyanyhow'
+
+[dependencies.pyo3]
+workspace = true
+
+[dependencies.slide_design]
+path = '../slide_design'
+
+[lib]
+crate-type = ['staticlib']
+name = 'slide_design_o3'
+test = false
+
+[package]
+authors = ['10x Genomics']
+edition = '2021'
+name = 'slide_design_o3'
+publish = false
+version = '0.1.0'

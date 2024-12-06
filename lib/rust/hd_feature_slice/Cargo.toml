@@ -1,0 +1,50 @@
+[dependencies]
+colorous = '1'
+num-traits = '0.2'
+
+[dependencies.anyhow]
+workspace = true
+
+[dependencies.barcode]
+path = '../barcode'
+
+[dependencies.cr_h5]
+path = '../cr_h5'
+
+[dependencies.cr_types]
+path = '../cr_types'
+
+[dependencies.dzi]
+path = '../dzi'
+
+[dependencies.hdf5]
+workspace = true
+
+[dependencies.image]
+default-features = false
+version = '0.25'
+
+[dependencies.itertools]
+workspace = true
+
+[dependencies.ndarray]
+workspace = true
+
+[dependencies.serde]
+workspace = true
+
+[dependencies.serde_json]
+workspace = true
+
+[dependencies.slide_design]
+path = '../slide_design'
+
+[lib]
+test = false
+
+[package]
+authors = ['10x Genomics']
+edition = '2021'
+name = 'hd_feature_slice'
+publish = false
+version = '0.1.0'

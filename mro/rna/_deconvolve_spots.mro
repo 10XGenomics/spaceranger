@@ -1,0 +1,15 @@
+#
+# Copyright (c) 2023 10X Genomics, Inc. All rights reserved.
+#
+
+filetype h5;
+
+stage DECONVOLVE_SPOTS(
+    in  h5   filtered_matrix,
+    in  path analysis,
+    out path deconvolution,
+    src py   "stages/spatial/deconvolve_spots",
+) split (
+) using (
+    volatile = strict,
+)

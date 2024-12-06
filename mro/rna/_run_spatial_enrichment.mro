@@ -1,0 +1,28 @@
+#
+# Copyright (c) 2020 10X Genomics, Inc. All rights reserved.
+#
+
+filetype csv;
+filetype h5;
+filetype pickle;
+filetype json;
+
+stage RUN_SPATIAL_ENRICHMENT(
+    in  h5     filtered_gene_bc_matrices_h5,
+    in  csv    tissue_positions,
+    in  json   image_scale_factors,
+    out pickle chunked_spatial_enrichment_files,
+    out csv    spatial_enrichment_csv,
+    out json   spatial_enrichment_json,
+    src py     "stages/spatial/run_spatial_enrichment",
+) split (
+    in  pickle weight_matrix_file,
+    in  h5     submatrix_path,
+    in  pickle feature_def_path,
+    in  int    row_start,
+    in  int    total_rows,
+    in  bool   has_secondary_name,
+) using (
+    mem_gb   = 6,
+    volatile = strict,
+)

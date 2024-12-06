@@ -1,0 +1,101 @@
+[[bin]]
+name = 'cr_ana'
+test = false
+
+[dependencies]
+itertools = '0.10'
+ndarray = '0.15'
+ndarray-stats = '0.5'
+noisy_float = '0.2'
+num-traits = '0.2'
+rayon = '1'
+
+[dependencies.anyhow]
+workspace = true
+
+[dependencies.bhtsne]
+branch = 'main'
+git = 'https://github.com/10XGenomics/scan-rs'
+
+[dependencies.clap]
+default-features = false
+features = ['std', 'derive']
+version = '4'
+
+[dependencies.cr_types]
+path = '../cr_types'
+
+[dependencies.diff-exp]
+branch = 'main'
+git = 'https://github.com/10XGenomics/scan-rs'
+
+[dependencies.hclust]
+branch = 'main'
+git = 'https://github.com/10XGenomics/scan-rs'
+
+[dependencies.hdf5]
+branch = 'conda_nov2021'
+features = ['conda']
+git = 'https://github.com/10XGenomics/hdf5-rust.git'
+
+[dependencies.hdf5-io]
+branch = 'main'
+git = 'https://github.com/10XGenomics/scan-rs'
+
+[dependencies.leiden]
+branch = 'main'
+git = 'https://github.com/10XGenomics/scan-rs'
+
+[dependencies.log]
+workspace = true
+
+[dependencies.martian]
+branch = 'master'
+git = 'https://github.com/martian-lang/martian-rust'
+
+[dependencies.martian-derive]
+branch = 'master'
+git = 'https://github.com/martian-lang/martian-rust'
+
+[dependencies.martian-filetypes]
+branch = 'master'
+git = 'https://github.com/martian-lang/martian-rust'
+
+[dependencies.ndarray-npy]
+default-features = false
+version = '0.8'
+
+[dependencies.scan-rs]
+branch = 'main'
+git = 'https://github.com/10XGenomics/scan-rs'
+
+[dependencies.scan-types]
+branch = 'main'
+git = 'https://github.com/10XGenomics/scan-rs'
+
+[dependencies.serde]
+features = ['derive']
+version = '1'
+
+[dependencies.sprs]
+default-features = false
+features = ['multi_thread']
+version = '0.11'
+
+[dependencies.sqz]
+branch = 'main'
+git = 'https://github.com/10XGenomics/scan-rs'
+
+[dependencies.umap-rs]
+branch = 'main'
+git = 'https://github.com/10XGenomics/scan-rs'
+
+[lib]
+test = false
+
+[package]
+authors = ['10x Genomics']
+edition = '2021'
+name = 'cr_ana'
+publish = false
+version = '0.1.0'

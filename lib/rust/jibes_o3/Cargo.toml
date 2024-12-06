@@ -1,0 +1,24 @@
+[dependencies]
+ndarray-stats = '0.5'
+numpy = '0.19'
+
+[dependencies.ndarray]
+workspace = true
+
+[dependencies.pyo3]
+workspace = true
+
+[dependencies.statrs]
+workspace = true
+
+[lib]
+crate-type = ['staticlib']
+name = 'jibes_o3'
+test = false
+
+[package]
+authors = ['10x Genomics']
+edition = '2021'
+name = 'jibes_o3'
+publish = false
+version = '0.1.0'

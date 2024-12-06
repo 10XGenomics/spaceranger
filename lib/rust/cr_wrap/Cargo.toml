@@ -1,0 +1,68 @@
+[[bin]]
+name = 'spaceranger'
+
+[dependencies]
+csv = '1'
+dirs = '5'
+hex = '0.4'
+sha2 = '0.10'
+shell-escape = '0.1.5'
+terminal_size = '0.3'
+thiserror = '1'
+tiff = '0.9.1'
+url = '2.5.2'
+
+[dependencies.anyhow]
+workspace = true
+
+[dependencies.clap]
+workspace = true
+
+[dependencies.cloud_utils]
+path = '../cloud_utils'
+
+[dependencies.cr_types]
+path = '../cr_types'
+
+[dependencies.fastq_set]
+workspace = true
+
+[dependencies.itertools]
+workspace = true
+
+[dependencies.libc]
+workspace = true
+
+[dependencies.metric]
+path = '../metric'
+
+[dependencies.ordered-float]
+workspace = true
+
+[dependencies.regex]
+workspace = true
+
+[dependencies.serde]
+workspace = true
+
+[dependencies.serde_json]
+workspace = true
+
+[dependencies.slide_design]
+path = '../slide_design'
+
+[dependencies.tempfile]
+workspace = true
+
+[dependencies.vdj_reference]
+path = '../vdj_reference'
+
+[lib]
+test = false
+
+[package]
+authors = ['10x Genomics']
+edition = '2021'
+name = 'cr_wrap'
+publish = false
+version = '0.1.0'
