@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use crate::IntoExitCode;
 use anyhow::{bail, ensure, Context, Result};
 use clap::{self, Parser};

@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use crate::arc::types::{
     validate_distance, validate_strict_fraction, ForceCellsArgs, MinCounts, MAX_CLUSTERS_RANGE,
 };
@@ -5,7 +6,7 @@ use crate::create_bam_arg::CreateBam;
 use crate::fastqs::FastqArgs;
 use crate::mrp_args::MrpArgs;
 use crate::utils::{validate_id, CliPath};
-use anyhow::{bail, Result};
+use anyhow::{bail, ensure, Result};
 use clap::{self, value_parser, Parser};
 use cr_types::sample_def::SampleDef;
 use cr_types::LibraryType;
@@ -89,6 +90,10 @@ pub struct CountArgs {
     #[clap(flatten)]
     create_bam: CreateBam,
 
+    /// Disable secondary analysis, e.g. clustering
+    #[clap(long = "nosecondary")]
+    no_secondary_analysis: bool,
+
     /// Do not execute the pipeline.
     /// Generate a pipeline invocation (.mro) file and stop.
     #[clap(long)]
@@ -100,6 +105,8 @@ pub struct CountArgs {
 
 impl CountArgs {
     pub fn to_mro_args(&self) -> Result<CountMro> {
+        use LibraryType::{Atac, GeneExpression};
+
         let c = self.clone();
         let mut sample_defs = Vec::new();
 
@@ -117,27 +124,26 @@ impl CountArgs {
                 lanes: None,
             };
             match l.library_type {
-                LibraryType::Atac => seen_atac = true,
-                LibraryType::Gex => seen_gex = true,
-                v => {
+                Atac => seen_atac = true,
+                GeneExpression => seen_gex = true,
+                library_type => {
                     bail!(
-                        "Invalid value in library_type column {}: cellranger-arc \
-                        count is only compatible with `{}` and \
-                        `{}` libraries.",
-                        v,
-                        LibraryType::Gex,
-                        LibraryType::Atac,
+                        "Invalid value in library_type column {library_type}: cellranger-arc count \
+                         is only compatible with `{GeneExpression}` and `{Atac}` libraries.",
                     );
                 }
             };
             sample_defs.extend(fq.get_sample_defs(l.library_type)?);
         }
-        if !seen_atac {
-            bail!("Invalid libraries file: missing `Chromatin Accessibility` FASTQ files");
-        }
-        if !seen_gex {
-            bail!("Invalid libraries file: missing `Gene Expression` FASTQ files");
-        }
+
+        ensure!(
+            seen_atac,
+            "Invalid libraries file: missing `Chromatin Accessibility` FASTQ files"
+        );
+        ensure!(
+            seen_gex,
+            "Invalid libraries file: missing `Gene Expression` FASTQ files"
+        );
 
         Ok(CountMro {
             sample_id: c.id.clone(),
@@ -154,6 +160,7 @@ impl CountArgs {
             peak_qval: c.peak_qval,
             k_means_max_clusters: c.k_means_max_clusters,
             no_bam: !self.create_bam.validated()?,
+            no_secondary_analysis: c.no_secondary_analysis,
         })
     }
 }
@@ -172,4 +179,5 @@ pub struct CountMro {
     pub feature_linkage_max_dist_mb: Option<NotNan<f64>>,
     pub k_means_max_clusters: Option<u64>,
     pub no_bam: bool,
+    pub no_secondary_analysis: bool,
 }

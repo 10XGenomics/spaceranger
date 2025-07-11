@@ -83,6 +83,13 @@ def load_go_deps():
         importpath = "gopkg.in/stretchr/testify.v1",
     )
 
+    _maybe_go_repository(
+        name = "in_gopkg_yaml_v3",
+        sum = "h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=",
+        version = "v3.0.1",
+        importpath = "gopkg.in/yaml.v3",
+    )
+
 def _maybe_go_repository(name, **kwargs):
     if name not in native.existing_rules():
         go_repository(name = name, **kwargs)

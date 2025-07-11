@@ -1,4 +1,5 @@
 //! Martian stage COMPUTE_SUBSAMPLED_BIN_METRICS
+#![allow(missing_docs)]
 
 use anyhow::{bail, Context, Result};
 use barcode::BarcodeContent;
@@ -11,13 +12,12 @@ use martian::prelude::*;
 use martian_derive::{make_mro, MartianStruct};
 use martian_filetypes::tabular_file::CsvFile;
 use martian_filetypes::FileTypeWrite;
-use rand::prelude::Distribution;
+use rand::rngs::SmallRng;
 use rand::SeedableRng;
-use rand_pcg::Pcg64;
+use rand_distr::{Binomial, Distribution};
 use serde::{Deserialize, Serialize};
 use shardio::{ShardReader, ShardWriter};
-use statrs::distribution::Binomial;
-use statrs::statistics::{Data, Distribution as Statrs_Distribution, Median};
+use statrs::statistics::{Data, Distribution as _, Median};
 use std::collections::{HashMap, HashSet};
 
 /// Struct with Binned BC index and  UMI count.
@@ -59,7 +59,7 @@ pub struct ComputeSubsampledBinMetricsStageOutputs {
 
 pub struct ComputeSubsampledBinMetrics;
 
-#[make_mro(mem_gb = 6, volatile = strict, stage_name = COMPUTE_SUBSAMPLED_BIN_METRICS)]
+#[make_mro(mem_gb = 16, volatile = strict, stage_name = COMPUTE_SUBSAMPLED_BIN_METRICS)]
 impl MartianMain for ComputeSubsampledBinMetrics {
     type StageInputs = ComputeSubsampledBinMetricsStageInputs;
     type StageOutputs = ComputeSubsampledBinMetricsStageOutputs;
@@ -83,7 +83,7 @@ impl MartianMain for ComputeSubsampledBinMetrics {
             .into_iter()
             .filter_map(|x| match x {
                 BarcodeContent::SpatialIndex(sbi) => Some(sbi),
-                BarcodeContent::Sequence(_) => None,
+                BarcodeContent::Sequence(_) | BarcodeContent::CellName(_) => None,
             })
             .collect();
         if barcode_coords.is_empty() {
@@ -102,8 +102,7 @@ impl MartianMain for ComputeSubsampledBinMetrics {
         {
             bcs_seen_unbinned.insert(barcode_idx);
             // this same logic is used in BIN_COUNT_MATRIX stage as well
-            let binned_barcode =
-                barcode_coords[barcode_idx as usize].extract_binned_barcode(args.bin_scale as i32);
+            let binned_barcode = barcode_coords[barcode_idx as usize].binned(args.bin_scale);
             binned_filtered_bcs.insert(binned_barcode);
         }
 
@@ -136,8 +135,7 @@ impl MartianMain for ComputeSubsampledBinMetrics {
         for (binned_bc_idx, full_umi_count) in MoleculeInfoIterator::new(&molecule_info)?
             .filter_features(|fdef| fdef.feature_type == FeatureType::Gene)?
             .filter_map(|f| {
-                let binned_bc = barcode_coords[f.barcode_idx as usize]
-                    .extract_binned_barcode(args.bin_scale as i32);
+                let binned_bc = barcode_coords[f.barcode_idx as usize].binned(args.bin_scale);
                 binned_filtered_bcs_to_barcode_idx_map
                     .contains_key(&binned_bc)
                     .then(|| (binned_filtered_bcs_to_barcode_idx_map[&binned_bc], f))
@@ -164,6 +162,7 @@ impl MartianMain for ComputeSubsampledBinMetrics {
                     5.8 / achieved_reads_per_um_sq,
                     6.1261 / achieved_reads_per_um_sq,
                     8.7 / achieved_reads_per_um_sq,
+                    12.3 / achieved_reads_per_um_sq,
                 ]
             };
 
@@ -178,7 +177,7 @@ impl MartianMain for ComputeSubsampledBinMetrics {
         let mut reads_per_bin = vec![vec![0; num_binned_bcs_under_tissue]; subsampling_grid.len()];
         let mut umis_per_bin = vec![vec![0; num_binned_bcs_under_tissue]; subsampling_grid.len()];
         let mut genes_per_bin = vec![vec![0; num_binned_bcs_under_tissue]; subsampling_grid.len()];
-        let mut rng = Pcg64::seed_from_u64(0);
+        let mut rng = SmallRng::seed_from_u64(0);
 
         // Reading in sorted chunks from disk
         let reader: ShardReader<BinnedBcIndexWithFullUmiCount> =
@@ -186,7 +185,7 @@ impl MartianMain for ComputeSubsampledBinMetrics {
         // grouping by index of the binned barcode
         for (key_option, group) in &reader
             .iter()?
-            .group_by(|count| count.as_ref().ok().map(|x| x.binned_bc_idx))
+            .chunk_by(|count| count.as_ref().ok().map(|x| x.binned_bc_idx))
         {
             let umis_in_bin: Vec<_> = group.map_ok(|x| x).collect::<Result<Vec<_>>>()?;
             let key = key_option.with_context(|| {
@@ -203,13 +202,13 @@ impl MartianMain for ComputeSubsampledBinMetrics {
                 }) {
                     if num_reads_for_umi >= 1 {
                         let binomial_rv =
-                            Binomial::new(*subsampling_rate, num_reads_for_umi as u64).context(
-                                format!("Failed on p={subsampling_rate}, n={num_reads_for_umi}"),
-                            )?;
-
+                            Binomial::new(num_reads_for_umi as u64, *subsampling_rate)
+                                .with_context(|| {
+                                    format!("Failed on p={subsampling_rate}, n={num_reads_for_umi}")
+                                })?;
                         let subsampled_reads = binomial_rv.sample(&mut rng);
-                        if subsampled_reads >= 1.0 {
-                            reads_per_bin[index][key] += subsampled_reads as i32;
+                        if subsampled_reads >= 1 {
+                            reads_per_bin[index][key] += subsampled_reads;
                             umis_per_bin[index][key] += 1;
                             set_of_genes_in_bin.insert((library_idx, gene_idx));
                         }

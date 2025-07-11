@@ -1,4 +1,5 @@
 //! Args for the reanalyze sub-command
+#![allow(missing_docs)]
 
 use crate::arc::aggr::AggrDefs;
 use crate::arc::types::{validate_distance, ForceCellsArgs, MinCounts, MAX_CLUSTERS_RANGE};

@@ -16,8 +16,9 @@ stage CLOUPE_TILE_IMAGES(
     src py     "stages/cloupe/cloupe_tile_images",
 ) split (
 ) using (
-    mem_gb  = 3,
-    vmem_gb = 12,
+    mem_gb   = 3,
+    vmem_gb  = 12,
+    volatile = strict,
 )
 
 stage MERGE_TISSUE_FILES(

@@ -1,5 +1,4 @@
-#![allow(dead_code, unused_variables)]
-
+#![allow(missing_docs)]
 use super::{
     create_feature_config, multiconst, AntigenSpecificityRow, FunctionalMapRow, Library,
     MultiConfigCsv, ProbeBarcodeIterationMode, SampleRow,
@@ -7,13 +6,10 @@ use super::{
 use crate::cmo_set::load_default_cmo_set;
 use crate::config::{get_default_overhang_set, libsconst, ChemistrySet, PROBE_BARCODE_ID_GROUPING};
 use anyhow::{bail, ensure, Context, Result};
-use barcode::whitelist::{categorize_multiplexing_barcode_id, MultiplexingBarcodeType};
+use barcode::whitelist::{categorize_rtl_multiplexing_barcode_id, RTLMultiplexingBarcodeType};
 use cr_types::chemistry::{AutoOrRefinedChemistry, ChemistryDef, ChemistryName, ChemistrySpecs};
 use cr_types::reference::feature_extraction::FeatureExtractor;
-use cr_types::reference::feature_reference::{
-    BeamMode, FeatureConfig, FeatureReference, FeatureType,
-};
-use cr_types::reference::reference_info::ReferenceInfo;
+use cr_types::reference::feature_reference::{BeamMode, FeatureConfig, FeatureReference};
 use cr_types::{FeatureBarcodeType, LibraryType, VdjChainType};
 use fastq_set::WhichRead;
 use itertools::Itertools;
@@ -24,6 +20,7 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
 use std::sync::Arc;
+use strsim::levenshtein;
 use transcriptome::Transcriptome;
 use vdj_reference::VdjReference;
 
@@ -61,14 +58,45 @@ pub fn check_duplicate_libraries(libs: &[Library]) -> Result<()> {
     Ok(())
 }
 
+fn find_approximate_matches<'a>(
+    input: &'a str,
+    set: &'a TxHashSet<String>,
+    max_distance: usize,
+) -> impl Iterator<Item = &'a str> {
+    set.iter()
+        .map(String::as_str)
+        .filter(move |item| levenshtein(input, item) <= max_distance)
+}
+
+struct InvalidIdsResult<'a> {
+    invalid_ids: Vec<&'a str>,
+    possible_typos: Vec<(&'a str, Vec<&'a str>)>,
+}
+
 fn get_invalid_id_entries<'a>(
-    valid_options: &TxHashSet<String>,
+    valid_options: &'a TxHashSet<String>,
     entries: impl IntoIterator<Item = &'a str>,
-) -> Vec<&'a str> {
-    entries
+    search_for_typos: bool,
+) -> InvalidIdsResult<'a> {
+    let invalid_ids: Vec<&'a str> = entries
         .into_iter()
         .filter(|x| !valid_options.contains(*x))
-        .collect()
+        .collect();
+    let mut possible_typos: Vec<_> = vec![];
+    if search_for_typos {
+        possible_typos = invalid_ids
+            .iter()
+            .filter_map(|word| {
+                let approx: Vec<_> = find_approximate_matches(word, valid_options, 4).collect();
+                (!approx.is_empty()).then_some((*word, approx))
+            })
+            .collect();
+    }
+
+    InvalidIdsResult {
+        invalid_ids,
+        possible_typos,
+    }
 }
 
 fn test_reserved_words(words: &TxHashSet<String>) -> Vec<String> {
@@ -112,7 +140,7 @@ pub fn check_libraries_rtl(cfg: &MultiConfigCsv) -> Result<()> {
     ensure!(
         unsupported.is_empty(),
         "These library types are not compatible with Flex: {}",
-        unsupported.iter().join(", ")
+        unsupported.iter().format(", ")
     );
     if supported.contains(&LibraryType::Crispr) {
         ensure!(
@@ -130,12 +158,10 @@ pub fn check_libraries(
     fref: Option<Arc<FeatureReference>>,
     is_pd: bool,
     hostname: &str,
-    max_multiplexing_tags: usize,
 ) -> Result<()> {
     use Library::{Bcl2Fastq, BclProcessor};
 
-    for (i, lib) in cfg.libraries.0.iter().enumerate() {
-        let row = i + 1;
+    for lib in &cfg.libraries.0 {
         let fastq_path = match &lib {
             Bcl2Fastq { fastqs, .. } => fastqs,
             BclProcessor { fastq_path, .. } => fastq_path,
@@ -179,10 +205,10 @@ pub fn check_libraries(
         if let Some(feature_type) = lib.library_type().feature_barcode_type() {
             if let Some(fref) = &fref {
                 ensure!(
-                    fref.feature_maps
-                        .contains_key(&FeatureType::Barcode(feature_type)),
-                    "You declared a library with feature_type = '{feature_type}', but \
+                    fref.feature_maps.contains_key(&feature_type),
+                    "TXRNGR10014: You declared a library with feature_type = '{feature_type}', but \
                      there are no features with that feature_type in the feature reference.",
+                    feature_type = feature_type.as_str(),
                 );
             }
         }
@@ -201,12 +227,6 @@ pub fn check_libraries(
             ChemistryName::Custom,
             lib.physical_library_id(),
         );
-    }
-
-    // Check that Antigen Capture feature definitions match
-    // the 10x allowed whitelist in case of _CS runs
-    if cfg.libraries.has_antigen_capture() && !is_pd {
-        fref.as_ref().unwrap().check_tenx_beam()?;
     }
 
     // Detect if we are in Beam-T or Beam-Ab mode
@@ -251,7 +271,6 @@ pub fn check_samples(
     cfg: &MultiConfigCsv,
     fref: Option<Arc<FeatureReference>>,
     is_pd: bool,
-    max_multiplexing_tags: usize,
 ) -> Result<()> {
     let Some(samples) = &cfg.samples else {
         return Ok(());
@@ -271,7 +290,9 @@ pub fn check_samples(
     );
 
     // Validate CMO IDs
-    let multiplexing_ids = fref.map_or_else(TxHashSet::default, |x| x.multiplexing_ids());
+    let multiplexing_ids = fref
+        .as_ref()
+        .map_or_else(TxHashSet::default, |x| x.multiplexing_ids());
 
     let invalid_multiplexing_ids = test_reserved_words(&multiplexing_ids);
     ensure!(
@@ -282,17 +303,70 @@ pub fn check_samples(
     );
 
     for sample in &samples.0 {
-        let invalid_entries = get_invalid_id_entries(
+        let invalid_result = get_invalid_id_entries(
             &multiplexing_ids,
             sample.cmo_ids.iter().flatten().map(String::as_str),
+            true,
         );
+        if !invalid_result.invalid_ids.is_empty() {
+            let mut err_msg = format!(
+                "Unknown cmo_ids ('{}') provided for sample '{}', please ensure you are either \
+                 using valid 10x CMO IDs or are providing the correct [gene-expression] cmo-set.",
+                invalid_result.invalid_ids.join("', '"),
+                sample.sample_id,
+            );
+
+            err_msg = format!(
+                "{err_msg}\n\nValid IDs are currently:\n{}",
+                multiplexing_ids.iter().sorted().join("\n")
+            );
+
+            if !invalid_result.possible_typos.is_empty() {
+                err_msg = format!(
+                    "{err_msg}\n\n\
+                     Did you perhaps mean any of the following? (Input -> Intended Value)?\n{}",
+                    invalid_result
+                        .possible_typos
+                        .iter()
+                        .map(|z| format!("{} -> {}\n", z.0, z.1.join(" or ")))
+                        .join("\n")
+                );
+            }
+            bail!(err_msg);
+        }
+    }
+
+    // Validate HASHTAG IDs
+    if samples.has_hashtag_ids() {
+        let hashtag_ids: TxHashSet<String> = samples
+            .0
+            .iter()
+            .filter_map(|s| s.sample_barcode_ids(ProbeBarcodeIterationMode::All))
+            .flatten()
+            .map(ToString::to_string)
+            .collect();
+        let invalid_hashtag_ids = test_reserved_words(&hashtag_ids);
         ensure!(
-            invalid_entries.is_empty(),
-            "Unknown cmo_ids ('{}') provided for sample '{}', please ensure you are either using \
-            valid 10x CMO IDs or are providing the correct [gene-expression] cmo-set.",
-            invalid_entries.join("', '"),
-            sample.sample_id
+            invalid_hashtag_ids.is_empty(),
+            "Invalid hashtag_ids ('{}') provided, please ensure you are not using the reserved words \
+            'blank', 'multiplet', or 'unassigned'.",
+            invalid_hashtag_ids.join("', '")
         );
+        let antibody_ids = fref.map_or_else(TxHashSet::default, |x| x.antibody_ids());
+        for sample in &samples.0 {
+            let invalid_result = get_invalid_id_entries(
+                &antibody_ids,
+                sample.hashtag_ids.iter().flatten().map(String::as_str),
+                false,
+            );
+            ensure!(
+                invalid_result.invalid_ids.is_empty(),
+                "Unknown hashtag_ids ('{}') provided for sample '{}', please ensure that you are using \
+                IDs that correspond to a valid Antibody Capture feature.",
+                invalid_result.invalid_ids.join("', '"),
+                sample.sample_id
+            );
+        }
     }
 
     // Validate probe barcode IDs
@@ -310,36 +384,40 @@ pub fn check_samples(
                         // so just use a default in case we have an invalid library type combination.
                         .unwrap_or(ChemistryName::MFRP_RNA)
                 }))
-                .barcode_whitelist()
+                .barcode_whitelist_source()?
                 .probe()
-                .as_source(true)?
                 .get_ids()
             })
             .flatten_ok()
             .try_collect()?;
 
         for sample in &samples.0 {
-            let invalid_entries = get_invalid_id_entries(
-                &probe_barcode_whitelist_ids
+            {
+                let valid_options: TxHashSet<_> = probe_barcode_whitelist_ids
                     .iter()
                     .map(ToString::to_string)
-                    .collect(),
-                sample
-                    .sample_barcode_ids(ProbeBarcodeIterationMode::All)
-                    .unwrap(),
-            );
-            ensure!(
-                invalid_entries.is_empty(),
-                "Unknown probe_barcode_ids ('{}') provided for sample '{}', please ensure you are \
-                using IDs from the following list of valid 10x probe barcode IDs: {}",
-                invalid_entries.join("', '"),
-                sample.sample_id,
-                probe_barcode_whitelist_ids
-                    .iter()
-                    .sorted()
-                    .dedup()
-                    .join(", "),
-            );
+                    .collect();
+                let invalid_result = get_invalid_id_entries(
+                    &valid_options,
+                    sample
+                        .sample_barcode_ids(ProbeBarcodeIterationMode::All)
+                        .unwrap(),
+                    false,
+                );
+                ensure!(
+                    invalid_result.invalid_ids.is_empty(),
+                    "Unknown probe_barcode_ids ('{}') provided for sample '{}', please ensure you \
+                     are using IDs from the following list of valid 10x probe barcode IDs: {}",
+                    invalid_result.invalid_ids.join("', '"),
+                    sample.sample_id,
+                    probe_barcode_whitelist_ids
+                        .iter()
+                        .sorted()
+                        .dedup()
+                        .join(", "),
+                );
+            }
+
             for grouping in sample
                 .sample_barcode_id_groupings(ProbeBarcodeIterationMode::All)
                 .unwrap()
@@ -368,16 +446,17 @@ pub fn check_samples(
             .map(ToString::to_string)
             .collect();
         for sample in &samples.0 {
-            let invalid_entries = get_invalid_id_entries(
+            let invalid_result = get_invalid_id_entries(
                 &default_overhang_ids,
                 sample
                     .sample_barcode_ids(ProbeBarcodeIterationMode::All)
                     .unwrap(),
+                true,
             );
             ensure!(
-                invalid_entries.is_empty(),
+                invalid_result.invalid_ids.is_empty(),
                 "Unknown overhang_ids ('{}') provided for sample '{}'.",
-                invalid_entries.join("', '"),
+                invalid_result.invalid_ids.iter().join("', '"),
                 sample.sample_id
             );
         }
@@ -392,16 +471,16 @@ fn check_probe_barcode_id_grouping(
     has_ab_lib: bool,
     has_cr_lib: bool,
 ) -> Result<()> {
-    use MultiplexingBarcodeType::{Antibody, Crispr, RTL};
+    use RTLMultiplexingBarcodeType::{Antibody, Crispr, Gene};
 
     let barcode_types: Vec<_> = barcode_ids
         .iter()
         .copied()
-        .map(categorize_multiplexing_barcode_id)
+        .filter_map(categorize_rtl_multiplexing_barcode_id)
         .collect();
     match (has_gex_lib, has_ab_lib, has_cr_lib) {
         (false, false, false) => Ok(()),
-        (true, false, false) => match_one(&barcode_types, RTL),
+        (true, false, false) => match_one(&barcode_types, Gene),
         (false, true, false) => match_one(&barcode_types, Antibody),
         (true, true, false) => match_two(&barcode_types, Antibody),
         (true, false, true) => match_two(&barcode_types, Crispr),
@@ -409,12 +488,12 @@ fn check_probe_barcode_id_grouping(
             // Can match one, two, or three.
             // Order should always be RTL+AB+CR
             [] => bail!("no barcode ID provided"),
-            [RTL] | [RTL, Antibody] | [RTL, Crispr] | [RTL, Antibody, Crispr] => Ok(()),
-            [other_type] => bail!("expected a {RTL} barcode ID, not {other_type}"),
+            [Gene] | [Gene, Antibody] | [Gene, Crispr] | [Gene, Antibody, Crispr] => Ok(()),
+            [other_type] => bail!("expected a {Gene} barcode ID, not {other_type}"),
             anything_else => bail!(
-                "expected either a single {RTL} barcode ID, \
-                 or a pair of {RTL} + {Antibody} or {RTL} + {Crispr} barcode IDs, \
-                 or a triple of {RTL} + {Antibody} + {Crispr} barcode IDs, not {}",
+                "expected either a single {Gene} barcode ID, \
+                 or a pair of {Gene} + {Antibody} or {Gene} + {Crispr} barcode IDs, \
+                 or a triple of {Gene} + {Antibody} + {Crispr} barcode IDs, not {}",
                 anything_else.iter().join(" + "),
             ),
         },
@@ -425,8 +504,8 @@ fn check_probe_barcode_id_grouping(
 
 /// Match a single barcode of the provided type.
 fn match_one(
-    barcode_types: &[MultiplexingBarcodeType],
-    expected: MultiplexingBarcodeType,
+    barcode_types: &[RTLMultiplexingBarcodeType],
+    expected: RTLMultiplexingBarcodeType,
 ) -> Result<()> {
     match barcode_types {
         [] => bail!("no barcode ID provided"),
@@ -441,23 +520,23 @@ fn match_one(
 
 /// Match one or two barcodes; one must be RTL.
 fn match_two(
-    barcode_types: &[MultiplexingBarcodeType],
-    expected: MultiplexingBarcodeType,
+    barcode_types: &[RTLMultiplexingBarcodeType],
+    expected: RTLMultiplexingBarcodeType,
 ) -> Result<()> {
-    use MultiplexingBarcodeType::RTL;
+    use RTLMultiplexingBarcodeType::Gene;
     match barcode_types {
         [] => bail!("no barcode ID provided"),
-        [RTL] => Ok(()),
-        [other_type] => bail!("expected a {RTL} barcode ID, not {other_type}"),
-        [RTL, other] if *other == expected => Ok(()),
+        [Gene] => Ok(()),
+        [other_type] => bail!("expected a {Gene} barcode ID, not {other_type}"),
+        [Gene, other] if *other == expected => Ok(()),
 
-        [other, RTL] if *other == expected => bail!(
-            "when pairing {RTL} and {expected} barcode IDs, \
-             provide the {RTL} barcode ID first"
+        [other, Gene] if *other == expected => bail!(
+            "when pairing {Gene} and {expected} barcode IDs, \
+             provide the {Gene} barcode ID first"
         ),
         anything_else => bail!(
-            "expected either a {RTL} barcode ID or a pair of \
-             {RTL} + {expected} barcode IDs, not {}",
+            "expected either a {Gene} barcode ID or a pair of \
+             {Gene} + {expected} barcode IDs, not {}",
             anything_else.iter().join(" + "),
         ),
     }
@@ -541,6 +620,8 @@ pub fn check_gem_wells(libs: &[Library]) -> Result<()> {
 }
 
 pub fn check_physical_library_ids(libs: &[Library]) -> Result<()> {
+    use multiconst::LIBRARIES;
+
     let mut mapping = TxHashMap::default();
     let mut num_vdj_auto_libs = 0;
     for (i, lib) in libs.iter().enumerate() {
@@ -552,28 +633,24 @@ pub fn check_physical_library_ids(libs: &[Library]) -> Result<()> {
             (lib.library_type(), lib.gem_well()),
             (i, lib.physical_library_id()),
         ) {
-            if pli != lib.physical_library_id() {
-                // TODO: update this message when gem_well comes along
-                bail!(
-                    r#"[{}] invalid physical_library_id on row {}: '{}'
-This feature_type '{}' has already been given a physical_library_id: '{}' on row {}"#,
-                    multiconst::LIBRARIES,
-                    i + 2,
-                    lib.physical_library_id(),
-                    lib.library_type(),
-                    pli,
-                    j + 2
-                );
-            }
+            ensure!(
+                pli == lib.physical_library_id(),
+                "[{LIBRARIES}] invalid physical_library_id on row {row0}: '{library0}'. \
+                 This feature_type '{library_type}' has already been given a physical_library_id: \
+                 '{library1}' on row {row1}",
+                library_type = lib.library_type(),
+                library0 = lib.physical_library_id(),
+                library1 = pli,
+                row0 = i + 2,
+                row1 = j + 2
+            );
         }
     }
-    if num_vdj_auto_libs > 3 {
-        bail!(
-            r#"[{}] invalid physical_library_id(s): found {} VDJ libraries, but we expect at most 3 VDJ libraries"#,
-            multiconst::LIBRARIES,
-            num_vdj_auto_libs,
-        );
-    }
+    ensure!(
+        num_vdj_auto_libs <= 3,
+        "[{LIBRARIES}] invalid physical_library_id(s): found {num_vdj_auto_libs} VDJ libraries, \
+         but we expect at most 3 VDJ libraries",
+    );
     Ok(())
 }
 
@@ -644,17 +721,9 @@ pub fn check_feature_reference<D: Display>(
         );
     }
     let rdr = BufReader::new(File::open(ref_path)?);
-    let fref = FeatureReference::new(
-        &ReferenceInfo::default(),
-        &Transcriptome::dummy(),
-        Some(rdr),
-        None,
-        None,
-        None,
-        feature_config,
-    )?;
+    let fref = FeatureReference::new(&[], None, Some(rdr), None, None, None, feature_config)?;
     let fref = Arc::new(fref);
-    let _ = FeatureExtractor::new(fref.clone(), None, None)?;
+    let _ = FeatureExtractor::new(fref.clone(), None)?;
     Ok(fref)
 }
 
@@ -666,7 +735,6 @@ pub fn build_feature_reference_with_cmos(
     cfg: &MultiConfigCsv,
     is_pd: bool,
     hostname: &str,
-    max_multiplexing_tags: usize,
 ) -> Result<(Option<Arc<FeatureReference>>, Option<bool>)> {
     let feature_reference = cfg
         .feature
@@ -684,6 +752,7 @@ pub fn build_feature_reference_with_cmos(
                     cfg.antigen_specificity.as_ref(),
                     cfg.functional_map.as_ref(),
                     cfg.libraries.beam_mode(),
+                    cfg.samples.as_ref(),
                 )
                 .as_ref(),
             )
@@ -711,8 +780,8 @@ pub fn build_feature_reference_with_cmos(
         return Ok((feature_reference, None));
     }
 
-    let (feature_reference, tenx_cmos) = validate_cmo_set(feature_reference, cmo_set)?
-        .build_feature_reference(is_pd, max_multiplexing_tags)?;
+    let (feature_reference, tenx_cmos) =
+        validate_cmo_set(feature_reference, cmo_set)?.build_feature_reference(is_pd)?;
     Ok((Some(feature_reference), Some(tenx_cmos)))
 }
 
@@ -722,11 +791,12 @@ fn check_cmo_set<D: Display>(
     hostname: &str,
 ) -> Result<Arc<FeatureReference>> {
     let fref = check_feature_reference(ref_ctx, ref_path, hostname, None)?;
-    for (i, fdef) in fref.feature_defs.iter().enumerate() {
-        if !fdef.feature_type.is_multiplexing() {
-            bail!("All CMO set definitions must be of feature_type 'Multiplexing Capture'");
-        }
-    }
+    ensure!(
+        fref.feature_defs
+            .iter()
+            .all(|x| x.feature_type.is_multiplexing()),
+        "All CMO set definitions must be of feature_type 'Multiplexing Capture'"
+    );
     Ok(fref)
 }
 
@@ -756,14 +826,12 @@ pub fn check_vdj_reference<D: Display>(
 }
 
 pub fn check_library_combinations(libraries: &[Library]) -> Result<()> {
-    let mut has_multiplexing = false;
     let mut has_vdj = false;
     let mut has_antigen = false;
     let mut has_gex = false;
     let mut has_crispr = false;
     let mut uniq_vdj_features: HashSet<VdjChainType> = HashSet::new();
     for lib in libraries {
-        has_multiplexing |= lib.is_multiplexing();
         has_vdj |= lib.is_vdj();
         has_antigen |= lib.is_antigen();
         has_gex |= lib.is_gex();
@@ -797,6 +865,9 @@ pub fn check_library_combinations(libraries: &[Library]) -> Result<()> {
 /// Currently only Flex libraries can use this feature, so make sure that anything
 /// specified here is a Flex chemistry.
 pub fn check_library_chemistries(libraries: &[Library]) -> Result<()> {
+    use libsconst::CHEMISTRY;
+    use multiconst::LIBRARIES;
+
     let chems: Vec<_> = libraries.iter().filter_map(Library::chemistry).collect();
 
     // All None is valid.
@@ -811,16 +882,14 @@ pub fn check_library_chemistries(libraries: &[Library]) -> Result<()> {
         .collect();
     ensure!(
         auto_chems.is_empty(),
-        "[{}] Specifying auto chemistries at the library level is not supported: ({}).",
-        multiconst::LIBRARIES,
-        auto_chems.iter().format(", "),
+        "[{LIBRARIES}] Specifying auto chemistries at the library level is not supported: ({}).",
+        auto_chems.iter().format(", ")
     );
 
     // Ensure that if they provided one, they provided all.
     ensure!(
         chems.len() == libraries.len(),
-        "[{}] A chemistry name must be provided for all libraries or none.",
-        multiconst::LIBRARIES
+        "[{LIBRARIES}] A chemistry name must be provided for all libraries or none."
     );
 
     // Ensure that everything is a flex chemistry.
@@ -830,8 +899,8 @@ pub fn check_library_chemistries(libraries: &[Library]) -> Result<()> {
         .collect();
     ensure!(
         non_flex_chems.is_empty(),
-        "[{}] Only Flex assays may specify chemistry at the per-library level; invalid chemistries: {}",
-        multiconst::LIBRARIES,
+        "[{LIBRARIES}] Only Flex assays may specify chemistry at the per-library level; \
+         invalid chemistries: {}",
         non_flex_chems.iter().unique().format(", "),
     );
 
@@ -849,10 +918,9 @@ pub fn check_library_chemistries(libraries: &[Library]) -> Result<()> {
             .collect();
         ensure!(
             unique_chems.len() <= 1,
-            "[{}] Conflicting {} for {lib_type} libraries ({}); manual chemistry must be the same for all libraries of the same type.",
-            multiconst::LIBRARIES,
-            libsconst::CHEMISTRY,
-            unique_chems.iter().format(", ")
+            "[{LIBRARIES}] Conflicting {CHEMISTRY} for {lib_type} libraries ({chems}); \
+             manual chemistry must be the same for all libraries of the same type.",
+            chems = unique_chems.iter().format(", ")
         );
 
         if let Some(chem) = unique_chems.into_iter().at_most_one().unwrap() {
@@ -860,9 +928,7 @@ pub fn check_library_chemistries(libraries: &[Library]) -> Result<()> {
             let chem = chem.refined().unwrap();
             ensure!(
                 chem.compatible_with_library_type(lib_type),
-                "[{}] The {} {chem} is not valid for the feature type {lib_type}",
-                multiconst::LIBRARIES,
-                libsconst::CHEMISTRY,
+                "[{LIBRARIES}] The {CHEMISTRY} {chem} is not valid for the feature type {lib_type}",
             );
         }
     }
@@ -957,13 +1023,11 @@ pub enum CmoSetAction {
     InFeatureRef(Arc<FeatureReference>),
 }
 
+const MAX_MULTIPLEXING_TAGS: usize = 12;
+
 impl CmoSetAction {
     /// Construct the feature reference given the policy and data in self.
-    pub fn build_feature_reference(
-        self,
-        is_pd: bool,
-        max_multiplexing_tags: usize,
-    ) -> Result<(Arc<FeatureReference>, bool)> {
+    pub fn build_feature_reference(self, is_pd: bool) -> Result<(Arc<FeatureReference>, bool)> {
         use CmoSetAction::{Builtin, InCmoSet, InFeatureRef, MergeBuiltin};
         let tenx_cmos: bool;
         let (feature_ref, tenx_cmos) = match self {
@@ -1008,13 +1072,15 @@ impl CmoSetAction {
                 acc
             }
         });
-        if num_multiplexing_tags > max_multiplexing_tags && !is_pd {
-            bail!(
-                "More than the maximum number of supported multiplexing tags ({} > {}) have been provided.",
-                num_multiplexing_tags,
-                max_multiplexing_tags
+
+        if !is_pd {
+            ensure!(
+                num_multiplexing_tags <= MAX_MULTIPLEXING_TAGS,
+                "More than the maximum number of supported multiplexing tags \
+                 ({num_multiplexing_tags} > {MAX_MULTIPLEXING_TAGS}) have been provided.",
             );
         }
+
         for fdef in &feature_ref.feature_defs {
             if !fdef.feature_type.is_multiplexing() {
                 continue;
@@ -1023,8 +1089,8 @@ impl CmoSetAction {
                 bail!("Multiplexing Capture feature id field cannot be empty.");
             } else if let Some(pos) = fdef.id.find('*') {
                 bail!(
-                    r#"Multiplexing Capture feature id field contains illegal character at position {}: '{}'
-Multiplexing Capture feature ids may only ASCII characters, and must not use whitespace, asterisk, slash, quote or comma characters."#,
+                    r"Multiplexing Capture feature id field contains illegal character at position {}: '{}'
+Multiplexing Capture feature ids may only ASCII characters, and must not use whitespace, asterisk, slash, quote or comma characters.",
                     pos + 1,
                     fdef.id,
                 );

@@ -22,7 +22,6 @@ stage MAKE_FASTQS_PREFLIGHT_LOCAL(
     in int[]    lanes,
     in map[]    specs,
     in string   bcl2fastq2_args,
-    in string   barcode_whitelist,
     in string   bc_read_type,
     in int      bc_start_index,
     in int      bc_length,
@@ -88,8 +87,7 @@ def check_read_params(args, runinfo):
             > read_info_by_read_type[args.bc_read_type]["read_length"]
         ):
             martian.exit(
-                "Barcode out of bounds (%s:%d-%d)"
-                % (args.bc_read_type, args.bc_start_index, args.bc_start_index + args.bc_length)
+                f"Barcode out of bounds ({args.bc_read_type}:{args.bc_start_index}-{args.bc_start_index + args.bc_length})"
             )
 
     # if sample index reads not generated, must specify lanes to demux
@@ -106,8 +104,7 @@ def check_read_params(args, runinfo):
             > read_info_by_read_type[args.umi_read_type]["read_length"]
         ):
             martian.exit(
-                "UMI out of bounds (%s:%d-%d)"
-                % (args.umi_read_type, args.umi_start_index, args.umi_start_index + args.umi_length)
+                f"UMI out of bounds ({args.umi_read_type}:{args.umi_start_index}-{args.umi_start_index + args.umi_length})"
             )
 
 
@@ -148,13 +145,6 @@ def main(args, outs):
     ok, msg = tk_preflight.check_ld_library_path()
     if not ok:
         martian.exit(msg)
-
-    if args.barcode_whitelist:
-        whitelist_candidates = args.barcode_whitelist.split(",")
-        for candidate in whitelist_candidates:
-            tk_preflight.check_barcode_whitelist(candidate)
-    else:
-        martian.exit("Must specify a barcode whitelist.")
 
     if args.check_executables:
         print("Checking bcl2fastq...")

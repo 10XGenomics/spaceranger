@@ -14,7 +14,7 @@ from cellranger.spatial.tissue_regist import (
     adjust_image_contrast,
 )
 from cellranger.spatial.transform import (
-    get_scaled_transform,
+    get_scaled_similarity_transform,
     reflection_matrix,
     warp_img,
     warp_xy,
@@ -74,7 +74,7 @@ class MatchResults(NamedTuple):
     metrics: dict
     num_matches: int
     transform_mat: np.ndarray
-    reflection_mat: np.ndarray
+    reflected_over_x: bool
     debug_matches_image: np.ndarray
 
 
@@ -142,7 +142,7 @@ def rigid_register(
             metrics=metrics,
             num_matches=filtered_match_info.n_matches,
             transform_mat=transform_mat,
-            reflection_mat=reflection_mat,
+            reflected_over_x=refl_x,
             debug_matches_image=draw_matches(
                 reflected_img,
                 filtered_match_info.matched_kp1_xy,
@@ -178,9 +178,10 @@ def rigid_register(
 def feature_matching_based_rigid_registration(  # pylint: disable=too-many-locals
     regist_target_img: np.ndarray,
     cyta_img: np.ndarray,
+    *,
     fiducial_mask: np.ndarray | None = None,
-    target_scale_factor: float | None = None,
-    cyta_scale_factor: float | None = None,
+    target_scale_factor: float,
+    cyta_scale_factor: float,
     matched_features_debug: str | None = None,
 ) -> tuple[np.ndarray | None, dict]:
     """Rigid registration using feature matching.
@@ -189,8 +190,8 @@ def feature_matching_based_rigid_registration(  # pylint: disable=too-many-local
         regist_target_img (np.ndarray): grayscale target tissue image.
         cyta_img (np.ndarray): grayscale CytaAssist image.
         fiducial_mask (np.ndarray | None, optional): binary mask used in masking out fiducial locations in feature detection. Defaults to None.
-        target_scale_factor (float | None, optional): used for scaling the target image. Defaults to None.
-        cyta_scale_factor (float | None, optional): used for scaling the cyta image. Defaults to None.
+        target_scale_factor (float): used for scaling the target image. Defaults to None.
+        cyta_scale_factor (float): used for scaling the cyta image. Defaults to None.
         matched_features_debug (str | None, optional): path to write the feature matching image to. Defaults to None.
 
     Returns:
@@ -210,18 +211,18 @@ def feature_matching_based_rigid_registration(  # pylint: disable=too-many-local
     )
     target_input_shape = regist_target_img.shape
     cyta_input_shape = cyta_img.shape
-    if target_scale_factor is not None:
-        processed_target_img = transform.rescale(
-            regist_target_img, target_scale_factor, preserve_range=True
+    assert target_scale_factor is not None
+    processed_target_img = transform.rescale(
+        regist_target_img, target_scale_factor, preserve_range=True
+    ).astype(np.uint8)
+    assert cyta_scale_factor is not None
+    processed_cyta_img = transform.rescale(cyta_img, cyta_scale_factor, preserve_range=True).astype(
+        np.uint8
+    )
+    if fiducial_mask is not None:
+        fiducial_mask = transform.rescale(
+            fiducial_mask, cyta_scale_factor, preserve_range=True
         ).astype(np.uint8)
-    if cyta_scale_factor is not None:
-        processed_cyta_img = transform.rescale(
-            cyta_img, cyta_scale_factor, preserve_range=True
-        ).astype(np.uint8)
-        if fiducial_mask is not None:
-            fiducial_mask = transform.rescale(
-                fiducial_mask, cyta_scale_factor, preserve_range=True
-            ).astype(np.uint8)
 
     processed_target_img = adjust_image_contrast(processed_target_img, clip_limit=0.01, invert=True)
     processed_cyta_img = adjust_image_contrast(processed_cyta_img, clip_limit=0.01, invert=True)
@@ -247,16 +248,18 @@ def feature_matching_based_rigid_registration(  # pylint: disable=too-many-local
         )
         return None, match_results.metrics
 
-    # Finalize the transformation
-    processed_cyta_to_target_mat = match_results.transform_mat @ match_results.reflection_mat
-    cyta_to_target_mat = get_scaled_transform(
-        mat=processed_cyta_to_target_mat,
+    # Scale transformation to input-scale
+    cyta_to_target_mat = get_scaled_similarity_transform(
+        mat=match_results.transform_mat,
         src_shape_rc=cyta_input_shape,
         dst_shape_rc=target_input_shape,
-        transformation_src_shape_rc=cyta_img_obj.image.shape[:2],
-        transformation_dst_shape_rc=target_img_obj.image.shape[:2],
+        transformation_src_shape_rc=cyta_img_obj.image.shape,
+        transformation_dst_shape_rc=target_img_obj.image.shape,
     )
-    # This transformation is in input-scale
+    # Add back reflection if necessary
+    cyta_to_target_mat = cyta_to_target_mat @ reflection_matrix(
+        match_results.reflected_over_x, False, cyta_input_shape
+    )
     final_scale = transform.AffineTransform(cyta_to_target_mat).scale
     match_results.metrics[FM_ESTIMATED_SCALE_KEY] = np.mean(final_scale)
 

@@ -1,85 +1,82 @@
-use anyhow::Result;
+#![deny(missing_docs)]
+use anyhow::{bail, Context, Result};
 use diff_exp::diff_exp::{DiffExpResult, SSeqParams};
 use diff_exp::{compute_sseq_params, sseq_differential_expression};
-use numpy::{IntoPyArray, PyArray1};
+use numpy::{Element, IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBool, PyDict, PyList};
-//use scan_types::label_class::make_labelclass_from_feature_type_vector;
-use sprs::CsMatI;
+use rayon::ThreadPoolBuilder;
+use sprs::CsMatBase;
 use sqz::mat::AdaptiveMatOwned;
 use sqz::matrix_map::MatrixIntoMap;
+use std::sync::Once;
 
-type MatrixType = CsMatI<u32, u32>;
+static INIT_THREAD_POOL: Once = Once::new();
 
-// fn push_attr_to_list(list: &mut Vec<String>, obj: &PyAny, attr: &str) {
-//     list.push(obj.getattr(attr).unwrap().extract().unwrap());
-// }
-// Converts from a Python CountMatrix class to a Rust FeatureBarcodeMatrix struct
-// fn convert_matrix(  _py: Python<'_>,
-//     count_matrix: &PyAny) -> Result<AdaptiveFeatureBarcodeMatrix> {
-//     let matrix = count_matrix.getattr("m").unwrap();
-//     let indices: Vec<u32> = matrix.getattr("indices").unwrap().extract().unwrap();
-//     let indptr: Vec<u32> = matrix.getattr("indptr").unwrap().extract().unwrap();
-//     let data: Vec<u32> = matrix.getattr("data").unwrap().extract().unwrap();
-//     let barcodes: Vec<Vec<u8>> = count_matrix.getattr("bcs").unwrap().extract().unwrap();
-//     let barcodes : Vec<String> = barcodes.iter().map(|x| {String::from_utf8(x.to_vec()).unwrap()}).collect();
-//     let feature_defs: &PyList = count_matrix.getattr("feature_ref").unwrap().getattr("feature_defs").unwrap().extract().unwrap();
-//     let n_feats = feature_defs.len();
-//     let mut feature_ids = Vec::<String>::with_capacity(n_feats);
-//     let mut feature_names = Vec::<String>::with_capacity(n_feats);
-//     let mut feature_types = Vec::<String>::with_capacity(n_feats);
-//     for feature_def in feature_defs {
-//         push_attr_to_list(&mut feature_ids, feature_def, "id");
-//         push_attr_to_list(&mut feature_names, feature_def, "name");
-//         push_attr_to_list(&mut feature_types, feature_defs, "feature_type");
-//     }
-//     let feature_type_label = make_labelclass_from_feature_type_vector(&feature_types)?;
-//     let csc_mat = MatrixType::new_csc((feature_ids.len(), barcodes.len()), indptr, indices, data);
-//     let mat = AdaptiveMatOwned::from_csmat(&csc_mat);
-//     let final_matrix = AdaptiveFeatureBarcodeMatrix {
-//         name: "Dummy".to_string(),
-//         barcodes,
-//         feature_ids,
-//         feature_names,
-//         feature_types: feature_type_label,
-//         matrix: mat,
-//     };
-//     Ok(final_matrix)
-// }
-
-fn get_attr(matrix: &PyAny, attr: &str) -> Vec<u32> {
-    let pyvalues: &PyArray1<i32> = matrix.getattr(attr).unwrap().extract().unwrap();
-    pyvalues
-        .to_vec()
-        .unwrap()
-        .into_iter()
-        .map(|x| x as u32)
-        .collect()
+fn init_global_thread_pool(num_threads: usize) {
+    INIT_THREAD_POOL.call_once(|| {
+        ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build_global()
+            .expect("Failed to build global thread pool");
+    });
 }
 
-// Convert a scipy sparse matrix to a rust sparse matrix
+/// Extract a python array of a desired type.
+fn extract_pyarray<'a, T: Element + 'a>(
+    py: &Bound<'a, PyAny>,
+    attr: &'static str,
+) -> Result<PyReadonlyArray1<'a, T>> {
+    py.getattr(attr)
+        .context(attr)
+        .context(attr)
+        .map(|x| PyReadonlyArray1::extract_bound(&x).unwrap())
+}
+
+/// Transmute a &[i32] to a &[u32] and validate that all elements are positive.
+fn transmute_i32_to_u32(xs: &[i32]) -> &[u32] {
+    assert!(xs.iter().all(|&x| x >= 0));
+    unsafe { std::slice::from_raw_parts(xs.as_ptr().cast(), xs.len()) }
+}
+
+/// Convert a scipy sparse matrix to a rust sparse matrix.
 fn convert_matrix(
     _py: Python<'_>,
-    matrix: &PyAny,
+    matrix: &Bound<'_, PyAny>,
 ) -> Result<AdaptiveMatOwned<u32, MatrixIntoMap<u32, u32>>> {
     let shape: (usize, usize) = matrix.getattr("shape").unwrap().extract().unwrap();
-    // Avoid a simple cast from PyAny to vec which iteratively grabs a python object for each array
-    // element
-    let indices: Vec<u32> = get_attr(matrix, "indices");
-    let indptr: Vec<u32> = get_attr(matrix, "indptr");
-    let data: Vec<u32> = get_attr(matrix, "data");
+    let data_py = extract_pyarray(matrix, "data").unwrap();
+    let data = transmute_i32_to_u32(data_py.as_slice().unwrap());
 
-    let csc_mat = MatrixType::new_csc(shape, indptr, indices, data);
-    let final_matrix = AdaptiveMatOwned::from_csmat(&csc_mat);
-    Ok(final_matrix)
+    // indices and indptr may be either i32 or i64. They have the same type.
+    let csc_matrix = if let Ok(indptr) = extract_pyarray::<i32>(matrix, "indptr") {
+        let indices = extract_pyarray::<i32>(matrix, "indices").unwrap();
+        AdaptiveMatOwned::from_csmat(&CsMatBase::new_csc(
+            shape,
+            indptr.as_slice().unwrap(),
+            indices.as_slice().unwrap(),
+            data,
+        ))
+    } else if let Ok(indptr) = extract_pyarray::<i64>(matrix, "indptr") {
+        let indices = extract_pyarray::<i64>(matrix, "indices").unwrap();
+        AdaptiveMatOwned::from_csmat(&CsMatBase::new_csc(
+            shape,
+            indptr.as_slice().unwrap(),
+            indices.as_slice().unwrap(),
+            data,
+        ))
+    } else {
+        bail!("indptr is neither i32 nor i64")
+    };
+    Ok(csc_matrix)
 }
 
 #[pyfunction]
 pub(crate) fn compute_sseq_params_o3<'a>(
     py: Python<'a>,
-    matrix: &'a PyAny,
+    matrix: &Bound<'a, PyAny>,
     zeta_quartile: f64,
-) -> PyResult<&'a PyDict> {
+) -> PyResult<Bound<'a, PyDict>> {
     let converted_matrix = convert_matrix(py, matrix).unwrap();
     let sseq_params = compute_sseq_params(&converted_matrix, Some(zeta_quartile), None, None);
     let params = PyDict::new(py);
@@ -99,69 +96,106 @@ pub(crate) fn compute_sseq_params_o3<'a>(
 // Note this originally returned a typed #[pyclass] class, but that led to a copy on the returned value
 // that I couldn't figure out how to avoid, so am returning a dictionary to avoid the
 #[pyfunction]
+#[pyo3(signature = (matrix, cond_a, cond_b, sseq_params, big_count=None))]
 pub(crate) fn sseq_differential_expression_o3<'a>(
     py: Python<'a>,
-    matrix: &PyAny,
+    matrix: &Bound<'_, PyAny>,
     cond_a: Vec<usize>,
     cond_b: Vec<usize>,
-    sseq_params: &PyDict,
+    sseq_params: &Bound<'_, PyDict>,
     big_count: Option<u64>,
-) -> PyResult<&'a PyDict> {
+) -> PyResult<Bound<'a, PyDict>> {
+    init_global_thread_pool(1);
     let converted_matrix = convert_matrix(py, matrix).unwrap();
     // converting _bool doesn't seem to work automatically,
-    let use_g: &PyArray1<bool> = sseq_params.get_item("use_g").unwrap().downcast()?;
-    let new_use_g: Vec<bool> = use_g.to_vec()?;
+    let use_g = sseq_params.get_item("use_g")?.expect("No use_g found.");
+    let new_use_g: Vec<bool> = use_g.downcast::<PyArray1<bool>>()?.to_vec()?;
     let params = SSeqParams {
-        num_cells: sseq_params.get_item("N").unwrap().extract().unwrap(),
-        num_genes: sseq_params.get_item("G").unwrap().extract().unwrap(),
+        num_cells: sseq_params
+            .get_item("N")
+            .unwrap()
+            .expect("N not found in sseq params")
+            .extract()
+            .unwrap(),
+        num_genes: sseq_params
+            .get_item("G")
+            .unwrap()
+            .expect("G not found in sseq params")
+            .extract()
+            .unwrap(),
         size_factors: sseq_params
             .get_item("size_factors")
             .unwrap()
+            .expect("size_factors not found in sseq params")
             .extract()
             .unwrap(),
-        gene_means: sseq_params.get_item("mean_g").unwrap().extract().unwrap(),
-        gene_variances: sseq_params.get_item("var_g").unwrap().extract().unwrap(),
+        gene_means: sseq_params
+            .get_item("mean_g")
+            .unwrap()
+            .expect("mean_g not found in sseq params")
+            .extract()
+            .unwrap(),
+        gene_variances: sseq_params
+            .get_item("var_g")
+            .expect("var_g not found in sseq params")
+            .unwrap()
+            .extract()
+            .unwrap(),
         use_genes: new_use_g,
-        gene_moment_phi: sseq_params.get_item("phi_mm_g").unwrap().extract().unwrap(),
-        zeta_hat: sseq_params.get_item("zeta_hat").unwrap().extract().unwrap(),
-        delta: sseq_params.get_item("delta").unwrap().extract().unwrap(),
-        gene_phi: sseq_params.get_item("phi_g").unwrap().extract().unwrap(),
+        gene_moment_phi: sseq_params
+            .get_item("phi_mm_g")
+            .expect("phi_mm_g not found in sseq params")
+            .unwrap()
+            .extract()
+            .unwrap(),
+        zeta_hat: sseq_params
+            .get_item("zeta_hat")
+            .expect("zeta_hat not found in sseq params")
+            .unwrap()
+            .extract()
+            .unwrap(),
+        delta: sseq_params
+            .get_item("delta")
+            .unwrap()
+            .expect("delta not found in sseq params")
+            .extract()
+            .unwrap(),
+        gene_phi: sseq_params
+            .get_item("phi_g")
+            .unwrap()
+            .expect("phi_g not found in sseq params")
+            .extract()
+            .unwrap(),
     };
     let result: DiffExpResult =
         sseq_differential_expression(&converted_matrix, &cond_a, &cond_b, &params, big_count);
-    std::mem::drop(converted_matrix);
-    let converted_result: &PyDict = PyDict::new(py);
-    converted_result.set_item::<&str, &PyList>(
+    drop(converted_matrix);
+    let converted_result = PyDict::new(py);
+    converted_result.set_item::<&str, _>(
         "genes_tested",
-        PyList::new(py, result.genes_tested.iter().map(|x| PyBool::new(py, *x))),
+        PyList::new(py, result.genes_tested.iter().map(|x| PyBool::new(py, *x)))?,
     )?;
-    converted_result
-        .set_item::<&str, &PyArray1<u64>>("sums_in", result.sums_in.into_pyarray(py))?;
-    converted_result
-        .set_item::<&str, &PyArray1<u64>>("sums_out", result.sums_out.into_pyarray(py))?;
-    converted_result
-        .set_item::<&str, &PyArray1<f64>>("common_mean", result.common_mean.into_pyarray(py))?;
-    converted_result.set_item::<&str, &PyArray1<f64>>(
+    converted_result.set_item::<&str, _>("sums_in", result.sums_in.into_pyarray(py))?;
+    converted_result.set_item::<&str, _>("sums_out", result.sums_out.into_pyarray(py))?;
+    converted_result.set_item::<&str, _>("common_mean", result.common_mean.into_pyarray(py))?;
+    converted_result.set_item::<&str, _>(
         "common_dispersion",
         result.common_dispersion.into_pyarray(py),
     )?;
-    converted_result.set_item::<&str, &PyArray1<f64>>(
+    converted_result.set_item::<&str, _>(
         "normalized_mean_in",
         result.normalized_mean_in.into_pyarray(py),
     )?;
-    converted_result.set_item::<&str, &PyArray1<f64>>(
+    converted_result.set_item::<&str, _>(
         "normalized_mean_out",
         result.normalized_mean_out.into_pyarray(py),
     )?;
-    converted_result
-        .set_item::<&str, &PyArray1<f64>>("p_values", result.p_values.into_pyarray(py))?;
-    converted_result.set_item::<&str, &PyArray1<f64>>(
+    converted_result.set_item::<&str, _>("p_values", result.p_values.into_pyarray(py))?;
+    converted_result.set_item::<&str, _>(
         "adjusted_p_values",
         result.adjusted_p_values.into_pyarray(py),
     )?;
-    converted_result.set_item::<&str, &PyArray1<f64>>(
-        "log2_fold_change",
-        result.log2_fold_change.into_pyarray(py),
-    )?;
+    converted_result
+        .set_item::<&str, _>("log2_fold_change", result.log2_fold_change.into_pyarray(py))?;
     Ok(converted_result)
 }

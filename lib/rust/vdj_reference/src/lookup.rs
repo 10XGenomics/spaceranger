@@ -1,6 +1,7 @@
+#![allow(missing_docs)]
 use crate::{VdjHierarchy, VdjReference};
-use fxhash::{FxBuildHasher, FxHashMap};
-use std::collections::HashMap;
+use ahash::HashMapExt;
+use metric::TxHashMap;
 
 const DEFAULT_KMER_LENGTH: usize = 20;
 
@@ -34,7 +35,7 @@ pub enum KmerClassifyStrategy {
 #[derive(Debug)]
 pub struct KmerClassify<'a, T> {
     kmer_len: usize,
-    kmer_hash: FxHashMap<&'a [u8], T>,
+    kmer_hash: TxHashMap<&'a [u8], T>,
     strategy: KmerClassifyStrategy,
 }
 
@@ -68,7 +69,7 @@ where
         strategy: KmerClassifyStrategy,
     ) -> Self {
         // Hashmap from kmer to Option<T>. The value will be none if more than one value of `T` maps to that kmer.
-        let mut kmer_hash_build = FxHashMap::default();
+        let mut kmer_hash_build = TxHashMap::default();
         for ref_entry in reference {
             let seq = ref_entry.seq();
             let choice = Some(T::from_entry(ref_entry));
@@ -84,8 +85,7 @@ where
                     .or_insert(choice);
             }
         }
-        let mut kmer_hash =
-            HashMap::with_capacity_and_hasher(kmer_hash_build.len(), FxBuildHasher::default());
+        let mut kmer_hash = TxHashMap::with_capacity(kmer_hash_build.len());
         for (k, v) in kmer_hash_build {
             if let Some(val) = v {
                 kmer_hash.insert(k, val);

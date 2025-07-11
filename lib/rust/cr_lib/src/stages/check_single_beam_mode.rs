@@ -1,4 +1,5 @@
 //! Martian stage CHECK_SINGLE_BEAM_MODE
+#![allow(missing_docs)]
 
 use anyhow::{bail, Result};
 use cr_types::reference::feature_reference::BeamMode;

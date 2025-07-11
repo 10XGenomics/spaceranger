@@ -7,6 +7,7 @@ load(
 load(
     "@tenx_bazel_rules//rules/conda:conda_manifest.bzl",
     "conda_deps",
+    "conda_files",
     "conda_manifest",
 )
 
@@ -22,47 +23,16 @@ license(
     package_name = "MOODS",
     additional_info = {
         "homepage": "https://github.com/jhkorhonen/MOODS",
-        "version": "1.9.3",
+        "version": "1.9.4.1",
         "manifest": "third-party/deps.bzl",
-        "pURL": "pkg:github/jhkorhonen/MOODS@1.9.3",
+        "pURL": "pkg:github/jhkorhonen/MOODS@1.9.4.1",
     },
-    copyright_notice = "Copyright (C) 2009 by Petri J Martinmäki, Janne Korhonen, Pasi Rastas",
+    copyright_notice = "Copyright (C) 2007-2015 Pasi Rastas, Janne H. Korhonen, Petri Martinmäki",
     license_kinds = [
         "@tenx_bazel_rules//licensing/known:Biopython",
     ],
     license_text = site_packages + "/COPYING.BIOPYTHON",
-)
-
-filegroup(
-    name = "conda_package_moods_python",
-    srcs = [site_packages + "/MOODS/" + f for f in [
-        "__init__.py",
-        "misc.py",
-        "parsers.py",
-        "scan.py",
-        "tools.py",
-    ]],
-    visibility = ["@anaconda//:__pkg__"],
-)
-
-filegroup(
-    name = "conda_package_moods_hdrs",
-    visibility = ["@anaconda//:__pkg__"],
-)
-
-filegroup(
-    name = "conda_package_moods_libs",
-    visibility = ["@anaconda//:__pkg__"],
-)
-
-filegroup(
-    name = "conda_package_moods_solibs",
-    visibility = ["@anaconda//:__pkg__"],
-)
-
-exports_files(
-    ["BUILD.bazel"],
-    visibility = ["//visibility:public"],
+    package_version = "1.9.4.1",
 )
 
 core = site_packages + "/core"
@@ -183,20 +153,26 @@ cc_library(
     linkstatic = True,
 )
 
-filegroup(
-    name = "conda_package_moods_data",
-    srcs = [
+conda_files(
+    name = "files",
+    link_safe_runfiles = [
         PARSERS,
         SCAN,
         TOOLS,
     ],
+    py_srcs = [site_packages + "/MOODS/" + f for f in [
+        "__init__.py",
+        "misc.py",
+        "parsers.py",
+        "scan.py",
+        "tools.py",
+    ]],
     visibility = ["@anaconda//:__pkg__"],
 )
 
 conda_manifest(
     name = "conda_metadata",
     info_files = ["info/index.json"],
-    manifest = "info/files",
     visibility = ["//visibility:public"],
 )
 

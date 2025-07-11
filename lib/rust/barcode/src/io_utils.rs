@@ -1,3 +1,4 @@
+#![deny(missing_docs)]
 use anyhow::{Context, Result};
 use flate2::read::MultiGzDecoder;
 use std::fs::File;

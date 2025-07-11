@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use crate::types::GenomeName;
 use anyhow::Result;
 use barcode::{barcode_string, Barcode};

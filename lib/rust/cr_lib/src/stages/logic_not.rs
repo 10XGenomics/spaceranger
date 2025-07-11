@@ -1,5 +1,6 @@
 //! Martian stage LOGIC_NOT
 //! Return the logical not of its input argument.
+#![allow(missing_docs)]
 
 use anyhow::Result;
 use martian::{MartianMain, MartianRover};

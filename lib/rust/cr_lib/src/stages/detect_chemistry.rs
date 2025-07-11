@@ -1,4 +1,5 @@
 //! Martian stage DETECT_CHEMISTRY
+#![allow(missing_docs)]
 
 use crate::barcode_overlap::FRPGemBarcodeOverlapRow;
 use crate::detect_chemistry::chemistry_filter::{
@@ -33,13 +34,10 @@ use metric::{join_metric_name, set, TxHashMap, TxHashSet};
 use multi::config::{
     multiconst, MultiConfigCsv, MultiConfigCsvFile, ProbeBarcodeIterationMode, SamplesCsv,
 };
-use parameters_toml::{fiveprime_multiplexing, threeprime_lt_multiplexing};
 use serde::{Deserialize, Serialize};
 use slice_group_by::GroupBy;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-#[allow(clippy::enum_glob_use)]
-use ChemistryName::*;
 
 const MIN_READS_NEEDED: usize = 10_000;
 
@@ -55,7 +53,7 @@ pub struct DetectChemistryStageInputs {
     pub r2_length: Option<usize>,
     pub multi_config: Option<MultiConfigCsvFile>,
     pub is_pd: bool,
-    pub custom_chemistry_def: Option<ChemistryDef>,
+    pub custom_chemistry_defs: ChemistryDefs,
     pub feature_config: Option<FeatureConfig>,
 }
 
@@ -153,7 +151,7 @@ fn select_chemistries(
             &chems,
             &metadata,
             multi_config_csv,
-            args.custom_chemistry_def.as_ref(),
+            &args.custom_chemistry_defs,
             units,
         )?,
 
@@ -166,7 +164,8 @@ fn select_chemistries(
 
                 Err(err) => {
                     // No single chemistry was compatible with all units.
-                    // Attempt to detect chemistry per library type for RTL experiments.
+                    // Attempt to detect chemistry per library type for RTL,
+                    // SC3Pv3, and SC3Pv4.
                     let Some(DetectChemistryErrors::ConflictingChemistries {
                         per_unit_chems, ..
                     }) = err.downcast_ref::<DetectChemistryErrors>()
@@ -178,7 +177,15 @@ fn select_chemistries(
                         .iter()
                         .flatten()
                         .all(|chem| chem.is_rtl().unwrap_or(false));
-                    ensure!(is_rtl, err);
+                    let is_3p_v3 = per_unit_chems
+                        .iter()
+                        .flatten()
+                        .all(ChemistryName::is_sc_3p_v3);
+                    let is_3p_v4 = per_unit_chems
+                        .iter()
+                        .flatten()
+                        .all(ChemistryName::is_sc_3p_v4);
+                    ensure!(is_rtl || is_3p_v3 || is_3p_v4, err);
 
                     detect_chemistry_per_library_type(mode, &metadata, multi_config_csv, units)?
                 }
@@ -230,14 +237,14 @@ fn use_manual_chemistries(
     chems: &HashMap<LibraryType, ChemistryName>,
     metadata: &Metadata<'_>,
     multi_config_csv: Option<&MultiConfigCsv>,
-    custom_chemistry_def: Option<&ChemistryDef>,
+    custom_chemistry_defs: &ChemistryDefs,
     all_units: &[(DetectChemistryUnit, Vec<ReadPair>)],
 ) -> Result<ChemistryDefs> {
     divide_units_by_library_type(all_units)
         .map(|(library_type, units)| {
             let chem_name = chems[&library_type];
             if chem_name == ChemistryName::Custom {
-                use_custom_chemistry(custom_chemistry_def)
+                use_custom_chemistry(custom_chemistry_defs.get(&library_type))
             } else {
                 use_manual_chemistry(chem_name, metadata, multi_config_csv, units)
             }
@@ -340,6 +347,9 @@ fn detect_chemistry(
     multi_config_csv: Option<&MultiConfigCsv>,
     units: &[(DetectChemistryUnit, Vec<ReadPair>)],
 ) -> Result<ChemistryDef> {
+    #[allow(clippy::enum_glob_use)]
+    use ChemistryName::*;
+
     // Check for overhang multiplexing
     let is_overhang_multiplexed =
         multi_config_csv.is_some_and(MultiConfigCsv::is_overhang_multiplexed);
@@ -420,7 +430,7 @@ fn detect_chemistry(
 
     let chosen_chemistry_def = if wl_matching_chemistries.len() == 1 {
         let &chem = wl_matching_chemistries.iter().exactly_one().unwrap();
-        if chem == SFRP {
+        if chem.is_sfrp() {
             // Bail out if a mixture of probe barcodes is observed for singleplex FRP chemistry
             validate_no_probe_bc_mixture_in_sfrp(
                 units,
@@ -435,7 +445,10 @@ fn detect_chemistry(
             multi_config_csv,
             is_overhang_multiplexed,
         )?)
-    } else if wl_matching_chemistries == set![ThreePrimeV3, ThreePrimeV3HT, ThreePrimeV3LT] {
+    } else if wl_matching_chemistries
+        == set![ThreePrimeV3PolyA, ThreePrimeV3HTPolyA, ThreePrimeV3LT]
+        || wl_matching_chemistries == set![ThreePrimeV3CS1, ThreePrimeV3HTCS1, ThreePrimeV3LT]
+    {
         Some(validate_chemistry(
             ThreePrimeV3LT,
             metadata.allowed_chems,
@@ -443,17 +456,33 @@ fn detect_chemistry(
             multi_config_csv,
             is_overhang_multiplexed,
         )?)
-    } else if wl_matching_chemistries == set![ThreePrimeV3, ThreePrimeV3HT] {
+    } else if wl_matching_chemistries == set![ThreePrimeV3PolyA, ThreePrimeV3HTPolyA] {
         Some(validate_chemistry(
-            ThreePrimeV3,
+            ThreePrimeV3PolyA,
             metadata.allowed_chems,
             metadata.sample_defs,
             multi_config_csv,
             is_overhang_multiplexed,
         )?)
-    } else if wl_matching_chemistries == set![ThreePrimeV4] {
+    } else if wl_matching_chemistries == set![ThreePrimeV3CS1, ThreePrimeV3HTCS1] {
         Some(validate_chemistry(
-            ThreePrimeV4,
+            ThreePrimeV3CS1,
+            metadata.allowed_chems,
+            metadata.sample_defs,
+            multi_config_csv,
+            is_overhang_multiplexed,
+        )?)
+    } else if wl_matching_chemistries == set![ThreePrimeV4PolyA] {
+        Some(validate_chemistry(
+            ThreePrimeV4PolyA,
+            metadata.allowed_chems,
+            metadata.sample_defs,
+            multi_config_csv,
+            is_overhang_multiplexed,
+        )?)
+    } else if wl_matching_chemistries == set![ThreePrimeV4CS1] {
+        Some(validate_chemistry(
+            ThreePrimeV4CS1,
             metadata.allowed_chems,
             metadata.sample_defs,
             multi_config_csv,
@@ -599,7 +628,9 @@ fn validate_chemistry(
     overhang_multiplexing: bool,
 ) -> Result<ChemistryDef> {
     if chemistry == ChemistryName::ThreePrimeV3LT {
-        bail!("The chemistry SC3Pv3LT (Single Cell 3'v3 LT) is no longer supported. To analyze this data, use Cell Ranger 7.2 or earlier.");
+        bail!(
+            "The chemistry SC3Pv3LT (Single Cell 3'v3 LT) is no longer supported. To analyze this data, use Cell Ranger 7.2 or earlier."
+        );
     }
     if chemistry == ChemistryName::ArcV1 {
         bail!(
@@ -610,12 +641,15 @@ fn validate_chemistry(
             the {chemistry} chemistry in your analysis configuration."
         );
     }
-    if chemistry == ChemistryName::ThreePrimeV4
-        && sample_defs
-            .iter()
-            .any(|sdef| sdef.library_type == Some(LibraryType::Crispr))
-    {
-        bail!("The chemistry SC3Pv4 (Single Cell 3'v4) is not supported with CRISPR Guide Capture libraries.")
+
+    if let Some(config) = multi_config_csv {
+        if config.libraries.has_gene_expression() && chemistry.is_rtl() == Some(false) {
+            let gex = config.gene_expression.as_ref();
+            ensure!(
+                gex.is_some_and(|gex| gex.reference_path.is_some()),
+                "A reference transcriptome is required to analyze a Gene Expression library."
+            );
+        }
     }
 
     validate_multiplexing(chemistry, sample_defs)?;
@@ -637,6 +671,9 @@ fn validate_chemistry(
 
 /// Validate combinations of chemistry and types of multiplexing.
 fn validate_multiplexing(chemistry_type: ChemistryName, sample_defs: &[SampleDef]) -> Result<()> {
+    #[allow(clippy::enum_glob_use)]
+    use ChemistryName::*;
+
     if !sample_defs
         .iter()
         .any(|sdef| sdef.library_type == Some(LibraryType::Cellplex))
@@ -644,17 +681,10 @@ fn validate_multiplexing(chemistry_type: ChemistryName, sample_defs: &[SampleDef
         return Ok(());
     }
 
-    match chemistry_type {
-        ThreePrimeV3LT => ensure!(
-            *threeprime_lt_multiplexing()?,
-            "Multiplexing Capture libraries are not supported with Single Cell 3' v3 LT chemistry"
-        ),
-        FivePrimeR1 | FivePrimeR2 | FivePrimePE | FivePrimePEV3 => ensure!(
-            *fiveprime_multiplexing()?,
-            "Multiplexing Capture libraries are not supported with Single Cell 5' chemistries"
-        ),
-        _ => (),
-    }
+    ensure!(
+        chemistry_type != ThreePrimeV3LT,
+        "Multiplexing Capture libraries are not supported with Single Cell 3' v3 LT chemistry"
+    );
     Ok(())
 }
 
@@ -671,33 +701,30 @@ fn validate_rtl(multi_config_csv: Option<&MultiConfigCsv>, chemistry: ChemistryN
         };
         ensure!(
             !samples.has_probe_barcode_ids(),
-            "A non-Fixed RNA Profiling chemistry {chemistry} was detected, and the [samples] \
+            "A non-Flex chemistry {chemistry} was detected, and the [samples] \
              section has a probe_barcode_ids column. The probe_barcode_ids column may only be \
-             specified with Fixed RNA Profiling chemistries.",
+             specified with Flex chemistries.",
         );
         return Ok(());
     }
 
     if let Some(gex) = &config.gene_expression {
         if config.libraries.has_gene_expression() {
-            ensure!(
-                gex.has_probe_set(),
-                "Fixed RNA Profiling chemistries require a probe-set."
-            );
+            ensure!(gex.has_probe_set(), "Flex chemistries require a probe-set.");
         }
         ensure!(
             gex.include_introns == multiconst::DEFAULT_INCLUDE_INTRONS,
             "The [gene-expression] section specifies the parameter include-introns, \
-             which is not valid for Fixed RNA Profiling chemistries."
+             which is not valid for Flex chemistries."
         );
     }
 
-    if chemistry == SFRP {
+    if chemistry.is_sfrp() {
         ensure!(
             config.samples.is_none(),
-            "We detected singleplex Fixed RNA Profiling chemistry from the data. \
+            "We detected singleplex Flex chemistry from the data. \
              Sample definitions are unsupported for singleplex inputs. \
-             To process this data as multiplex Fixed RNA Profiling you will need to specify `MFRP` \
+             To process this data as multiplex Flex you will need to specify `MFRP` \
              as the chemistry in the config.csv."
         );
     }
@@ -710,7 +737,7 @@ fn is_rtl_uncollapsed(multi_config_csv: &MultiConfigCsv) -> bool {
     multi_config_csv
         .sample_barcode_ids_used_in_experiment(ProbeBarcodeIterationMode::All)
         .into_iter()
-        .all(|x| x.ends_with(&['A', 'B', 'C', 'D']))
+        .all(|x| x.ends_with(['A', 'B', 'C', 'D']))
 }
 
 /// Identify probe barcode pairings if necessary.
@@ -764,9 +791,8 @@ fn handle_probe_barcode_translation(
     if let Some(pairing) = explicit_pairing.or(detected_pairing_id_translation) {
         // Use the GEX probe barcode whitelist as the target.
         let target_probe_bc_whitelist = outputs.chemistry_defs[&LibraryType::Gex]
-            .barcode_whitelist()
-            .probe()
-            .as_source(true)?;
+            .barcode_whitelist_source()?
+            .probe();
         for (&library_type, chemistry_def) in &mut outputs.chemistry_defs {
             chemistry_def.translate_probe_barcode_whitelist_with_id_map(
                 &pairing,
@@ -785,6 +811,7 @@ fn handle_probe_barcode_translation(
 mod tests {
     use super::*;
     use cr_types::chemistry::{known_chemistry_defs, ChemistryDefsExt};
+    use cr_types::reference::probe_set_reference::TargetSetFile;
     use cr_types::sample_def::FastqMode;
     use cr_types::LibraryType;
     use dui_tests::stage_test::StageFailTest;
@@ -796,9 +823,9 @@ mod tests {
 
     #[test]
     fn test_validate_rtl() {
-        use ChemistryName::{MFRP_Ab, ThreePrimeV3, MFRP_RNA, SFRP};
+        use ChemistryName::{MFRP_Ab, ThreePrimeV3CS1, ThreePrimeV3PolyA, MFRP_RNA, SFRP};
 
-        assert!(validate_rtl(None, ThreePrimeV3).is_ok());
+        assert!(validate_rtl(None, ThreePrimeV3PolyA).is_ok());
 
         let gex_library = Library::BclProcessor {
             fastq_path: PathBuf::default(),
@@ -833,11 +860,11 @@ mod tests {
         };
         assert!(validate_rtl(Some(&gex_without_probe_set), MFRP_RNA).is_err());
         assert!(validate_rtl(Some(&gex_without_probe_set), SFRP).is_err());
-        assert!(validate_rtl(Some(&gex_without_probe_set), ThreePrimeV3).is_ok());
+        assert!(validate_rtl(Some(&gex_without_probe_set), ThreePrimeV3PolyA).is_ok());
 
         let gex_with_probe_set = MultiConfigCsv {
             gene_expression: Some(GeneExpressionParams {
-                probe_set: vec![PathBuf::new()],
+                probe_set: vec![TargetSetFile::from("probe_set")],
                 include_introns: multiconst::DEFAULT_INCLUDE_INTRONS,
                 ..GeneExpressionParams::default()
             }),
@@ -845,7 +872,7 @@ mod tests {
         };
         assert!(validate_rtl(Some(&gex_with_probe_set), MFRP_RNA).is_ok());
         assert!(validate_rtl(Some(&gex_with_probe_set), SFRP).is_ok());
-        assert!(validate_rtl(Some(&gex_with_probe_set), ThreePrimeV3).is_ok()); // to aggr with RTL
+        assert!(validate_rtl(Some(&gex_with_probe_set), ThreePrimeV3PolyA).is_ok()); // to aggr with RTL
 
         let antibody_only = MultiConfigCsv {
             libraries: LibrariesCsv(vec![antibody_library]),
@@ -862,11 +889,11 @@ mod tests {
         assert!(validate_rtl(Some(&antibody_only), MFRP_RNA).is_ok());
         assert!(validate_rtl(Some(&antibody_only), MFRP_Ab).is_ok());
         assert!(validate_rtl(Some(&antibody_only), SFRP).is_ok());
-        assert!(validate_rtl(Some(&antibody_only), ThreePrimeV3).is_ok());
+        assert!(validate_rtl(Some(&antibody_only), ThreePrimeV3CS1).is_ok());
 
         let include_introns_false = MultiConfigCsv {
             gene_expression: Some(GeneExpressionParams {
-                probe_set: vec![PathBuf::new()],
+                probe_set: vec![TargetSetFile::from("probe_set")],
                 include_introns: false,
                 ..GeneExpressionParams::default()
             }),
@@ -874,7 +901,7 @@ mod tests {
         };
         assert!(validate_rtl(Some(&include_introns_false), MFRP_RNA).is_err());
         assert!(validate_rtl(Some(&include_introns_false), SFRP).is_err());
-        assert!(validate_rtl(Some(&include_introns_false), ThreePrimeV3).is_ok()); // to aggr with RTL
+        assert!(validate_rtl(Some(&include_introns_false), ThreePrimeV3CS1).is_ok()); // to aggr with RTL
 
         let samples = MultiConfigCsv {
             samples: Some(SamplesCsv(vec![SampleRow::from_probe_barcode_id("BC001")])),
@@ -882,7 +909,7 @@ mod tests {
         };
         assert!(validate_rtl(Some(&samples), MFRP_RNA).is_ok());
         assert!(validate_rtl(Some(&samples), SFRP).is_err());
-        assert!(validate_rtl(Some(&samples), ThreePrimeV3).is_err());
+        assert!(validate_rtl(Some(&samples), ThreePrimeV3CS1).is_err());
     }
 
     macro_rules! err_snapshot {
@@ -1016,6 +1043,15 @@ mod tests {
     }
 
     #[test]
+    fn test_duplicate_fastqs_recursive() {
+        err_snapshot!(test_invalid_bcl2fastq_input(
+            "../cr_lib/test/fastq/duplicate_fastqs_recursive",
+            None,
+            vec!["test_sample"],
+        ));
+    }
+
+    #[test]
     fn test_duplicate_r1_r2() {
         err_snapshot!(test_invalid_bcl2fastq_input(
             "../dui_tests/test_resources/cellranger-count/fastqs_duplicate_r1_r2",
@@ -1046,7 +1082,7 @@ mod tests {
     fn test_name_spec_not_in_allowed() {
         let args = DetectChemistryStageInputs {
             chemistry_specs: specs_input_gex(ChemistryName::VdjPE),
-            allowed_chems: Some(vec![ChemistryName::ThreePrimeV3.into()]),
+            allowed_chems: Some(vec![ChemistryName::ThreePrimeV3PolyA.into()]),
             ..Default::default()
         };
         err_snapshot!(args);
@@ -1054,12 +1090,12 @@ mod tests {
 
     #[test]
     fn test_custom_chemistry_spec() {
-        let mut def: ChemistryDef = ChemistryDef::named(ChemistryName::ThreePrimeV3);
+        let mut def: ChemistryDef = ChemistryDef::named(ChemistryName::ThreePrimeV3PolyA);
         def.name = ChemistryName::Custom;
         def.rna.offset = 13;
         let args = DetectChemistryStageInputs {
             chemistry_specs: specs_input_gex(ChemistryName::Custom),
-            custom_chemistry_def: Some(def.clone()),
+            custom_chemistry_defs: HashMap::from_iter([(LibraryType::Gex, def.clone())]),
             sample_def: vec![SampleDef {
                 fastq_mode: FastqMode::ILMN_BCL2FASTQ,
                 read_path: "../dui_tests/test_resources/cellranger-count/CR-300-01_SC3pv3_15k"
@@ -1075,7 +1111,7 @@ mod tests {
 
     #[test]
     fn test_mix_of_custom_and_manual_chemistry_spec() {
-        let mut def: ChemistryDef = ChemistryDef::named(ChemistryName::ThreePrimeV3);
+        let mut def: ChemistryDef = ChemistryDef::named(ChemistryName::ThreePrimeV3CS1);
         def.name = ChemistryName::Custom;
         def.rna.offset = 13;
         let args = DetectChemistryStageInputs {
@@ -1091,7 +1127,7 @@ mod tests {
             ]
             .into_iter()
             .collect(),
-            custom_chemistry_def: Some(def.clone()),
+            custom_chemistry_defs: HashMap::from_iter([(LibraryType::Antibody, def.clone())]),
             sample_def: vec![
                 SampleDef {
                     fastq_mode: FastqMode::ILMN_BCL2FASTQ,
@@ -1136,7 +1172,7 @@ mod tests {
 
             let args = DetectChemistryStageInputs {
                 chemistry_specs: specs_input_gex(ChemistryName::Custom),
-                custom_chemistry_def: Some(custom_def),
+                custom_chemistry_defs: HashMap::from_iter([(LibraryType::Gex, custom_def)]),
                 sample_def: vec![SampleDef {
                     fastq_mode: FastqMode::ILMN_BCL2FASTQ,
                     read_path: "../dui_tests/test_resources/cellranger-count/CR-300-01_SC3pv3_15k"
@@ -1187,13 +1223,13 @@ mod tests {
                 sample_names: Some(vec!["CR-300-01".into()]),
                 ..Default::default()
             }],
-            chemistry_specs: specs_input_gex(ChemistryName::ThreePrimeV3),
+            chemistry_specs: specs_input_gex(ChemistryName::ThreePrimeV3PolyA),
             ..Default::default()
         };
         let outs = DetectChemistry.test_run_tmpdir(args).unwrap();
         assert_eq!(
             outs.chemistry_defs.primary().name,
-            ChemistryName::ThreePrimeV3
+            ChemistryName::ThreePrimeV3PolyA
         );
         assert!(!outs.is_antibody_only);
     }
@@ -1214,7 +1250,7 @@ mod tests {
         let outs = DetectChemistry.test_run_tmpdir(args).unwrap();
         assert_eq!(
             outs.chemistry_defs.primary().name,
-            ChemistryName::ThreePrimeV3
+            ChemistryName::ThreePrimeV3PolyA
         );
         assert!(!outs.is_antibody_only);
     }
@@ -1229,20 +1265,20 @@ mod tests {
                 sample_names: Some(vec!["1107522".into()]),
                 ..Default::default()
             }],
-            chemistry_specs: specs_input_gex(ChemistryName::ThreePrimeV3HT),
+            chemistry_specs: specs_input_gex(ChemistryName::ThreePrimeV3HTPolyA),
             ..Default::default()
         };
         let outs = DetectChemistry.test_run_tmpdir(args).unwrap();
         assert_eq!(
             outs.chemistry_defs.primary().name,
-            ChemistryName::ThreePrimeV3HT
+            ChemistryName::ThreePrimeV3HTPolyA
         );
         assert!(!outs.is_antibody_only);
     }
 
     #[test]
     fn test_auto_chemistry_spec_ht() {
-        // should detect ThreePrimeV3 when HT fastqs are run
+        // should detect ThreePrimeV3PolyA when HT fastqs are run
         let args = DetectChemistryStageInputs {
             sample_def: vec![SampleDef {
                 fastq_mode: FastqMode::ILMN_BCL2FASTQ,
@@ -1256,7 +1292,7 @@ mod tests {
         let outs = DetectChemistry.test_run_tmpdir(args).unwrap();
         assert_eq!(
             outs.chemistry_defs.primary().name,
-            ChemistryName::ThreePrimeV3
+            ChemistryName::ThreePrimeV3PolyA
         );
         assert!(!outs.is_antibody_only);
     }
@@ -1308,7 +1344,7 @@ mod tests {
         let outs = DetectChemistry.test_run_tmpdir(args).unwrap();
         assert_eq!(
             outs.chemistry_defs.primary().name,
-            ChemistryName::ThreePrimeV3
+            ChemistryName::ThreePrimeV3PolyA
         );
         assert!(!outs.is_antibody_only);
     }
@@ -1368,7 +1404,7 @@ mod tests {
         let outs = DetectChemistry.test_run_tmpdir(args).unwrap();
         assert_eq!(
             outs.chemistry_defs.primary().name,
-            ChemistryName::ThreePrimeV3
+            ChemistryName::ThreePrimeV3CS1
         );
         assert!(outs.is_antibody_only);
     }
@@ -1393,7 +1429,7 @@ mod tests {
         let outs = DetectChemistry.test_run_tmpdir(args).unwrap();
         assert_eq!(
             outs.chemistry_defs.primary().name,
-            ChemistryName::ThreePrimeV3
+            ChemistryName::ThreePrimeV3CS1
         );
         assert!(outs.is_antibody_only);
     }
@@ -1452,8 +1488,14 @@ mod tests {
         };
         let outs = DetectChemistry.test_run_tmpdir(args).unwrap();
         assert_eq!(
-            outs.chemistry_defs.primary().name,
-            ChemistryName::ThreePrimeV3
+            outs.chemistry_defs
+                .values()
+                .map(|def| def.name)
+                .collect::<TxHashSet<_>>(),
+            set![
+                ChemistryName::ThreePrimeV3PolyA,
+                ChemistryName::ThreePrimeV3CS1
+            ]
         );
         assert!(!outs.is_antibody_only);
     }
@@ -1488,8 +1530,14 @@ mod tests {
         };
         let outs = DetectChemistry.test_run_tmpdir(args).unwrap();
         assert_eq!(
-            outs.chemistry_defs.primary().name,
-            ChemistryName::ThreePrimeV3
+            outs.chemistry_defs
+                .values()
+                .map(|def| def.name)
+                .collect::<TxHashSet<_>>(),
+            set![
+                ChemistryName::ThreePrimeV3PolyA,
+                ChemistryName::ThreePrimeV3CS1
+            ]
         );
         assert!(!outs.is_antibody_only);
     }
@@ -1557,8 +1605,14 @@ mod tests {
         };
         let outs = DetectChemistry.test_run_tmpdir(args).unwrap();
         assert_eq!(
-            outs.chemistry_defs.primary().name,
-            ChemistryName::ThreePrimeV3
+            outs.chemistry_defs
+                .values()
+                .map(|def| def.name)
+                .collect::<TxHashSet<_>>(),
+            set![
+                ChemistryName::ThreePrimeV3PolyA,
+                ChemistryName::ThreePrimeV3CS1
+            ]
         );
         assert!(!outs.is_antibody_only);
     }
@@ -1779,7 +1833,7 @@ mod tests {
         let outs = DetectChemistry.test_run_tmpdir(args).unwrap();
         assert_eq!(
             outs.chemistry_defs.primary().name,
-            ChemistryName::ThreePrimeV3
+            ChemistryName::ThreePrimeV3PolyA
         );
         assert!(!outs.is_antibody_only);
     }
@@ -1889,7 +1943,7 @@ mod tests {
         let outs = DetectChemistry.test_run_tmpdir(args).unwrap();
         assert_eq!(
             outs.chemistry_defs.primary().name,
-            ChemistryName::ThreePrimeV3OH
+            ChemistryName::ThreePrimeV3PolyAOCM
         );
     }
 
@@ -2411,7 +2465,7 @@ mod tests {
             let outs = DetectChemistry.test_run_tmpdir(args).unwrap();
             assert_eq!(
                 outs.chemistry_defs.primary().name,
-                ChemistryName::FivePrimeR2OHV3
+                ChemistryName::FivePrimeR2OCMV3
             );
         }
 
@@ -2432,36 +2486,8 @@ mod tests {
             let outs = DetectChemistry.test_run_tmpdir(args).unwrap();
             assert_eq!(
                 outs.chemistry_defs.primary().name,
-                ChemistryName::ThreePrimeV4
+                ChemistryName::ThreePrimeV4PolyA
             );
-        }
-
-        #[test]
-        fn test_crispr_and_gex_3pv4_fails() {
-            let args = DetectChemistryStageInputs {
-                sample_def: vec![
-                    SampleDef {
-                        fastq_mode: FastqMode::ILMN_BCL2FASTQ,
-                        read_path: testdata_path("fastqs/cellranger/multi/detectchem_unittest_tiny_gex_crispr_3pv4/crispr"),
-                        sample_names: Some(vec!["crispr".into()]),
-                        library_type: Some(LibraryType::Crispr),
-                        ..Default::default()
-                    },
-                    SampleDef {
-                        fastq_mode: FastqMode::ILMN_BCL2FASTQ,
-                        read_path: testdata_path("fastqs/cellranger/multi/detectchem_unittest_tiny_gex_crispr_3pv4/gex"),
-                        sample_names: Some(vec!["gex".into()]),
-                        library_type: Some(LibraryType::Gex),
-                        ..Default::default()
-                    },
-                ],
-                chemistry_specs: specs_input_gex(AutoChemistryName::Count),
-                feature_reference: Some(
-                    "../dui_tests/test_resources/reference/feature/RAB1A_NT_Aug2020.csv".into(),
-                ),
-                ..Default::default()
-            };
-            err_snapshot!(args)
         }
     }
 }

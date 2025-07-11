@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use anyhow::{anyhow, bail, Context, Result};
 use csv::StringRecord;
 use itertools::Itertools;
@@ -95,7 +96,7 @@ impl CsvParser {
     pub fn try_parse_field<T>(&self, col: &str, expected: &str) -> Result<Option<T>>
     where
         T: FromStr,
-        Result<T, <T as FromStr>::Err>: anyhow::Context<T, <T as FromStr>::Err>,
+        Result<T, <T as FromStr>::Err>: Context<T, <T as FromStr>::Err>,
     {
         let i = self.col_map[col];
         let v = self.rows[self.line][i].trim();
@@ -121,7 +122,7 @@ impl CsvParser {
     pub fn parse_field<T>(&self, col: &str, expected: &str) -> Result<T>
     where
         T: FromStr,
-        Result<T, <T as FromStr>::Err>: anyhow::Context<T, <T as FromStr>::Err>,
+        Result<T, <T as FromStr>::Err>: Context<T, <T as FromStr>::Err>,
     {
         match self.try_parse_field(col, expected) {
             Err(e) => Err(e),
@@ -142,7 +143,7 @@ impl CsvParser {
     pub fn try_parse_many<T>(&self, col: &str, expected: &str) -> Result<Option<Vec<T>>>
     where
         T: FromStr,
-        Result<T, <T as FromStr>::Err>: anyhow::Context<T, <T as FromStr>::Err>,
+        Result<T, <T as FromStr>::Err>: Context<T, <T as FromStr>::Err>,
     {
         let col = self.col_map.get(col);
         if col.is_none() {

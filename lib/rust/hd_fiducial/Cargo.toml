@@ -1,9 +1,10 @@
 [dependencies]
-numpy = '*'
-
 [dependencies.fiducial]
 branch = 'main'
-git = 'https://github.com/10XGenomics/image-analysis-rs/'
+git = 'https://github.com/10XGenomics/image-analysis-rs'
+
+[dependencies.numpy]
+workspace = true
 
 [dependencies.pyo3]
 workspace = true
@@ -12,6 +13,9 @@ workspace = true
 crate-type = ['staticlib']
 name = 'hd_fiducial'
 test = false
+
+[lints]
+workspace = true
 
 [package]
 authors = ['10x Genomics']

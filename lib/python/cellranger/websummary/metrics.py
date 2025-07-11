@@ -316,6 +316,13 @@ class SpatialMetricAnnotations(MetricAnnotations):
         super().__init__("spatial_metrics.csv", intron_mode_alerts=intron_mode_alerts)
 
 
+class SpatialHDMetricAnnotations(SpatialMetricAnnotations):
+    def __init__(self, intron_mode_alerts=False):
+        super().__init__(intron_mode_alerts=intron_mode_alerts)
+        file_path = os.path.join(os.path.dirname(__file__), "spatial_hd_metrics.csv")
+        self._override_metric_settings(file_path)
+
+
 class SpatialAggrMetricAnnotations(SpatialMetricAnnotations):
     def __init__(self):
         super().__init__()
@@ -343,13 +350,6 @@ class SpatialTemplateLigationAggrMetricAnnotations(SpatialAggrMetricAnnotations)
         file_path = os.path.join(
             os.path.dirname(__file__), "spatial_template_ligation_aggr_metrics.csv"
         )
-        self._override_metric_settings(file_path)
-
-
-class SpatialTargetedCompareMetricAnnotations(SpatialMetricAnnotations):
-    def __init__(self):
-        super().__init__()
-        file_path = os.path.join(os.path.dirname(__file__), "spatial_targeted_compare_metrics.csv")
         self._override_metric_settings(file_path)
 
 
@@ -388,11 +388,6 @@ class TargetedMetricAnnotations(MetricAnnotations):
         super().__init__()
         file_path = os.path.join(os.path.dirname(__file__), "targeted_metrics.csv")
         self._override_metric_settings(file_path)
-
-
-class TargetedCompareMetricAnnotations(MetricAnnotations):
-    def __init__(self):
-        super().__init__("targeted_compare_metrics.csv")
 
 
 class LTMetricAnnotations(MetricAnnotations):

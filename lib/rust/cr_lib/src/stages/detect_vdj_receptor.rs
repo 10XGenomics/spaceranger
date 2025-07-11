@@ -1,4 +1,5 @@
 //! Martian stage DETECT_VDJ_RECEPTOR
+#![allow(missing_docs)]
 
 use crate::detect_chemistry::chemistry_filter::detect_chemistry_units;
 use anyhow::{anyhow, bail, Context, Result};
@@ -159,16 +160,7 @@ impl MartianMain for DetectVdjReceptor {
     type StageOutputs = DetectVdjReceptorStageOutputs;
     fn main(&self, args: Self::StageInputs, _rover: MartianRover) -> Result<Self::StageOutputs> {
         // -----------------------------------------------------------------------------------------
-        // A trivial case when we have no reference in denovo mode
-        if args.vdj_reference_path.is_none() {
-            return Ok(DetectVdjReceptorStageOutputs {
-                receptor: None,
-                beam_mode: None,
-            });
-        }
-
-        // -----------------------------------------------------------------------------------------
-        // Another trivial case when the receptor is explicitly specified. This is usually used as
+        // A trivial case when the receptor is explicitly specified. This is usually used as
         // a fallback when auto detection fails for some samples with low quality data.
         if let Some(force_receptor) = args.force_receptor {
             // "auto" and "all" will fail conversion here and fall-through
@@ -184,6 +176,15 @@ impl MartianMain for DetectVdjReceptor {
                     beam_mode,
                 });
             }
+        }
+
+        // -----------------------------------------------------------------------------------------
+        // Another trivial case when we have no reference in denovo mode
+        if args.vdj_reference_path.is_none() {
+            return Ok(DetectVdjReceptorStageOutputs {
+                receptor: None,
+                beam_mode: None,
+            });
         }
 
         let vdj_ref = VdjReference::from_reference_folder(&args.vdj_reference_path.unwrap())?;
@@ -222,9 +223,9 @@ impl MartianMain for DetectVdjReceptor {
             }
             per_unit_receptors.push(stats.compatible_receptor().with_context(|| {
                 anyhow!(
-                    "V(D)J Chain detection failed for {unit}.\n\n{stats}\n{}\n\
-                     {resolution_text}\n",
-                    ClassificationStats::help_text(),
+                    "TXRNGR10008: V(D)J Chain detection failed for {unit}.\n\
+                     {stats}\n{help_text}\n{resolution_text}",
+                    help_text = ClassificationStats::help_text(),
                 )
             })?);
             println!("{stats}");
@@ -470,6 +471,7 @@ mod tests {
                         has_mhc_allele_column: true,}),
                     beam_mode: None,
                     functional_map: None,
+                    hashtag_ids: None,
                 }),
             },
         );

@@ -1,4 +1,5 @@
 //! WriteAggrAnn stage code
+#![allow(missing_docs)]
 
 use crate::parse_aggr_csv::{DONOR_HEADER, ORIGIN_HEADER};
 use crate::setup_vdj_aggr::EncloneProtoMetaFormat;

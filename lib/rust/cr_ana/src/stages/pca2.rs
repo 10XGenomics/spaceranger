@@ -1,4 +1,5 @@
 //! Replacement for RUN_FBPCA. Could be absorbed into RUN_PCA_NG stage after some refactoring
+#![allow(missing_docs)]
 
 use crate::io::h5;
 use crate::types::H5File;
@@ -80,7 +81,7 @@ impl MartianStage for Pca2Stage {
         let sum_sq_umi_counts = &matrix
             .view()
             .apply(|x: u32| (x as f64).powi(2))
-            .sum_axis(ndarray::Axis(0));
+            .sum_axis(Axis(0));
         let col_scales = sum_sq_umi_counts.mapv(|c: f64| 1.0 / c.sqrt());
         let scale_cols = ScaleAxis::new(Axis(1), col_scales);
         let norm_matrix = matrix.compose_map(scale_cols);

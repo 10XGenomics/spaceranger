@@ -1,18 +1,17 @@
 // Various functions to iterate over molecule info files
+#![deny(missing_docs)]
 
 // Code for downsampling and collecting filters, to move a downsampler out of pandas and into Rust
 
 use cr_h5::molecule_info::{
-    BarcodeIdxType, FeatureIdxType, FullUmiCount, GemGroupType, LibraryIdxType,
-    MoleculeInfoIterator, MoleculeInfoReader, MoleculeInfoWriter, PerLibrarySubSampler,
+    BarcodeIdxType, FeatureIdxType, FullUmiCount, LibraryIdxType, MoleculeInfoIterator,
+    MoleculeInfoReader, PerLibrarySubSampler,
 };
 use cr_types::{LibraryInfo, LibraryType};
 use itertools::Itertools;
-use numpy::PyArray1;
-use pyo3::exceptions::PyIOError;
 use pyo3::prelude::*;
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Read and downsample a molecule_info.h5 file, and produce a feature-barcode matrix.
 /// Exclude barcodes that are not in the filtered barcodes dataset /barcode_info/pass_filter.
@@ -110,42 +109,6 @@ pub(crate) fn count_usable_reads(_py: Python<'_>, mol_info_path: String) -> Hash
         .map(|x| (x.library_idx, x.read_count as usize))
         .into_grouping_map()
         .sum()
-}
-
-/// Method to concatenate molecule. Takes in a molecule info file as a path where all the top
-/// level data (feature_ref, barcodes, metrics, library_info, etc). has been set (by python code in
-/// MERGE_MOLECULES) and proceeds to append the mol_info_columns to the input file by concatentating
-/// and modifying the inputs.
-/// bc_idx_offsets: a vector of values to offset each barcode index by
-/// gg_map: a vector of arrays where the index is the old gem group, and the value at that index the
-/// new
-/// lib_idx_maps: same as gg_map but for library indices
-#[pyfunction]
-pub(crate) fn concatenate_molecule_infos(
-    _py: Python<'_>,
-    out_path: String,
-    sources: Vec<PathBuf>,
-    bc_idx_offsets: Vec<BarcodeIdxType>,
-    gg_map: Vec<&PyArray1<GemGroupType>>,
-    lib_idx_maps: Vec<&PyArray1<LibraryIdxType>>,
-) -> PyResult<()> {
-    let out_path = Path::new(&out_path);
-    let dest_result = MoleculeInfoWriter::from_file(out_path);
-    match dest_result {
-        Ok(mut dest) => {
-            let gg_maps: Vec<_> = gg_map.into_iter().map(|gg| gg.to_vec().unwrap()).collect();
-            let lib_idx_maps: Vec<_> = lib_idx_maps
-                .into_iter()
-                .map(|lib| lib.to_vec().unwrap())
-                .collect();
-            dest.concatenate_many(sources, bc_idx_offsets, gg_maps, lib_idx_maps)
-                .expect("Error concatenating molecule infos");
-
-            dest.flush().expect("Could not flush buffers");
-            Ok(())
-        }
-        Err(_e) => Err(PyIOError::new_err("Could not open output file")),
-    }
 }
 
 pub(crate) struct LibraryAndFeatureIdxFilter {

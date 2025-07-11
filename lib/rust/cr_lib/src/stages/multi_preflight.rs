@@ -1,27 +1,26 @@
 //! Martian stage MULTI_PREFLIGHT
 //! Run pre-flight checks.
+#![allow(missing_docs)]
 
 use crate::preflight::{
     check_crispr_target_genes, check_resource_limits, check_target_panel,
     check_vdj_inner_enrichment_primers, check_vdj_known_enrichment_primers, hostname,
 };
-use anyhow::{bail, ensure, Result};
+use anyhow::{bail, ensure, Context, Result};
+use base64::prelude::BASE64_STANDARD;
+use base64::Engine;
 use cr_types::chemistry::ChemistryName;
 use cr_types::probe_set::merge_probe_set_csvs;
-use cr_types::reference::feature_reference::FeatureType;
 use cr_types::reference::probe_set_reference::TargetSetFile;
 use cr_types::reference::reference_info::ReferenceInfo;
 use cr_types::types::FileOrBytes;
-use cr_types::FeatureBarcodeType;
 use martian::prelude::*;
 use martian_derive::{make_mro, MartianStruct};
-use metric::TxHashSet;
 use multi::config::preflight::{
     build_feature_reference_with_cmos, check_gex_reference, check_libraries, check_samples,
     check_vdj_reference, SectionCtx,
 };
 use multi::config::{multiconst, ChemistryParam, MultiConfigCsv, MultiConfigCsvFile};
-use parameters_toml::max_multiplexing_tags;
 use serde::{Deserialize, Serialize};
 use std::io::Cursor;
 
@@ -38,7 +37,7 @@ pub struct MultiPreflightOutputs {}
 // This is our stage struct
 pub struct MultiPreflight;
 
-#[make_mro(volatile = strict)]
+#[make_mro(volatile = strict, mem_gb = 2)]
 impl MartianMain for MultiPreflight {
     type StageInputs = MultiPreflightInputs;
     type StageOutputs = MultiPreflightOutputs;
@@ -52,13 +51,18 @@ impl MartianMain for MultiPreflight {
                 bytes: Some(ref bytes),
                 file: None,
             } => {
-                let bytes = base64::decode(bytes)?;
+                let bytes = BASE64_STANDARD.decode(bytes)?;
                 MultiConfigCsv::from_reader(Cursor::new(bytes), "bytes")
             }
             FileOrBytes {
                 bytes: None,
                 file: Some(ref file),
-            } => MultiConfigCsvFile::from(file).read(),
+            } => {
+                if file.extension().and_then(|ext| ext.to_str()) != Some("csv") {
+                    bail!("multi config file must have .csv extention")
+                }
+                MultiConfigCsvFile::from(file).read()
+            }
             FileOrBytes {
                 bytes: None,
                 file: None,
@@ -68,6 +72,7 @@ impl MartianMain for MultiPreflight {
                 file: Some(_),
             } => bail!("exactly one of either config file or config bytes must be provided"),
         }?;
+
         let gene_expression = cfg.gene_expression.as_ref();
         let (transcriptome, target_genes) = if let Some(gex) = gene_expression {
             ensure!(
@@ -77,87 +82,114 @@ impl MartianMain for MultiPreflight {
                 multiconst::GENE_EXPRESSION,
             );
 
-            let transcriptome = check_gex_reference(
-                &SectionCtx {
-                    section: "gene-expression",
-                    field: "reference",
-                },
-                &gex.reference_path,
-                &hostname,
-            )?;
-            let ref_info = ReferenceInfo::from_reference_path(&gex.reference_path)?;
-            ref_info.validate()?;
-            let genomes = ref_info.genomes;
+            let transcriptome = gex
+                .reference_path
+                .as_deref()
+                .map(|ref_path| {
+                    check_gex_reference(
+                        &SectionCtx {
+                            section: "gene-expression",
+                            field: "reference",
+                        },
+                        ref_path,
+                        &hostname,
+                    )
+                })
+                .transpose()?;
 
-            let target_genes = match (gex.has_probe_set(), gex.targeting_method()) {
-                (true, Some(targeting_method)) => {
-                    let mut target_genes = TxHashSet::default();
-                    let probe_set = match gex.probe_set() {
-                        [single_probe_set] => single_probe_set.clone(),
-                        multiple => {
-                            let target_set: TargetSetFile = rover.make_path("combined_probe_set");
-                            merge_probe_set_csvs(multiple, target_set.buf_writer()?)?;
-                            target_set.as_ref().to_owned()
-                        }
-                    };
+            let ref_info = gex
+                .reference_path
+                .as_deref()
+                .map(ReferenceInfo::from_reference_path)
+                .transpose()?;
+            if let Some(ref_info) = &ref_info {
+                ref_info.validate()?;
+            }
 
-                    target_genes.extend(check_target_panel(
-                        &transcriptome,
-                        genomes.clone(),
-                        &probe_set,
-                        targeting_method,
-                        args.is_pd,
-                    )?);
+            let probe_set_csv = match gex.probe_set() {
+                [] => None,
+                [probe_set] => Some(probe_set.clone()),
+                probe_sets => {
+                    // Ensure that the input probe CSVs themselves are valid before
+                    // merging them.
+                    for probe_set in probe_sets {
+                        check_target_panel(
+                            transcriptome.as_ref(),
+                            ref_info.as_ref(),
+                            probe_set,
+                            gex.targeting_method().unwrap(),
+                        )
+                        .with_context(|| probe_set.to_string_lossy().to_string())?;
+                    }
 
-                    Some(target_genes)
+                    let probe_set_csv: TargetSetFile = rover.make_path("combined_probe_set");
+                    merge_probe_set_csvs(
+                        probe_sets,
+                        probe_set_csv.buf_writer()?,
+                        gex.reference_path.as_deref(),
+                    )?;
+                    Some(probe_set_csv)
                 }
-                _ => None,
             };
 
-            (Some(transcriptome), target_genes)
+            let target_genes = probe_set_csv
+                .as_ref()
+                .map(|probe_set_csv| {
+                    check_target_panel(
+                        transcriptome.as_ref(),
+                        ref_info.as_ref(),
+                        probe_set_csv,
+                        gex.targeting_method().unwrap(),
+                    )
+                })
+                .transpose()?;
+            (transcriptome, target_genes)
         } else {
             (None, None)
         };
-        let max_multiplexing_tags = *max_multiplexing_tags()?;
 
         let (feature_reference, _tenx_cmos) =
-            build_feature_reference_with_cmos(&cfg, args.is_pd, &hostname, max_multiplexing_tags)?;
+            build_feature_reference_with_cmos(&cfg, args.is_pd, &hostname)?;
 
-        if let (Some(transcriptome), Some(feature_reference)) =
-            (transcriptome.as_ref(), feature_reference.as_ref())
+        if let (Some(transcriptome), Some(feature_reference)) = (&transcriptome, &feature_reference)
         {
             check_crispr_target_genes(transcriptome, feature_reference, target_genes.as_ref())?;
         }
 
         if let Some(ref vdj) = cfg.vdj {
-            let vdj_ref = check_vdj_reference(
-                &SectionCtx {
-                    section: "vdj",
-                    field: "reference",
-                },
-                &vdj.reference_path,
-                &hostname,
-            )?;
+            if let Some(ref reference_path) = vdj.reference_path {
+                let vdj_ref = check_vdj_reference(
+                    &SectionCtx {
+                        section: "vdj",
+                        field: "reference",
+                    },
+                    reference_path,
+                    &hostname,
+                )?;
+                if let Some(ref primers) = vdj.inner_enrichment_primers {
+                    check_vdj_inner_enrichment_primers(
+                        Some(reference_path),
+                        Some(&vdj_ref),
+                        primers,
+                    )?;
+                } else {
+                    check_vdj_known_enrichment_primers(reference_path, &vdj_ref)?;
+                }
+            }
+            // denovo mode
             if let Some(ref primers) = vdj.inner_enrichment_primers {
-                check_vdj_inner_enrichment_primers(&vdj.reference_path, &vdj_ref, primers)?;
-            } else {
-                check_vdj_known_enrichment_primers(&vdj.reference_path, &vdj_ref)?;
+                check_vdj_inner_enrichment_primers(None, None, primers)?;
+            }
+            if vdj.denovo == Some(true) {
+                ensure!(
+                    cfg.samples.is_none() || args.is_pd,
+                    "Multiplexing with denovo mode is unsupported.",
+                );
             }
         }
 
-        check_libraries(
-            &cfg,
-            feature_reference.clone(),
-            args.is_pd,
-            &hostname,
-            max_multiplexing_tags,
-        )?;
-        check_samples(
-            &cfg,
-            feature_reference.clone(),
-            args.is_pd,
-            max_multiplexing_tags,
-        )?;
+        check_libraries(&cfg, feature_reference.clone(), args.is_pd, &hostname)?;
+        check_samples(&cfg, feature_reference.clone(), args.is_pd)?;
         // TODO(CELLRANGER-7837) remove this check once PD support is removed
         if !args.is_pd
             && cfg
@@ -165,21 +197,9 @@ impl MartianMain for MultiPreflight {
                 .values()
                 .any(|chem| chem.refined() == Some(ChemistryName::ThreePrimeV3LT))
         {
-            bail!("The chemistry SC3Pv3LT (Single Cell 3'v3 LT) is no longer supported. To analyze this data, use Cell Ranger 7.2 or earlier.");
-        }
-
-        // Check for CRISPR guide capture libraries and v4 of 3pGEX, which are incompatible.
-        if let Some(feature_reference) = feature_reference.as_ref() {
-            for feat in &feature_reference.feature_defs {
-                if feat.feature_type == FeatureType::Barcode(FeatureBarcodeType::Crispr)
-                    && cfg.chemistry_specs()?.values().any(|chem| {
-                        chem.refined() == Some(ChemistryName::ThreePrimeV4)
-                            || chem.refined() == Some(ChemistryName::ThreePrimeV4OH)
-                    })
-                {
-                    bail!("The chemistry SC3Pv4 (Single Cell 3'v4) is not supported with CRISPR Guide Capture libraries.")
-                }
-            }
+            bail!(
+                "The chemistry SC3Pv3LT (Single Cell 3'v3 LT) is no longer supported. To analyze this data, use Cell Ranger 7.2 or earlier."
+            );
         }
 
         Ok(MultiPreflightOutputs {})
@@ -193,7 +213,9 @@ mod tests {
     use insta::{assert_debug_snapshot, assert_snapshot};
     use itertools::Itertools;
     use multi::config::preflight::check_feature_reference;
+    use std::io::Write;
     use std::path::Path;
+    use tempfile::NamedTempFile;
     use test_refdata::refdata_available;
 
     fn test_run_stage_is_pd(
@@ -217,16 +239,6 @@ mod tests {
     fn test_gex_missing_gex_section() {
         let outs = test_run_stage("test/multi/invalid_csvs/gex_missing_gex_section.csv");
         assert_snapshot!(outs.unwrap_err());
-    }
-
-    #[test]
-    fn test_3pgexv4_crispr_incompatible() {
-        if !refdata_available() {
-            return;
-        }
-
-        let outs = test_run_stage("test/multi/3pgexv4_crispr_incompatible.csv");
-        assert_debug_snapshot!(&outs);
     }
 
     #[test]
@@ -407,6 +419,72 @@ mod tests {
         }
 
         let outs = test_run_stage("test/multi/invalid_csvs/invalid_overhang_ids.csv");
+        assert_debug_snapshot!(&outs.unwrap_err().to_string());
+    }
+
+    #[test]
+    fn test_misspelled_hash_tag() {
+        let feature_ref = r"id,name,read,pattern,sequence,feature_type
+TotalSeqB_Hashtag_1,TotalB_HashTag_1,R2,^NNNNNNNNNN(BC)NNNNNNNNN,GTCAACTCTTTAGCG,FEATURETEST
+TotalSeqB_Hashtag_2,TotalB_HashTag_2,R2,^NNNNNNNNNN(BC)NNNNNNNNN,TGATGGCCTATTGGG,FEATURETEST
+TotalSeqB_Hashtag_3,TotalB_HashTag_3,R2,^NNNNNNNNNN(BC)NNNNNNNNN,TTCCGCCTCTCTTTG,FEATURETEST
+TotalSeqB_Hashtag_4,TotalB_HashTag_4,R2,^NNNNNNNNNN(BC)NNNNNNNNN,AGTAAGTTCAGCGTA,FEATURETEST";
+        let mut temp_file = NamedTempFile::new().expect("Failed to create temp file");
+        write!(temp_file, "{feature_ref}").expect("Failed to write to temp file");
+
+        let csv = format!(
+            r"[gene-expression]
+ref,/blah/reporters
+create-bam,false
+
+[feature]
+ref,{}
+
+[libraries]
+fastq_path,sample_indices,lanes,physical_library_id,feature_types,subsample_rate,chemistry
+blah/fastq_path,CGTGACATGC,1|2|3|4|5|6|7|8,1384285,Gene Expression,,
+blah/fastq_path,AGATGAGAAT,1|2|3|4|5|6|7|8,1384321,Multiplexing Capture,,
+
+[samples]
+sample_id,cmo_ids,description
+Samp1,TotalB_HashTag_1,Samp1,,,,
+Samp2,TotalB_HashTag_2,Samp2,,,,
+Samp3,TotalB_HashTag_3,Samp3,,,,
+Samp4,TotalB_HashTag_4,Samp4,,,,",
+            temp_file.path().display()
+        );
+        let mut csv_file = NamedTempFile::new().expect("Failed to make temp file");
+        write!(csv_file, "{csv}").expect("Failed write");
+
+        let cfg = MultiConfigCsv::from_csv(csv_file.path()).unwrap();
+        let (feature_reference, _tenx_cmos) =
+            build_feature_reference_with_cmos(&cfg, true, &hostname()).unwrap();
+
+        let error_msg = r"Unknown cmo_ids ('TotalB_HashTag_1') provided for sample 'Samp1', please ensure you are either using valid 10x CMO IDs or are providing the correct [gene-expression] cmo-set.
+
+Valid IDs are currently:
+TotalSeqB_Hashtag_1
+TotalSeqB_Hashtag_2
+TotalSeqB_Hashtag_3
+TotalSeqB_Hashtag_4
+
+Did you perhaps mean any of the following? (Input -> Intended Value)?
+TotalB_HashTag_1 -> TotalSeqB_Hashtag_1
+";
+
+        let result = check_samples(&cfg, feature_reference, true);
+        match result {
+            Err(e) => assert_eq!(e.to_string(), error_msg),
+            Ok(()) => panic!("Failed to flag invalid sequence."),
+        };
+    }
+    #[test]
+    fn test_invalid_hashtag_ids() {
+        if !refdata_available() {
+            return;
+        }
+
+        let outs = test_run_stage("test/multi/invalid_csvs/invalid_hashtag_ids.csv");
         assert_debug_snapshot!(&outs.unwrap_err().to_string());
     }
 }

@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use slide_design::{Transform, VisiumHdSlide};
@@ -57,6 +58,9 @@ impl MatrixMetadata {
     }
 }
 
+/// Note: Transforms map spot indices to positions of spot centers in
+/// *corner-based* sub-pixel image coordinates, and vice versa. This means the
+/// sub-spot coordinate system is *center-based*.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TransformMatrices {
     pub spot_colrow_to_microscope_colrow: Option<Transform>,

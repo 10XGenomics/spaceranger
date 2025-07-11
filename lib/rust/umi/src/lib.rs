@@ -1,4 +1,5 @@
 //! Crate for dealing with UMI related types and functionalities.
+#![allow(missing_docs)]
 use fastq_set::squality::SQualityGen;
 use fastq_set::sseq::{HammingIterOpt, SSeqGen, SSeqOneHammingIter};
 use itertools::Itertools;

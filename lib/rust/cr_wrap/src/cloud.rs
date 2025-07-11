@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use crate::env::PkgEnv;
 use crate::utils::AllArgs;
 use anyhow::Result;

@@ -1,16 +1,18 @@
+#![allow(missing_docs)]
 use anyhow::{bail, Context, Result};
 use cr_types::reference::feature_reference::{
     FeatureDef, FeatureReference, FeatureType, TargetSet, REQUIRED_FEATURE_TAGS,
 };
 use fastq_set::read_pair::WhichRead;
 use hdf5::types::FixedAscii;
-use hdf5::{Group, H5Type};
+use hdf5::Group;
 use itertools::Itertools;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt::Write;
 use std::str::FromStr;
 use transcriptome::Gene;
+
 /// Write the feature reference to an HDF5 group. For use in the matrix.h5 and molecule_info.h5
 pub fn to_h5(featref: &FeatureReference, group: &mut Group) -> Result<()> {
     let mut all_tag_keys = vec!["genome"];
@@ -46,12 +48,6 @@ pub fn to_h5(featref: &FeatureReference, group: &mut Group) -> Result<()> {
         .iter()
         .map(|x| make_fixed_ascii(x))
         .try_collect()?;
-    let feature_types: HashMap<_, _> = featref
-        .feature_maps
-        .keys()
-        .map(|&x| (x, x.to_string()))
-        .collect();
-
     group
         .new_dataset::<FixedAscii<FA_LEN>>()
         .shape((all_tag_keys.len(),))
@@ -61,7 +57,7 @@ pub fn to_h5(featref: &FeatureReference, group: &mut Group) -> Result<()> {
 
     // write the 'always on' tag
     mk_string_col(featref, group, "feature_type", |feat| {
-        &feature_types[&feat.feature_type]
+        feat.feature_type.as_str()
     })?;
     mk_string_col(featref, group, "genome", |feat| &feat.genome)?;
     mk_string_col(featref, group, "id", |feat| &feat.id)?;
@@ -110,24 +106,6 @@ pub fn write_target_set_group(group: &mut Group, target_set: &TargetSet) -> Resu
     Ok(())
 }
 
-#[allow(dead_code)]
-fn mk_col<T: H5Type, F: (Fn(&FeatureDef) -> T)>(
-    featref: &FeatureReference,
-    group: &mut Group,
-    name: &str,
-    extract_field: F,
-) -> Result<()> {
-    let mut v = Vec::with_capacity(featref.feature_defs.len());
-
-    for f in &featref.feature_defs {
-        v.push(extract_field(f));
-    }
-
-    let ds = group.new_dataset::<T>().shape((v.len(),)).create(name)?;
-    ds.as_writer().write(&v)?;
-    Ok(())
-}
-
 fn mk_string_col<'a, F: (Fn(&'a FeatureDef) -> &'a str)>(
     featref: &'a FeatureReference,
     group: &mut Group,
@@ -152,7 +130,7 @@ fn mk_string_col<'a, F: (Fn(&'a FeatureDef) -> &'a str)>(
     Ok(())
 }
 
-fn mk_byte_col<'a, F: (Fn(&'a FeatureDef) -> &[u8])>(
+fn mk_byte_col<'a, F: (Fn(&'a FeatureDef) -> &'a [u8])>(
     featref: &'a FeatureReference,
     group: &mut Group,
     name: &str,
@@ -237,25 +215,26 @@ pub fn from_h5(group: &Group) -> Result<FeatureReference> {
     }
 
     let mut feature_maps = HashMap::new();
-    feature_maps.insert(FeatureType::Gene, HashMap::new());
     let mut gene_to_index = HashMap::new();
-
     for def in &features {
-        if def.feature_type != FeatureType::Gene {
-            feature_maps
-                .entry(def.feature_type)
-                .or_insert_with(HashMap::new)
-                .entry(def.sequence.clone())
-                .or_insert_with(Vec::new)
-                .push(def.index);
-        }
-
-        if def.feature_type == FeatureType::Gene {
-            let gene = Gene {
-                id: def.id.clone(),
-                name: def.name.clone(),
-            };
-            gene_to_index.insert(gene, def.index);
+        match def.feature_type {
+            FeatureType::Gene => {
+                let gene = Gene {
+                    id: def.id.clone(),
+                    name: def.name.clone(),
+                };
+                gene_to_index.insert(gene, def.index);
+            }
+            FeatureType::Barcode(fb_type) => {
+                feature_maps
+                    .entry(fb_type)
+                    .or_insert_with(HashMap::new)
+                    .entry(def.sequence.clone())
+                    .or_insert_with(Vec::new)
+                    .push(def.index);
+            }
+            FeatureType::ProteinExpression => unreachable!(),
+            FeatureType::Peaks => unreachable!(),
         }
     }
 
@@ -294,7 +273,7 @@ pub fn from_h5(group: &Group) -> Result<FeatureReference> {
 }
 
 pub fn encode_ascii_xml(s: &str) -> Cow<'_, str> {
-    if s.chars().all(|c| c.is_ascii()) {
+    if s.is_ascii() {
         return Cow::Borrowed(s);
     }
     let mut t = String::new();
@@ -348,7 +327,7 @@ where
             .dataset(name)?
             .read_1d::<FixedAscii<FA_LEN>>()?
             .into_iter()
-            .map(|x| x.parse::<T>())
+            .map(|x| T::from_str(&x))
             .try_collect()?
     } else {
         vec![default.into(); len]
@@ -377,7 +356,6 @@ fn get_extra_tags(all_tag_keys: &[String]) -> Vec<String> {
 }
 
 #[cfg(test)]
-#[allow(dead_code)]
 mod tests {
     use super::*;
     use cr_types::reference::feature_reference::FeatureReferenceFile;
@@ -409,8 +387,7 @@ mod tests {
 
         // read from reference path
         let fr_new = FeatureReference::from_paths(
-            &refdata_path("GRCh38-3.0.0/"),
-            None,
+            Some(&refdata_path("GRCh38-3.0.0/")),
             None,
             None,
             None,
@@ -443,7 +420,6 @@ mod tests {
     fn gex_abs_features() -> Result<()> {
         test_feature_io(
             "test/feature/pbmc_1k_protein_v3.csv",
-            refdata_path("GRCh38-3.0.0/"),
             Some(
                 showroom_path("pbmc_1k_protein_v3/filtered_feature_bc_matrix.h5")
                     .to_str()
@@ -454,27 +430,13 @@ mod tests {
 
     #[test]
     fn test_extra_cols_csv() -> Result<()> {
-        test_feature_io(
-            "test/feature/extra_commas.csv",
-            refdata_path("GRCh38-3.0.0/"),
-            None,
-        )
+        test_feature_io("test/feature/extra_commas.csv", None)
     }
 
-    fn test_feature_io(
-        feature_csv: impl AsRef<Path>,
-        reference: impl AsRef<Path>,
-        legacy_mat_h5: Option<&str>,
-    ) -> Result<()> {
-        if !refdata_available() {
-            return Ok(());
-        }
-
-        // read from reference path
+    fn test_feature_io(feature_csv: impl AsRef<Path>, legacy_mat_h5: Option<&str>) -> Result<()> {
         let fr_new = FeatureReference::from_paths(
-            reference.as_ref(),
-            Some(&FeatureReferenceFile::from(feature_csv.as_ref())),
             None,
+            Some(&FeatureReferenceFile::from(feature_csv.as_ref())),
             None,
             None,
             None,
@@ -507,11 +469,7 @@ mod tests {
 
     #[test]
     fn gex_featuretest_features() -> Result<()> {
-        test_feature_io(
-            "test/feature/featuretest.csv",
-            refdata_path("GRCh38-3.0.0/"),
-            None,
-        )
+        test_feature_io("test/feature/featuretest.csv", None)
     }
 
     #[test]
@@ -522,11 +480,10 @@ mod tests {
 
         // read from reference path
         let fr_orig = FeatureReference::from_paths(
-            &refdata_path("GRCh38-3.0.0/"),
+            Some(&refdata_path("GRCh38-3.0.0/")),
             Some(&FeatureReferenceFile::from(Path::new(
                 "test/feature/crispr_features.csv",
             ))),
-            None,
             None,
             None,
             None,

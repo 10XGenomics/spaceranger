@@ -1,5 +1,6 @@
 //! Martian stage CALL_TAGS_RTL
 //! Assign cells to samples using their probe barcode sequence.
+#![allow(missing_docs)]
 use crate::barcode_overlap::{
     calculate_frp_gem_barcode_overlap, FRPGemBarcodeOverlapRow, GelBeadBarcodesPerProbeBarcode,
     ProbeBarcodeGelBeadGrouper,
@@ -9,7 +10,9 @@ use crate::read_level_multiplexing::{
     get_barcodes_per_multiplexing_identifier, get_umi_per_multiplexing_identifier,
 };
 use anyhow::Result;
-use barcode::whitelist::{categorize_multiplexing_barcode_id, BarcodeId, MultiplexingBarcodeType};
+use barcode::whitelist::{
+    categorize_rtl_multiplexing_barcode_id, BarcodeId, RTLMultiplexingBarcodeType,
+};
 use barcode::{BarcodeConstruct, BcSegSeq, GelBeadAndProbeConstruct};
 use cr_h5::count_matrix::{CountMatrix, CountMatrixFile, LazyCountMatrix};
 use cr_types::chemistry::ChemistryDefs;
@@ -126,7 +129,7 @@ impl MartianStage for CallTagsRTL {
         let raw_matrix_gib = args.raw_feature_bc_matrix.estimate_mem_gib()?;
         println!("raw_matrix_gib={raw_matrix_gib:.1}");
         Ok(StageDef::with_join_resource(Resource::with_mem_gb(
-            2 + raw_matrix_gib.ceil() as isize,
+            4 + raw_matrix_gib.ceil() as isize,
         )))
     }
 
@@ -183,12 +186,7 @@ impl MartianStage for CallTagsRTL {
         // TODO(CELLRANGER-7847): Factor out duplicated seq_to_id code
         let probe_barcode_seq_to_id: TxHashMap<_, _> = barcode_constructs
             .into_values()
-            .map(|x| {
-                x.probe
-                    .whitelist()
-                    .as_source(true)?
-                    .as_translation_seq_to_id()
-            })
+            .map(|x| x.probe.whitelist().as_source()?.as_translation_seq_to_id())
             .flatten_ok()
             .try_collect()?;
 
@@ -229,7 +227,9 @@ impl MartianStage for CallTagsRTL {
                 translated_tag_names
                     .iter()
                     .filter(|x| {
-                        categorize_multiplexing_barcode_id(x) == MultiplexingBarcodeType::Antibody
+                        categorize_rtl_multiplexing_barcode_id(x)
+                            .expect("Missing Multiplexing Barcode!")
+                            == RTLMultiplexingBarcodeType::Antibody
                     })
                     .at_most_one()
                     .unwrap()
@@ -320,7 +320,7 @@ fn handle_rtl_ab_pairings(
         get_median_umi_per_cell(&filtered_matrix, probe_barcode_range.clone());
 
     // Drop the filtered matrix to free memory before loading the raw matrix.
-    std::mem::drop(filtered_matrix);
+    drop(filtered_matrix);
 
     Ok(detect_suspicious_rtl_ab_pairings(
         raw_matrix.loaded()?,
@@ -391,6 +391,8 @@ fn detect_suspicious_rtl_ab_pairings(
                     // TODO(CELLRANGER-7915): Detect suspicious pairings for Flex CRISPR
                     FeatureType::Barcode(FeatureBarcodeType::Crispr) => return None,
                     FeatureType::Barcode(_) => unreachable!(),
+                    FeatureType::ProteinExpression => unimplemented!(),
+                    FeatureType::Peaks => unimplemented!(),
                 };
                 Some(((*feature_type, probe_bc_id), median_umi))
             })
@@ -421,8 +423,8 @@ fn detect_suspicious_rtl_ab_pairings(
         // probe barcodes are not associated with a sample, they should never
         // end up being called as cells.
         assert_eq!(
-            categorize_multiplexing_barcode_id(probe_id),
-            MultiplexingBarcodeType::Antibody,
+            categorize_rtl_multiplexing_barcode_id(probe_id).unwrap(),
+            RTLMultiplexingBarcodeType::Antibody,
             "probe ID {probe_id} was expected to be an antibody probe barcode",
         );
         // Remove all gel beads with counts below the threshold.
@@ -460,7 +462,8 @@ fn detect_suspicious_rtl_ab_pairings(
         })
         .map(|mut row| {
             // Canonicalize so pairings are always ordered as RTL+AB.
-            if categorize_multiplexing_barcode_id(&row.barcode1_id) != MultiplexingBarcodeType::RTL
+            if categorize_rtl_multiplexing_barcode_id(&row.barcode1_id).unwrap()
+                != RTLMultiplexingBarcodeType::Gene
             {
                 row.swap_order();
             }

@@ -16,7 +16,6 @@ from typing import IO, TYPE_CHECKING, Any, AnyStr, Literal, TextIO, overload
 
 import lz4.frame as lz4
 import martian
-import polars as pl
 
 import cellranger.h5_constants as h5_constants
 
@@ -123,7 +122,7 @@ def check_completed_process(p: subprocess.CompletedProcess, cmd: str) -> None:
     if p.returncode is None:
         raise CRCalledProcessError(f"Process did not finish: {cmd} .")
     elif p.returncode != 0:
-        raise CRCalledProcessError("Process returned error code %d: %s ." % (p.returncode, cmd))
+        raise CRCalledProcessError(f"Process returned error code {p.returncode}: {cmd} .")
 
 
 def mkdir(path: str | bytes, exist_ok: bool = True):
@@ -244,31 +243,6 @@ def concatenate_headered_files(
                     this_header = in_file.readline()
                     assert this_header == header
                     shutil.copyfileobj(in_file, out_file)
-
-
-def concatenate_parquet_files(
-    out_path: str | bytes,
-    parquet_files: Sequence[str | bytes],
-    dtype_cast: dict[str, pl.DataTypeClass] = {},
-) -> None:
-    """Concatenate parquet files, by loading them all and then writing them out.
-
-    Args:
-        out_path:
-        parquet_files:
-        dtype_cast:
-    Returns:
-        None
-    """
-    # Ensure there are Parquet files to process
-    if not parquet_files:
-        raise ValueError("No Parquet files specified.")
-    if dtype_cast == {}:
-        pl.scan_parquet(parquet_files).sink_parquet(out_path)
-    else:
-        pl.concat([pl.scan_parquet(p).cast(dtype_cast) for p in parquet_files]).sink_parquet(
-            out_path
-        )
 
 
 def write_empty_json(filename: str | bytes) -> None:

@@ -1,6 +1,6 @@
-use crate::{CountAndPercent, FloatAsInt, Percent, PercentF1};
+#![allow(missing_docs)]
+use crate::{FloatAsInt, Percent};
 use anyhow::{anyhow, bail, Result};
-use log::warn;
 use serde_json::{Number, Value};
 
 pub trait TryFromValue {
@@ -42,26 +42,6 @@ impl TryFromValue for usize {
 impl TryFromValue for Percent {
     fn try_from_value(value: &Value) -> Result<Option<Self>> {
         Ok(f64::try_from_value(value)?.map(Percent::Float))
-    }
-}
-
-impl TryFromValue for PercentF1 {
-    fn try_from_value(value: &Value) -> Result<Option<Self>> {
-        Ok(Percent::try_from_value(value)?.map(PercentF1))
-    }
-}
-
-impl TryFromValue for CountAndPercent {
-    fn try_from_value(_: &Value) -> Result<Option<Self>> {
-        // TEMP: log a warning and return None
-        // FIXME CELLRANGER-8444
-        // We should never end up using the result of this call in output,
-        // since all CountAndPercent fields need to be manually constructed.
-        // However, we cannot use struct update syntax for populating metrics
-        // tables for any tables that contain CountAndPercent if we panic here.
-        // unimplemented!("TryFromValue is not implemented for CountAndPercent")
-        warn!("Attempted to call try_from_value for CountAndPercent.");
-        Ok(None)
     }
 }
 

@@ -1,11 +1,14 @@
 //! Detection of probe barcode pairing between gene expression and feature barcoding.
+#![deny(missing_docs)]
 use super::chemistry_filter::DetectChemistryUnit;
 use crate::barcode_overlap::{
     calculate_frp_gem_barcode_overlap, FRPGemBarcodeOverlapRow, GelBeadBarcodesPerProbeBarcode,
     ProbeBarcodeGelBeadGrouper,
 };
 use anyhow::Result;
-use barcode::whitelist::{categorize_multiplexing_barcode_id, BarcodeId, MultiplexingBarcodeType};
+use barcode::whitelist::{
+    categorize_rtl_multiplexing_barcode_id, BarcodeId, RTLMultiplexingBarcodeType,
+};
 use barcode::{BarcodeConstruct, BcSegSeq, WhitelistSource};
 use cr_types::chemistry::ChemistryDefs;
 use cr_types::LibraryType;
@@ -19,7 +22,8 @@ use std::collections::{HashMap, HashSet};
 pub fn should_detect_probe_barcode_pairing(multi_config: &MultiConfigCsv) -> bool {
     multi_config.is_rtl_multiplexed()
         && multi_config.libraries.has_gene_expression()
-        && multi_config.libraries.has_feature_barcode()
+        && multi_config.libraries.has_antibody_capture()
+        && multi_config.has_translated_multiplexing_barcode_types()
 }
 
 /// Only consider probe barcodes that were seen in at least this fraction of all gel beads.
@@ -37,10 +41,7 @@ pub fn detect_probe_barcode_pairing(
     let whitelist_sources: HashMap<_, _> = chemistry_defs
         .iter()
         .map(|(library_type, chemistry_def)| {
-            anyhow::Ok((
-                library_type,
-                WhitelistSource::construct(chemistry_def.barcode_whitelist(), false)?,
-            ))
+            anyhow::Ok((library_type, chemistry_def.barcode_whitelist_source()?))
         })
         .try_collect()?;
 
@@ -68,8 +69,9 @@ pub fn detect_probe_barcode_pairing(
             })
             .map(|seqs| seqs.map(BcSegSeq::from_bytes))
             .filter_map(move |seqs| {
-                seqs.zip(whitelist)
-                    .map_option(|(seq, whitelist)| whitelist.match_to_whitelist(seq))
+                seqs.zip(whitelist).map_option(|(seq, whitelist)| {
+                    whitelist.match_to_whitelist_allow_one_n(seq, false)
+                })
             })
             .map(|barcode_components| match barcode_components {
                 BarcodeConstruct::GelBeadAndProbe(x) => x,
@@ -129,13 +131,15 @@ pub fn get_rtl_and_ab_barcode_from_row(
     row: &FRPGemBarcodeOverlapRow,
 ) -> Option<(BarcodeId, BarcodeId)> {
     match (
-        categorize_multiplexing_barcode_id(&row.barcode1_id),
-        categorize_multiplexing_barcode_id(&row.barcode2_id),
+        categorize_rtl_multiplexing_barcode_id(&row.barcode1_id)
+            .expect("Missing Multiplexing Barcode!"),
+        categorize_rtl_multiplexing_barcode_id(&row.barcode2_id)
+            .expect("Missing Multiplexing Barcode!"),
     ) {
-        (MultiplexingBarcodeType::RTL, MultiplexingBarcodeType::Antibody) => {
+        (RTLMultiplexingBarcodeType::Gene, RTLMultiplexingBarcodeType::Antibody) => {
             Some((row.barcode1_id, row.barcode2_id))
         }
-        (MultiplexingBarcodeType::Antibody, MultiplexingBarcodeType::RTL) => {
+        (RTLMultiplexingBarcodeType::Antibody, RTLMultiplexingBarcodeType::Gene) => {
             Some((row.barcode2_id, row.barcode1_id))
         }
         _ => None,

@@ -274,7 +274,7 @@ class ReferenceBuilder(NewGtfParser):
         assert self.genome_prefixes is not None
         with open(out_gtf_fn, "w") as f:
             writer = csv.writer(
-                f, delimiter="\t", quoting=csv.QUOTE_NONE, quotechar="", lineterminator="\n"
+                f, delimiter="\t", quoting=csv.QUOTE_NONE, quotechar=None, lineterminator="\n"
             )
             for genome_prefix, in_gtf_fn in zip(self.genome_prefixes, self.in_gtf_fns):
                 if len(self.genomes) > 1:
@@ -399,8 +399,7 @@ class STAR:
             min_mem_gb = int(genome_mem_gb + sa_index_mem_gb + 3)
             if mem_gb < min_mem_gb:
                 raise GexReferenceError(
-                    "STAR requires at least %d GB of memory when aligning reads to your reference.\nPlease start again with --memgb=%d."
-                    % (min_mem_gb, min_mem_gb)
+                    f"STAR requires at least {min_mem_gb} GB of memory when aligning reads to your reference.\nPlease start again with --memgb={min_mem_gb}."
                 )
 
             limit_ram = mem_gb * 1024**3

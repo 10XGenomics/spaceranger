@@ -1,45 +1,58 @@
 //! Martian stage BUILD_PER_SAMPLE_VDJ_WS_CONTENTS
-
+#![allow(missing_docs)]
 use crate::stages::parse_multi_config::VdjGenInputs;
 use crate::SequencingMetricsFormat;
 use anyhow::Result;
-use cr_types::{LibraryType, MetricsFile, SampleAssignment};
-use cr_websummary::multi::tables::{
-    SequencingMetricsTable, VdjBEnrichmentMetricsTable, VdjBSampleAnnotationMetricsTable,
-    VdjBSampleHeroMetricsTable, VdjLibraryCellMetricsTable, VdjPhysicalLibraryMetricsTable,
-    VdjTEnrichmentMetricsTable, VdjTSampleAnnotationMetricsTable, VdjTSampleHeroMetricsTable,
-    VdjTgdEnrichmentMetricsTable, VdjTgdSampleAnnotationMetricsTable, VdjTgdSampleHeroMetricsTable,
+use cr_types::{
+    BarcodeMultiplexingType, CellLevel, CrMultiGraph, LibraryType, MetricsFile, ReadLevel,
+    SampleAssignment,
 };
-use cr_websummary::multi::websummary::{
-    ClonotypeInfo, LibraryVdjWebSummary, SampleVdjWebSummary, VdjChainTypeSpecific, VdjDiagnostics,
-    VdjEnrichmentMetricsTable, VdjParametersTable, VdjSampleAnnotationMetricsTable,
-    VdjSampleHeroMetricsTable,
+use cr_websummary::alert::AlertContext;
+use cr_websummary::multi::metrics::{
+    load_metrics_etl_special, load_metrics_etl_vdj, ActiveConditions, CountAndPercentTransformer,
+    MetricsProcessor,
 };
+use cr_websummary::multi::websummary::{JsonMetricSummary, MetricsTraitWrapper, Section};
+#[allow(clippy::wildcard_imports)]
+use cr_websummary::multi::websummary_vdj::*;
 use cr_websummary::{ChartWithHelp, TitleWithHelp};
+use json_report_derive::JsonReport;
 use martian::prelude::*;
 use martian_derive::{make_mro, martian_filetype, MartianStruct};
 use martian_filetypes::json_file::{JsonFile, JsonFormat};
 use martian_filetypes::{FileTypeRead, FileTypeWrite};
+use metric::TxHashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::iter::zip;
 use vdj_reference::VdjReceptor;
 
+const VDJ_BARCODE_RANK_PLOT_TITLE: &str = "V(D)J Barcode Rank Plot";
+const VDJ_BARCODE_RANK_PLOT_HELP: &str = "The plot shows the count of filtered UMIs mapped to each barcode. A barcode must have a contig that aligns to a V segment to be identified as a targeted cell. (In the denovo case, the only requirement is a contig's presence.) There must also be at least three filtered UMIs with at least two read pairs each. It is possible that a barcode with at least as many filtered UMIs as another cell-associated barcode is not identified as a targeted cell. The color of the graph is based on the local density of cell-associated barcodes. Hovering over the plot displays the total number and percentage of barcodes in that region called as cells along with the number of UMI counts for those barcodes and barcode rank, ordered in descending order of UMI counts.";
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct VdjWsLibraryContents {
+    pub barcode_rank_plot: Option<ChartWithHelp>,
+    pub metrics: Vec<JsonMetricSummary>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct VdjWsSampleContents {
+    pub clonotype_info: Option<ClonotypeInfo>,
+    pub barcode_rank_plot: Option<ChartWithHelp>,
+    pub metrics: Vec<JsonMetricSummary>,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct VdjWsContents {
-    pub chemistry: String,
     pub receptor: VdjReceptor,
-    pub vdj_reference: String,
-    pub vdj_reference_path: String,
-    pub sequencing_metrics_table: SequencingMetricsTable,
-    pub cell_metrics_table: VdjLibraryCellMetricsTable,
-    pub enrichment_metrics_table: VdjEnrichmentMetricsTable,
-    pub physical_library_metrics_table: VdjPhysicalLibraryMetricsTable,
-    pub hero_metrics: VdjSampleHeroMetricsTable,
-    pub annotation_metrics_table: VdjSampleAnnotationMetricsTable,
-    pub barcode_rank_plot: Option<ChartWithHelp>,
-    pub clonotype_info: Option<ClonotypeInfo>,
+    pub denovo: bool,
+    pub chemistry: String,
+    pub vdj_reference: Option<String>,
+    pub vdj_reference_path: Option<String>,
+    pub lib_contents: VdjWsLibraryContents,
+    pub sample_contents: VdjWsSampleContents,
     pub filter_metrics: Option<Value>,
 }
 
@@ -51,12 +64,10 @@ impl VdjWsContents {
                 vdj_reference: self.vdj_reference,
                 vdj_reference_path: self.vdj_reference_path,
                 gamma_delta: self.receptor == VdjReceptor::TRGD,
+                denovo: self.denovo,
             },
-            sequencing_metrics_table: self.sequencing_metrics_table.into(),
-            cell_metrics_table: self.cell_metrics_table.into(),
-            enrichment_metrics_table: self.enrichment_metrics_table.into(),
-            physical_library_metrics_table: self.physical_library_metrics_table.into(),
-            barcode_rank_plot: self.barcode_rank_plot,
+            barcode_rank_plot: self.lib_contents.barcode_rank_plot,
+            metrics: MetricsTraitWrapper(self.lib_contents.metrics),
         }
     }
 
@@ -73,11 +84,11 @@ impl VdjWsContents {
                 vdj_reference: self.vdj_reference,
                 vdj_reference_path: self.vdj_reference_path,
                 gamma_delta: self.receptor == VdjReceptor::TRGD,
+                denovo: self.denovo,
             },
-            hero_metrics: self.hero_metrics.into(),
-            annotation_metrics_table: self.annotation_metrics_table.into(),
-            clonotype_info: self.clonotype_info,
-            barcode_rank_plot: None,
+            clonotype_info: self.sample_contents.clonotype_info,
+            barcode_rank_plot: self.sample_contents.barcode_rank_plot,
+            metrics: MetricsTraitWrapper(self.sample_contents.metrics),
         }
     }
 }
@@ -87,14 +98,20 @@ pub type VdjWsContentsFormat = JsonFormat<_VdjWsContentsFile, VdjWsContents>;
 
 #[derive(Deserialize, MartianStruct)]
 pub struct BuildPerSampleVdjWsContentsStageInputs {
+    pub receptor: VdjReceptor,
+    pub denovo: bool,
+    pub physical_library_id: String,
+    pub multiplexing_method: Option<BarcodeMultiplexingType>,
     pub lib_level_metrics: MetricsFile,
     pub per_sample_metrics: HashMap<SampleAssignment, MetricsFile>,
-    pub receptor: VdjReceptor,
-    pub physical_library_id: String,
     pub vdj_gen_inputs: VdjGenInputs,
     pub sequencing_metrics: SequencingMetricsFormat,
-    pub vdj_ws_json: HashMap<SampleAssignment, JsonFile<Value>>, // Web summary JSON for the vdj pipeline
+    pub lib_level_vdj_ws_json: JsonFile<Value>, // Web summary JSON from cellranger vdj pipeline
+    pub per_sample_vdj_ws_json: HashMap<SampleAssignment, JsonFile<Value>>, // Web summary JSON from cellranger vdj pipeline
     pub filter_metrics: HashMap<SampleAssignment, Option<JsonFile<Value>>>,
+    pub multi_graph: JsonFile<CrMultiGraph>,
+    pub vdj_cells_per_tag_json: Option<JsonFile<HashMap<String, usize>>>,
+    pub clonotype_info_json: HashMap<SampleAssignment, Option<JsonFile<ClonotypeInfo>>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, MartianStruct)]
@@ -113,6 +130,81 @@ pub struct BuildPerSampleVdjWsContentsStageOutputs {
 }
 
 pub struct BuildPerSampleVdjWsContents;
+
+fn generate_barcore_rank_plot(value: &Value) -> Option<ChartWithHelp> {
+    let cells = &value["summary"]["summary_tab"]["cells"];
+    cells.get("barcode_knee_plot").map(|plot| ChartWithHelp {
+        plot: {
+            let mut plot = plot.clone();
+            plot["layout"].as_object_mut().unwrap().remove("title");
+            serde_json::from_value(plot).unwrap()
+        },
+        help: TitleWithHelp {
+            help: VDJ_BARCODE_RANK_PLOT_HELP.to_string(),
+            title: VDJ_BARCODE_RANK_PLOT_TITLE.to_string(),
+        },
+    })
+}
+
+/// Construct the metrics per tag table.
+fn build_metrics_per_tag(
+    metrics_proc: &MetricsProcessor,
+    active_conditions: &ActiveConditions,
+    alert_context: &AlertContext,
+    section: Section,
+    multi_graph: &CrMultiGraph,
+    vdj_cells_per_tag: Option<&JsonFile<HashMap<String, usize>>>,
+) -> Result<Vec<JsonMetricSummary>> {
+    let special_metrics_group = match multi_graph.barcode_multiplexing_type() {
+        Some(BarcodeMultiplexingType::CellLevel(CellLevel::Hashtag)) => {
+            "vdj_library_metrics_per_hashtag_id"
+        }
+        Some(BarcodeMultiplexingType::ReadLevel(ReadLevel::OH)) => {
+            "vdj_library_metrics_per_ocm_barcode"
+        }
+        _ => {
+            return Ok(vec![]);
+        }
+    };
+
+    let Some(vdj_cells_per_tag) = vdj_cells_per_tag else {
+        panic!("vdj_cells_per_tag file is unexpectedly null");
+    };
+
+    let tag_id_to_sample_id_data = multi_graph.get_tag_name_to_sample_id_map()?;
+    let vdj_cells_per_tag = vdj_cells_per_tag.read()?;
+
+    let mut metrics_proc = metrics_proc.with_default_transformers();
+
+    metrics_proc.add_transformer(
+        "CellsFraction",
+        CountAndPercentTransformer::new(vdj_cells_per_tag.values().sum()),
+    );
+
+    #[derive(JsonReport)]
+    struct Metrics<'a> {
+        tag_id: &'a str,
+        sample_id: &'a str,
+        vdj_cells_per_tag: usize,
+    }
+
+    let mut metrics = vec![];
+    for (tag_id, (sample_id, _)) in tag_id_to_sample_id_data {
+        let cells = vdj_cells_per_tag[tag_id];
+        metrics.extend(metrics_proc.process_group(
+            special_metrics_group,
+            section,
+            active_conditions,
+            alert_context,
+            &Metrics {
+                tag_id,
+                sample_id,
+                vdj_cells_per_tag: cells,
+            },
+        )?);
+    }
+    Ok(metrics)
+}
 
 #[make_mro(volatile = strict)]
 impl MartianStage for BuildPerSampleVdjWsContents {
@@ -145,119 +237,141 @@ impl MartianStage for BuildPerSampleVdjWsContents {
         // For now, we will extract the bacode knee plot and the clonotype table/hist
         // from the vdj web summary json.
         // TODO: This is not very pretty. Cleanup in the future.
-        let vdj_ws_json = args.vdj_ws_json.get(&sample).unwrap().read()?;
-        let cells_value = &vdj_ws_json["summary"]["summary_tab"]["cells"];
-        let barcode_rank_plot = cells_value.get("barcode_knee_plot").map(|plot| ChartWithHelp {
-            plot: {
-                let mut plot = plot.clone();
-                plot["layout"].as_object_mut().unwrap().remove("title");
-                serde_json::from_value(plot).unwrap()
-            },
-            help: TitleWithHelp {
-                help: "The plot shows the count of filtered UMIs mapped to each barcode. A barcode must have a contig that aligns to a V segment to be identified as a targeted cell. (In the denovo case, the only requirement is a contig's presence.) There must also be at least three filtered UMIs with at least two read pairs each. It is possible that a barcode with at least as many filtered UMIs as another cell-associated barcode is not identified as a targeted cell. The color of the graph is based on the local density of cell-associated barcodes. Hovering over the plot displays the total number and percentage of barcodes in that region called as cells along with the number of UMI counts for those barcodes and barcode rank, ordered in descending order of UMI counts.".into(),
-                title: "V(D)J Barcode Rank Plot".into(),
-            }
-        });
-        let clonotype_info = if let Some(analysis_tab) =
-            &vdj_ws_json["summary"].get("vdj_analysis_tab")
-        {
-            let clonotype_info = ClonotypeInfo {
-                plot: serde_json::from_value(analysis_tab["vdj_clonotype_hist"]["plot"].clone())?,
-                table: serde_json::from_value(analysis_tab["vdj_clonotype"]["table"].clone())?,
-                help: TitleWithHelp {
-                    help: r#"The histogram displays the fraction of cells (percentage of cells) occupied by the 10 most abundant clonotypes in this sample. The clonotype IDs on the X axis correspond to the clonotype IDs listed in the table. The table lists the CDR3 sequence of the first exact subclonotype of the 10 most abundant clonotypes in this sample. For each of the top 10 clonotypes, the constant region, number of cells (frequency), and what percentage of the dataset those cells occupy (proportion) are also displayed. For the full table and more details, please refer to the "clonotypes.csv" and "consensus_annotations.csv" files produced by the pipeline."#.into(),
-                    title: "Top 10 Clonotypes".into(),
-                }
-            };
-            Some(clonotype_info)
-        } else {
-            None
+        let lib_vdj_ws_json = args.lib_level_vdj_ws_json.read()?;
+        let lib_bc_rank_plot = generate_barcore_rank_plot(&lib_vdj_ws_json);
+
+        let sample_vdj_ws_json = args.per_sample_vdj_ws_json.get(&sample).unwrap().read()?;
+        let sample_bc_rank_plot = generate_barcore_rank_plot(&sample_vdj_ws_json);
+
+        let clonotype_info_json = args.clonotype_info_json.get(&sample).unwrap().clone();
+        let clonotype_info_plot: Option<ClonotypeInfo> = match clonotype_info_json {
+            Some(clonotype_info_json) => Some(clonotype_info_json.read()?),
+            None => None,
         };
 
         // End of extraction from vdj web summary json
 
-        let mut library_metrics: HashMap<String, Value> = args.lib_level_metrics.read()?;
+        let (lib_metrics_proc, sample_metrics_proc) = load_metrics_etl_vdj()?;
+
+        let mut library_metrics: TxHashMap<String, Value> = args.lib_level_metrics.read()?;
         library_metrics.insert(
             "physical_library_id".to_string(),
             args.physical_library_id.into(),
         );
 
-        let sample_metrics: HashMap<String, Value> =
+        let sample_metrics: TxHashMap<String, Value> =
             args.per_sample_metrics.get(&sample).unwrap().read()?;
 
-        let vdj_ref_version = match library_metrics["vdj_reference_version"].as_str() {
-            Some(x) => format!("-{x}"),
-            None => String::default(),
+        let vdj_reference = if let Some(vdj_reference) =
+            library_metrics.get("vdj_reference_genomes")
+        {
+            let vdj_ref_version = library_metrics
+                .get("vdj_reference_version")
+                .and_then(|v| v.as_str())
+                .map(|x| format!("-{x}"))
+                .unwrap_or_default();
+            let vdj_ref_string = format!("{}{}", vdj_reference.as_str().unwrap(), vdj_ref_version);
+            Some(vdj_ref_string)
+        } else {
+            None
         };
+
+        let multi_graph = args.multi_graph.read()?;
+
+        let section = match args.receptor {
+            VdjReceptor::TR => Section::VdjT,
+            VdjReceptor::TRGD => Section::VdjTGd,
+            VdjReceptor::IG => Section::VdjB,
+        };
+
+        let active_conditions = ActiveConditions {
+            section,
+            vdj_receptor: Some(args.receptor),
+            is_multiplexed: multi_graph.barcode_multiplexing_type().is_some(),
+            is_cell_multiplexed: multi_graph.is_cell_level_multiplexed(),
+            is_read_multiplexed: multi_graph.is_read_level_multiplexed(),
+            is_rtl: false,          //FIXME CELLRANGER-8444
+            has_gdna: false,        //FIXME CELLRANGER-8444
+            include_introns: false, //FIXME CELLRANGER-8444
+            has_vdj_reference: vdj_reference.is_some(),
+        };
+
+        let alert_context = AlertContext {
+            is_rtl: active_conditions.is_rtl,
+            is_arc_chemistry: false,
+            library_types: multi_graph.library_types().collect(),
+            multiplexing_method: multi_graph.barcode_multiplexing_type(),
+            is_fiveprime: false, // FIXME CELLRANGER-8444
+            include_introns: active_conditions.include_introns,
+            no_preflight: false, // FIXME CELLRANGER-8444
+        };
+
+        let mut lib_metrics_out = lib_metrics_proc.process(
+            section,
+            &active_conditions,
+            &alert_context,
+            &library_metrics,
+        )?;
+
+        let special_metrics_proc = load_metrics_etl_special()?;
+
+        lib_metrics_out.extend(build_metrics_per_tag(
+            &special_metrics_proc,
+            &active_conditions,
+            &alert_context,
+            section,
+            &multi_graph,
+            args.vdj_cells_per_tag_json.as_ref(),
+        )?);
+
+        for seq_metrics in args
+            .sequencing_metrics
+            .read()?
+            // CELLRANGER-7889 this may need to be updated eventually
+            .remove(&LibraryType::VdjAuto)
+            .unwrap()
+        {
+            lib_metrics_out.extend(special_metrics_proc.process_group(
+                "sequencing_metrics",
+                section,
+                &active_conditions,
+                &alert_context,
+                &seq_metrics,
+            )?);
+        }
 
         let contents = VdjWsContents {
             receptor: args.receptor,
+            denovo: args.denovo,
             chemistry: library_metrics["chemistry_description"]
                 .as_str()
                 .unwrap()
                 .to_string(),
-            vdj_reference: format!(
-                "{}{}",
-                library_metrics["vdj_reference_genomes"].as_str().unwrap(),
-                vdj_ref_version
-            ),
+            vdj_reference,
             vdj_reference_path: args
                 .vdj_gen_inputs
                 .vdj_reference_path
-                .unwrap()
-                .display()
-                .to_string(),
-            cell_metrics_table: VdjLibraryCellMetricsTable::from_metrics(&library_metrics)?,
-            enrichment_metrics_table: match args.receptor {
-                VdjReceptor::TR => VdjChainTypeSpecific::VdjT(
-                    VdjTEnrichmentMetricsTable::from_metrics(&library_metrics)?,
-                ),
-                VdjReceptor::TRGD => VdjChainTypeSpecific::VdjTgd(
-                    VdjTgdEnrichmentMetricsTable::from_metrics(&library_metrics)?,
-                ),
-                VdjReceptor::IG => VdjChainTypeSpecific::VdjB(
-                    VdjBEnrichmentMetricsTable::from_metrics(&library_metrics)?,
-                ),
+                .map(|p| p.display().to_string()),
+            lib_contents: VdjWsLibraryContents {
+                metrics: lib_metrics_out,
+                barcode_rank_plot: lib_bc_rank_plot,
             },
-            physical_library_metrics_table: VdjPhysicalLibraryMetricsTable::from_metrics(
-                &library_metrics,
-            )?,
-            hero_metrics: match args.receptor {
-                VdjReceptor::TR => VdjChainTypeSpecific::VdjT(
-                    VdjTSampleHeroMetricsTable::from_metrics(&sample_metrics)?,
-                ),
-                VdjReceptor::TRGD => VdjChainTypeSpecific::VdjTgd(
-                    VdjTgdSampleHeroMetricsTable::from_metrics(&sample_metrics)?,
-                ),
-                VdjReceptor::IG => VdjChainTypeSpecific::VdjB(
-                    VdjBSampleHeroMetricsTable::from_metrics(&sample_metrics)?,
-                ),
+            sample_contents: VdjWsSampleContents {
+                metrics: sample_metrics_proc.process(
+                    section,
+                    &active_conditions,
+                    &alert_context,
+                    &sample_metrics,
+                )?,
+                clonotype_info: clonotype_info_plot,
+                barcode_rank_plot: sample_bc_rank_plot,
             },
-            annotation_metrics_table: match args.receptor {
-                VdjReceptor::TR => VdjChainTypeSpecific::VdjT(
-                    VdjTSampleAnnotationMetricsTable::from_metrics(&sample_metrics)?,
-                ),
-                VdjReceptor::TRGD => VdjChainTypeSpecific::VdjTgd(
-                    VdjTgdSampleAnnotationMetricsTable::from_metrics(&sample_metrics)?,
-                ),
-                VdjReceptor::IG => VdjChainTypeSpecific::VdjB(
-                    VdjBSampleAnnotationMetricsTable::from_metrics(&sample_metrics)?,
-                ),
-            },
-            sequencing_metrics_table: args
-                .sequencing_metrics
-                .read()?
-                // CELLRANGER-7889 this may need to be updated eventually
-                .remove(&LibraryType::VdjAuto)
-                .unwrap(),
-            barcode_rank_plot,
-            clonotype_info,
             filter_metrics: args
                 .filter_metrics
                 .get(&sample)
                 .unwrap()
                 .as_ref()
-                .map(martian_filetypes::FileTypeRead::read)
+                .map(FileTypeRead::read)
                 .transpose()?,
         };
 

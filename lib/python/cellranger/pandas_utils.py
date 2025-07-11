@@ -17,7 +17,7 @@ from six import ensure_binary, ensure_str
 
 import cellranger.utils as cr_utils
 from cellranger import molecule_counter_extensions as cr_mce
-from cellranger.feature_ref import GENOME_FEATURE_TAG, FeatureReference
+from cellranger.feature_ref import FEATURE_TYPE, GENOME_FEATURE_TAG, FeatureReference
 from cellranger.molecule_counter import (
     BARCODE_IDX_COL_NAME,
     COUNT_COL_NAME,
@@ -27,11 +27,12 @@ from cellranger.molecule_counter import (
     MOLECULE_INFO_COLUMNS,
     UMI_COL_NAME,
     UMI_TYPE_COL_NAME,
+    BarcodeInfo,
     MoleculeCounter,
 )
 
 # column header string constants useful for building df
-FEATURE_REF_COLS = ["feature_type", "id", "name", "index"]
+FEATURE_REF_COLS = [FEATURE_TYPE, "id", "name", "index"]
 MOL_INFO_CELL_COL = "is_cell"
 IS_CELL_FORMAT_STRING = "{}_cells"
 FEATURE_DF_COUNT_COL = "num_reads"
@@ -52,7 +53,7 @@ BARCODE_METADATA = [
 ]
 
 # mol_info chunk size used in collapse_feature_counts and collapse_barcode_chunks
-CHUNK_SIZE = 20000000
+CHUNK_SIZE = 20_000_000
 
 
 # pylint: disable=invalid-name
@@ -177,9 +178,11 @@ def _get_is_cell(
     elif exclude_cells or exclude_noncells or with_cell_call:
         pass_filter = mc.get_barcode_info().pass_filter
         is_cell = np.zeros(np.sum(idx_mol), dtype=bool)
-        for library_idx in set(pass_filter[:, 1]):
+        for library_idx in set(pass_filter[:, BarcodeInfo.PASS_FILTER_LIBRARY_IDX]):
             # which are the cell-associated barcodes from this library?
-            which_barcodes = pass_filter[pass_filter[:, 1] == library_idx, 0]
+            which_barcodes = pass_filter[
+                pass_filter[:, BarcodeInfo.PASS_FILTER_LIBRARY_IDX] == library_idx, 0
+            ]
             is_bc_and_lib = cr_mce.get_indices_for_values(
                 mc, [LIBRARY_IDX_COL_NAME], [(library_idx,)]
             )[idx_mol]
@@ -198,7 +201,7 @@ def _get_is_cell(
     return None
 
 
-def _mol_info_df_from_h5(  # pylint: disable=too-many-arguments
+def _mol_info_df_from_h5(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     mc: MoleculeCounter,
     exclude_noncells: bool,
     exclude_cells: bool,
@@ -260,6 +263,7 @@ def _mol_info_df_from_h5(  # pylint: disable=too-many-arguments
 
 def mol_info_from_h5(  # pylint: disable=too-many-arguments
     mol_info,
+    *,
     exclude_noncells: bool = False,
     exclude_cells: bool = False,
     with_umi: bool = True,
@@ -571,6 +575,7 @@ def _barcode_summary(df: pd.DataFrame):
 def collapse_feature_counts(
     mc: MoleculeCounter,
     filter_library_idx: list[int] | None = None,
+    barcode_genome: str | None = None,
     tgt_chunk_len: int = CHUNK_SIZE,
     downsample: float | None = None,
 ):
@@ -581,13 +586,20 @@ def collapse_feature_counts(
     Args:
         mc (MoleculeCounter): instance of MoleculeCounter object
         filter_library_idx (list of ints or None): specifies whether to restrict counts to only certain libraries
+        barcode_genome (str | None): Use only barcodes from this genome. If None, use all barcodes.
         tgt_chunk_len (int): number of rows by which to chunk mol_info
         downsample (float): downsample fraction
 
     Returns:
         pandas.DataFrame containing per-feature summary statistics (UMIs, reads, dup_rate, and feature metadata)
     """
-    barcode_indices_passing_filter = mc.get_barcode_info().pass_filter
+    barcode_info = mc.get_barcode_info()
+    barcode_passing_filter = barcode_info.pass_filter
+    if barcode_genome is not None:
+        genome_idx = barcode_info.genomes.index(barcode_genome)
+        barcode_passing_filter = barcode_passing_filter[
+            barcode_passing_filter[:, BarcodeInfo.PASS_FILTER_GENOME_IDX] == genome_idx
+        ]
     if filter_library_idx is None:
         filter_library_idx = [int(lib["library_id"]) for lib in mc.get_library_info()]
 
@@ -608,8 +620,8 @@ def collapse_feature_counts(
 
         is_cell = np.zeros(idx_mol.shape, dtype="bool")
         for library_idx in filter_library_idx:
-            cell_barcode_indices = barcode_indices_passing_filter[
-                barcode_indices_passing_filter[:, 1] == library_idx, 0
+            cell_barcode_indices = barcode_passing_filter[
+                barcode_passing_filter[:, BarcodeInfo.PASS_FILTER_LIBRARY_IDX] == library_idx, 0
             ]
             is_cell |= np.isin(
                 mc.get_column_lazy(BARCODE_IDX_COL_NAME)[chunk_start:chunk_stop],
@@ -654,7 +666,7 @@ def collapse_feature_counts(
             / result[FEATURE_DF_COUNT_COL + suffix].clip(lower=1)
         )
 
-    feature_ref_df = feature_ref_from_h5(mc)
+    feature_ref_df = feature_ref_from_h5(mc, genome_col=True)
     feature_ref_df.rename(columns={"index": FEATURE_IDX_COL_NAME}, inplace=True)
     feature_ref_df = feature_ref_df.merge(result, how="left", on=FEATURE_IDX_COL_NAME)
 

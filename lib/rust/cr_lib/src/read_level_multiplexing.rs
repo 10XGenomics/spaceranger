@@ -1,3 +1,4 @@
+#![deny(missing_docs)]
 use anyhow::Result;
 use barcode::whitelist::BarcodeId;
 use barcode::BcSegSeq;
@@ -9,7 +10,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 
 /// Return the ID of this read-level multiplexing sequence.
-fn map_multiplexing_seq_to_id(
+pub fn map_multiplexing_seq_to_id(
     barcode: &BarcodeWithGemGroup,
     seq_to_id_map: &TxHashMap<BcSegSeq, BarcodeId>,
     multiplexing_seq_range: &Range<usize>,
@@ -48,7 +49,7 @@ pub fn get_umi_per_multiplexing_identifier(
 ) -> HashMap<FeatureType, TxHashMap<BarcodeId, i64>> {
     matrix
         .counts()
-        .group_by(|x| (x.barcode, x.feature.feature_type))
+        .chunk_by(|x| (x.barcode, x.feature.feature_type))
         .into_iter()
         .map(|((barcode, feature_type), counts)| {
             (

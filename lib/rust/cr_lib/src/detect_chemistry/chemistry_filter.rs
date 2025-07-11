@@ -1,3 +1,4 @@
+#![deny(missing_docs)]
 use super::errors::DetectChemistryErrors;
 use super::identity_check::check_read_identity;
 use anyhow::Result;
@@ -134,14 +135,15 @@ impl DetectChemistryUnit {
         Ok(read_sampler.done())
     }
 
-    pub fn check_read_identity(&self) -> Result<Vec<(u64, u64)>> {
+    pub fn check_read_identity(&self) -> Result<Vec<(&InputFastqs, (u64, u64))>> {
         const MAX_READ_PAIRS: usize = 100;
         let mut result = vec![];
         for fastq in &self.fastqs {
             let read_pairs: Vec<_> = ReadPairIter::from_fastq_files(fastq)?
                 .take(MAX_READ_PAIRS)
                 .try_collect()?;
-            result.push(check_read_identity(self, read_pairs.as_slice())?);
+            let (r1_hash, r2_hash) = check_read_identity(self, read_pairs.as_slice())?;
+            result.push((fastq, (r1_hash, r2_hash)));
         }
         Ok(result)
     }

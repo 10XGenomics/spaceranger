@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use crate::metadata::MatrixMetadata;
 use crate::METADATA_JSON_ATTR_NAME;
 use anyhow::Result;
@@ -90,18 +91,21 @@ impl<T: H5Type + Zero + Default> CooMatrix<T> {
     }
 
     pub(crate) fn load_from_h5_group(group: &hdf5::Group) -> Result<Self> {
-        let row = group
+        let (row, offset) = group
             .dataset(Self::ROW_DATASET_NAME)?
             .read_1d::<u32>()?
-            .into_raw_vec();
-        let col = group
+            .into_raw_vec_and_offset();
+        assert_eq!(offset, Some(0));
+        let (col, offset) = group
             .dataset(Self::COL_DATASET_NAME)?
             .read_1d::<u32>()?
-            .into_raw_vec();
-        let data = group
+            .into_raw_vec_and_offset();
+        assert_eq!(offset, Some(0));
+        let (data, offset) = group
             .dataset(Self::DATA_DATASET_NAME)?
             .read_1d::<T>()?
-            .into_raw_vec();
+            .into_raw_vec_and_offset();
+        assert_eq!(offset, Some(0));
         Ok(CooMatrix { row, col, data })
     }
 }

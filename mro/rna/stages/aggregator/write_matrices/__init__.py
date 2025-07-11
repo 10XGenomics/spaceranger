@@ -54,11 +54,11 @@ def split(args):
         num_nonzero = args.raw_nnz
     else:
         num_nonzero = args.filtered_nnz
-    join_mem_gb = 3 + CountMatrix.get_mem_gb_from_matrix_dim(num_barcodes, num_nonzero, scale=1.3)
-    print(f"{args.filtered_nnz=},{args.raw_nnz=},{num_nonzero=},{num_barcodes=},{join_mem_gb=}")
+    mem_gib = 3 + CountMatrix.get_mem_gb_from_matrix_dim(num_barcodes, num_nonzero, scale=1.41)
+    print(f"{args.raw_nnz=},{args.filtered_nnz=},{num_nonzero=},{num_barcodes=},{mem_gib=}")
     return {
         "chunks": [],
-        "join": {"__mem_gb": join_mem_gb},
+        "join": {"__mem_gb": mem_gib},
     }
 
 

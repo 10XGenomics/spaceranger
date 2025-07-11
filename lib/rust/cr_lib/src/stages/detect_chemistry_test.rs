@@ -1,4 +1,5 @@
 //! Martian stage DETECT_CHEMISTRY_TEST
+#![allow(missing_docs)]
 
 use crate::stages::detect_chemistry::{DetectChemistry, DetectChemistryStageInputs};
 use anyhow::Result;

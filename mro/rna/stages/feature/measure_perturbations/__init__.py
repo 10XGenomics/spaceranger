@@ -3,18 +3,20 @@
 # Copyright (c) 2018 10X Genomics, Inc. All rights reserved
 #
 
-import sys
+import csv
 
-import pandas as pd
-from six import ensure_str
+import numpy as np
 
-import cellranger.feature.crispr.measure_perturbations as measure_perturbations
-
-pd.set_option("compute.use_numexpr", False)
-import cellranger.analysis.diffexp as cr_diffexp
-import cellranger.feature.utils as feature_utils
-import cellranger.matrix as cr_matrix
-import cellranger.rna.library as rna_library
+from cellranger.analysis.diffexp import save_differential_expression_csv
+from cellranger.feature.crispr.measure_perturbations import (
+    get_perturbation_efficiency,
+    read_and_validate_feature_ref,
+    save_perturbation_efficiency_summary,
+    save_top_perturbed_genes,
+)
+from cellranger.feature.utils import all_files_present
+from cellranger.matrix import CountMatrix
+from cellranger.rna.library import CRISPR_LIBRARY_TYPE, GENE_EXPRESSION_LIBRARY_TYPE
 
 SUMMARY_FILE_NAME = "transcriptome_analysis"
 
@@ -24,92 +26,90 @@ stage MEASURE_PERTURBATIONS(
     in  h5   filtered_feature_counts_matrix,
     in  csv  feature_reference,
     in  bool by_feature,
-    in  bool ignore_multiples,
     out csv  perturbation_efficiencies,
     out path perturbation_effects_path,
     src py   "stages/feature/measure_perturbations",
 ) split (
+) using (
+    volatile = strict,
 )
 """
 
 
 def split(args):
-    # Note that the complex data flow here makes it very difficult to
-    # precisely determine the memory usage as a function of the inputs.
-    mem_gib = 1 + cr_matrix.CountMatrix.get_mem_gb_from_matrix_h5(
-        args.filtered_feature_counts_matrix, scale=10
-    )
+    with open(args.protospacer_calls_per_cell) as f:
+        num_feature_calls = len(set(x["feature_call"] for x in csv.DictReader(f)))
 
-    # Sometimes this stage uses a lot of vmem. It has proven difficult to reproduce and measure.
-    vmem_gib = 6 + 2 * mem_gib
-    return {"chunks": [], "join": {"__mem_gb": mem_gib, "__threads": 2, "__vmem_gb": vmem_gib}}
+    feature_ref = CountMatrix.load_feature_ref_from_h5_file(args.filtered_feature_counts_matrix)
+    num_gex_features = feature_ref.get_count_of_feature_type(GENE_EXPRESSION_LIBRARY_TYPE)
+    num_crispr_features = feature_ref.get_count_of_feature_type(CRISPR_LIBRARY_TYPE)
+
+    num_features, num_barcodes, nnz = CountMatrix.load_dims_from_h5(
+        args.filtered_feature_counts_matrix
+    )
+    matrix_mem_gib = CountMatrix.get_mem_gb_from_matrix_dim(num_barcodes, nnz, scale=1)
+
+    # The DEG are stored in a dense matrix of shape 3 * num_gex_features * num_feature_calls.
+    # When args.by_feature is False, the shape is num_target_calls rather than num_feature_calls,
+    # which is strictly less than num_feature_calls, so we're overestimating VMEM for this case.
+    vmem_deg_gib = round(24 * num_gex_features * num_feature_calls / 1024**3, 1)
+    vmem_gib = 9 + 1.4 * matrix_mem_gib + vmem_deg_gib
+
+    # The RSS usage is 2 to 4 times less than VMEM, presumably due to its access pattern of
+    # the dense DEG matrix.
+    mem_gib = 9 + 2.6 * matrix_mem_gib if args.by_feature else 4 + 1.9 * matrix_mem_gib
+
+    print(
+        f"{num_gex_features=},{num_crispr_features=},{num_features=},{num_barcodes=},{nnz=},"
+        f"{matrix_mem_gib=},{mem_gib=},{num_feature_calls=},{vmem_deg_gib=},{vmem_gib=}"
+    )
+    vmem_gib = max(vmem_gib, mem_gib)
+    # FIXME: Temporarily set __mem_gb to vmem_gib to avoid OOM errors
+    return {"chunks": [], "join": {"__mem_gb": vmem_gib, "__vmem_gb": vmem_gib, "__threads": 5}}
 
 
 def join(args, outs, _chunk_defs, _chunk_outs):
+    np.random.seed(0)
+
     list_file_paths = [
         args.protospacer_calls_per_cell,
         args.filtered_feature_counts_matrix,
         args.feature_reference,
     ]
-    if not (feature_utils.all_files_present(list_file_paths)):
+    if not (all_files_present(list_file_paths)):
         outs.perturbation_efficiencies = None
         return
 
-    feature_count_matrix = cr_matrix.CountMatrix.load_h5_file(args.filtered_feature_counts_matrix)
-    gex_count_matrix = feature_count_matrix.select_features_by_type(
-        rna_library.GENE_EXPRESSION_LIBRARY_TYPE
+    feature_count_matrix = CountMatrix.load_h5_file(args.filtered_feature_counts_matrix)
+    gex_count_matrix = feature_count_matrix.select_features_by_type(GENE_EXPRESSION_LIBRARY_TYPE)
+    target_info = read_and_validate_feature_ref(args.feature_reference)
+    if target_info is None:
+        outs.perturbation_efficiencies = None
+        return
+
+    perturbation_result = get_perturbation_efficiency(
+        target_info,
+        args.protospacer_calls_per_cell,
+        feature_count_matrix,
+        by_feature=args.by_feature,
     )
-    feature_ref_table = pd.read_csv(ensure_str(args.feature_reference), na_filter=False)
 
-    protospacers_per_cell = pd.read_csv(
-        ensure_str(args.protospacer_calls_per_cell), index_col=0, na_filter=False
-    )
-    if "target_gene_id" not in feature_ref_table.columns.tolist():
-        sys.stderr.write(
-            "Feature ref does not specify target gene IDs; that is a requirement for measuring perturbation efficiencies"
-        )
+    if perturbation_result is None:
         outs.perturbation_efficiencies = None
         return
-
-    if "Non-Targeting" not in list(feature_ref_table["target_gene_id"].values):
-        sys.stderr.write(
-            "Non-Targeting guides required as controls for differential expression calculations"
-        )
-        outs.perturbation_efficiencies = None
-        return
-
     (
-        log2_fold_change,
-        log2_fold_change_ci,
-        num_cells_per_perturbation,
         results_per_perturbation,
         results_all_perturbations,
-    ) = measure_perturbations.get_perturbation_efficiency(
-        feature_ref_table,
-        protospacers_per_cell,
-        feature_count_matrix,
+        fold_change_per_perturbation,
+    ) = perturbation_result
+
+    save_perturbation_efficiency_summary(
+        outs.perturbation_efficiencies,
+        fold_change_per_perturbation,
         args.by_feature,
-        args.ignore_multiples,
     )
-
-    # results_all_perturbations is an OrderedDict. The call to save_differential_expression_csv below assumes this when it assigns cluster_names from the keys of the dict
-
-    if (log2_fold_change is None) or (log2_fold_change_ci is None):
-        outs.perturbation_efficiencies = None
-        return
-    perturbation_efficiency_summary = (
-        measure_perturbations.construct_perturbation_efficiency_summary(
-            log2_fold_change,
-            log2_fold_change_ci,
-            num_cells_per_perturbation,
-            args.by_feature,
-        )
-    )
-    perturbation_efficiency_summary.to_csv(outs.perturbation_efficiencies, index=False)
-    measure_perturbations.save_top_perturbed_genes(
-        outs.perturbation_effects_path, results_per_perturbation
-    )
-    cr_diffexp.save_differential_expression_csv(
+    save_top_perturbed_genes(outs.perturbation_effects_path, results_per_perturbation)
+    save_differential_expression_csv(
         None,
         results_all_perturbations,
         gex_count_matrix,

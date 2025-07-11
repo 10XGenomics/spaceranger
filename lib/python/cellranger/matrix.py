@@ -266,7 +266,7 @@ class CountMatrixView:
 
     def get_genomes(self) -> list[str]:
         """Get a list of the distinct genomes represented by gene expression features."""
-        return CountMatrix._get_genomes_from_feature_ref(self.feature_ref)
+        return self.feature_ref.get_genomes()
 
     def bcs_to_ints(self, bcs: list[bytes] | set[bytes]) -> list[int]:
         # Only works when we haven't masked barcodes.
@@ -657,7 +657,7 @@ class CountMatrix:
                 return CountMatrix.load_bcs_from_h5_group(f[MATRIX])
 
     @staticmethod
-    def _load_indptr_from_matrix_group(group: h5.Group):
+    def _load_indptr_from_matrix_group(group: h5.Group) -> h5.Series:
         return group[h5_constants.H5_MATRIX_INDPTR_ATTR][:]
 
     @staticmethod
@@ -665,8 +665,7 @@ class CountMatrix:
         fn, version = CountMatrix._validate_h5_file(filename)
         if version < MATRIX_H5_VERSION:
             raise ValueError(
-                "Matrix HDF5 file format version (%d) is an older version that is no longer supported."
-                % version
+                f"Matrix HDF5 file format version ({version}) is an older version that is no longer supported."
             )
         with h5.File(fn, "r") as f:
             mat_group = f[MATRIX]
@@ -773,13 +772,11 @@ class CountMatrix:
 
             if version > MATRIX_H5_VERSION:
                 raise ValueError(
-                    "Matrix HDF5 file format version (%d) is a newer version that is not supported by this version of the software."
-                    % version
+                    f"Matrix HDF5 file format version ({version}) is a newer version that is not supported by this version of the software."
                 )
             if version < MATRIX_H5_VERSION:
                 raise ValueError(
-                    "Matrix HDF5 file format version (%d) is an older version that is no longer supported."
-                    % version
+                    f"Matrix HDF5 file format version ({version}) is an older version that is no longer supported."
                 )
 
             if "matrix" not in f.keys():
@@ -1000,6 +997,14 @@ class CountMatrix:
                 indices.append(feature.index)
         return self.select_features(indices)
 
+    def select_features_by_type_and_tag(self, feature_type: str, tag_type: str) -> CountMatrix:
+        """Select the subset of features with a particular feature type (e.g. "Antibody Capture") and tag (e.g. "Hashtag")."""
+        indices = []
+        for feature in self.feature_ref.feature_defs:
+            if feature.feature_type == feature_type and tag_type in feature.tags:
+                indices.append(feature.index)
+        return self.select_features(indices)
+
     def get_feature_ids_by_type(self, feature_type: str) -> list[bytes]:
         """Return a list of feature ids of a particular feature type (e.g. "Gene Expression")."""
         return self.feature_ref.get_feature_ids_by_type(feature_type)
@@ -1015,14 +1020,9 @@ class CountMatrix:
         """Get count of each feature by type."""
         return {ft: self.get_count_of_feature_type(ft) for ft in self.get_library_types()}
 
-    @staticmethod
-    def _get_genomes_from_feature_ref(feature_ref: FeatureReference) -> list[str]:
-        """Get a list of the distinct genomes represented by gene expression features."""
-        return feature_ref.get_genomes(feature_type=rna_library.DEFAULT_LIBRARY_TYPE)
-
     def get_genomes(self):
         """Get a list of the distinct genomes represented by gene expression features."""
-        return CountMatrix._get_genomes_from_feature_ref(self.feature_ref)
+        return self.feature_ref.get_genomes()
 
     @staticmethod
     def get_genomes_from_h5(filename: str | bytes) -> list[str]:
@@ -1033,8 +1033,7 @@ class CountMatrix:
             return CountMatrix._get_genomes_from_legacy_v1_h5(filename)
         else:
             with h5.File(filename, "r") as f:
-                feature_ref = CountMatrix.load_feature_ref_from_h5_group(f[MATRIX])
-                return CountMatrix._get_genomes_from_feature_ref(feature_ref)
+                return CountMatrix.load_feature_ref_from_h5_group(f[MATRIX]).get_genomes()
 
     @staticmethod
     def _get_genomes_from_legacy_v1_h5(filename):
@@ -1240,8 +1239,7 @@ class CountMatrix:
             version = CountMatrix._get_format_version_from_handle(f)
             if version > MATRIX_H5_VERSION:
                 raise ValueError(
-                    "Matrix HDF5 file format version (%d) is a newer version that is not supported by this version of the software."
-                    % version
+                    f"Matrix HDF5 file format version ({version}) is a newer version that is not supported by this version of the software."
                 )
             if version >= MATRIX_H5_VERSION and MATRIX not in f.keys():
                 raise ValueError('Could not find the "matrix" group inside the matrix HDF5 file.')
@@ -1385,6 +1383,43 @@ class CountMatrix:
 
         return number_of_overflow_entries
 
+    @staticmethod
+    def get_non_zero_entries_by_library_type(filename: str, library_type: str) -> int:
+        """Get the number of non-zero entries in a matrix h5 file for given library type features without loading the matrix into memory.
+
+        Args:
+        filename: Path to the h5 file.
+        library_type: Library type for which to count non-zero entries. E.g. "Gene Expression".
+
+        Returns:
+        int: Number of non-zero entries for {library_type} features.
+        """
+        with h5.File(filename, "r") as h5_file:
+
+            feature_ref = CountMatrix.load_feature_ref_from_h5_group(h5_file[MATRIX])
+
+            library_type_indices = np.array(
+                [
+                    h5_file.index
+                    for h5_file in feature_ref.feature_defs
+                    if h5_file.feature_type == library_type
+                ],
+                dtype=np.int32,
+            )
+
+            indices = h5_file[f"{MATRIX}/indices"]
+
+            non_zero_entries = 0
+            chunk_size = 100000
+            for i in range(0, len(indices), chunk_size):
+                chunk_indices = indices[i : i + chunk_size]
+
+                chunk_library_type_mask = np.isin(chunk_indices, library_type_indices)
+                chunk_non_zero_entries = np.sum(chunk_library_type_mask)
+
+                non_zero_entries += chunk_non_zero_entries
+        return non_zero_entries
+
 
 def merge_matrices(h5_filenames: list[str]) -> CountMatrix | None:
     """Merge multiple matrices into a single matrix."""
@@ -1458,12 +1493,14 @@ def create_merged_matrix_from_col_concat(
             _save_sw_version(outfile, sw_version)
         if extra_attrs:
             _save_extra_attrs(outfile, extra_attrs)
-        matrix = outfile[MATRIX]
+        matrix: h5.Group = outfile[MATRIX]
+        # pylint: disable-next=no-member
         ind_ptr = CountMatrix._load_indptr_from_matrix_group(matrix).astype(np.uint64)
         end = len(matrix[to_append[0]])
         # Resize everything to expected total size
         for dset_name in to_append:
             dset = matrix[dset_name]
+            # pylint: disable-next=no-member
             dset.resize((total_nnz,))
         # Now append new data to this
         for small_file, s_start, s_end in fn_start_ends[1:]:

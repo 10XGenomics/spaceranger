@@ -1,5 +1,6 @@
 //! Martian stage MergeMetrics
 //! Combine the summary.json files of the MatrixComputer substages.
+#![allow(missing_docs)]
 
 use anyhow::Result;
 use cr_types::MetricsFile;

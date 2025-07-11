@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+#
+# Copyright (c) 2019 10x Genomics, Inc.  All rights reserved.
+#
+# Wrapper for running MAKE_FASTQS_CS with mrp, with appropriate
+# Space Ranger Visium settings.
+
+function implement_read_configuration {
+    TENX_BC_READ_TYPE=R1
+    TENX_BC_LENGTH=16
+    TENX_UMI_READ_TYPE=R1
+    TENX_UMI_START_INDEX=16
+    TENX_UMI_LENGTH=12
+    TENX_SI_READ_TYPE=I1
+}
+
+# shellcheck source=../tenkit/_mkfastq
+source _mkfastq

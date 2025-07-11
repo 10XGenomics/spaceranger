@@ -115,17 +115,11 @@ def parse_target_csv(
         # Check that there aren't extra or missing columns in the CSV
         for key in entry:
             if key is None:
-                msg = (
-                    "Your %s file contains more columns than the header on row %d. Please use a csv file with a header for each column.\nYou might have an comma character in a field. Commas are permitted in some fields, but fields containing commas must be enclosed in quotes."
-                    % (descriptive_name, (row_num + offset))
-                )
+                msg = f"Your {descriptive_name} file contains more columns than the header on row {row_num + offset}. Please use a csv file with a header for each column.\nYou might have an comma character in a field. Commas are permitted in some fields, but fields containing commas must be enclosed in quotes."
                 raise cr_csv_utils.CSVParseException(msg)
 
             if entry[key] is None or entry[key] == "":
-                msg = (
-                    "Your %s file contains an empty column or fewer columns than the header on row %d. You might have a missing comma. Please use a csv file with a header for each column and a value for each column in each row."
-                    % (descriptive_name, (row_num + offset))
-                )
+                msg = f"Your {descriptive_name} file contains an empty column or fewer columns than the header on row {row_num + offset}. You might have a missing comma. Please use a csv file with a header for each column and a value for each column in each row."
                 raise cr_csv_utils.CSVParseException(msg)
 
         gene_id: bytes = ensure_binary(entry["gene_id"])
@@ -268,6 +262,8 @@ def get_target_panel_or_probe_set_file_format_spec(targeting_method, file_versio
         valid_cols.extend(["probe_seq", "probe_id", "included"])
         if float(file_version) >= 2.0:  # region introduced in 2.0
             valid_cols.append("region")
+        if float(file_version) >= 3.0:  # gene_name introduced in 3.0
+            valid_cols.append("gene_name")
         required_cols.extend(["probe_seq", "probe_id"])
         conflicting_metadata.update(
             {TARGETING_METHOD_HC_FILE_FORMAT: TARGETING_METHOD_TL_FILE_FORMAT}
@@ -276,7 +272,7 @@ def get_target_panel_or_probe_set_file_format_spec(targeting_method, file_versio
     return valid_cols, required_cols, required_metadata, conflicting_metadata
 
 
-def load_target_csv_metadata(filename, descriptive_name):
+def load_target_csv_metadata(filename: str, descriptive_name: str) -> dict[str, str]:
     """Return a dictionary of metadata fields contained in header of target panel CSV file.
 
     Args:

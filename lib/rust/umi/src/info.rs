@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use crate::{UmiQual, UmiSeq};
 use fastq_set::metric_utils::ILLUMINA_QUAL_OFFSET;
 use serde::{Deserialize, Serialize};

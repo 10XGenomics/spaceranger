@@ -1,3 +1,6 @@
+//! spatial::stages::generate_hd_websummary_cs::bin_level_tab
+#![allow(missing_docs)]
+
 use self::clustering::HdClusteringCard;
 use crate::square_bin_name::SquareBinName;
 use crate::stages::compute_bin_metrics::BinMetrics;

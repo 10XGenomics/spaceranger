@@ -44,6 +44,10 @@ if [ -n "$AR" ]; then
 fi
 export TBBROOT="$CONDA"
 
+# Jan 1 2024.  We shouldn't have the build date embedded anywhere at all, but
+# adding this just in case to improve build reproducibility.
+export SOURCE_DATE_EPOCH=1704096000
+
 DEST_DIR=$(dirname "$DEST")
 mkdir -p "$DEST_DIR"
 DIR=$(dirname "$DEST_DIR")
@@ -58,8 +62,8 @@ REAL_SRC=$(realpath "$SRC")
 REAL_CONDA=$(realpath "$CONDA")
 
 declare -a COMMON_OPTS=(
-    "-mtune=broadwell"
-    "-march=nehalem"
+    "-mtune=skylake"
+    "-march=core-avx-i"
     "-gno-record-gcc-switches"
     "-fcolor-diagnostics"
     "-g0"
@@ -102,13 +106,15 @@ declare -a _CMAKE_FLAGS=(
     -DCMAKE_BUILD_RPATH="\$ORIGIN/../.."
     -DOPENCV_TIMESTAMP="redacted"
     -DCMAKE_COLOR_DIAGNOSTICS=ON
+    -DDOPENCV_GENERATE_PKGCONFIG=OFF
+    -DWITH_PROTOBUF=OFF
     # Dependencies
     -DPython_ROOT_DIR="$CONDA"
     -DPython_VERSION_MAJOR=3
     -DPYTHON_EXECUTABLE="$PYTHON"
     -DPYTHON2_EXECUTABLE="$PYTHON"
     -DPYTHON3_EXECUTABLE="$PYTHON"
-    -DPYTHON3_LIBRARY="$CONDA/lib/libpython3.10.so"
+    -DPYTHON3_LIBRARY="$CONDA/lib/libpython3.12.so"
     -DMKL_ROOT_DIR="$CONDA"
     -DWITH_TBB=ON
     -DMKL_WITH_TBB=ON
@@ -149,6 +155,8 @@ declare -a _CMAKE_FLAGS=(
     -DWITH_DSHOW=OFF
     -DWITH_MSMF=OFF
     -DWITH_DIRECTX=OFF
+    -DWITH_MATLAB=OFF
+    -DWITH_HDF5=OFF
     -DLAPACK_IMPL=MKL
     -DWITH_V4L=OFF
     -DWITH_FFMPEG=OFF
@@ -162,6 +170,7 @@ declare -a _CMAKE_FLAGS=(
     -DOPENCV_MODULE_opencv_features2d_WRAPPERS=python
     -DOPENCV_MODULE_opencv_imgcodecs_WRAPPERS=python
     -DOPENCV_MODULE_opencv_imgproc_WRAPPERS=python
+    -DOPENCV_PYTHON_PIP_METADATA_INSTALL=OFF
     -DBUILD_opencv_apps=OFF
     -DBUILD_opencv_calib3d=ON
     -DBUILD_opencv_core=ON
@@ -221,9 +230,9 @@ declare -a _CMAKE_FLAGS=(
     -DCMAKE_EXE_LINKER_FLAGS="${COMMON_OPTS[*]}"
     -DCMAKE_MODULE_LINKER_FLAGS="${_SO_LDFLAGS[*]}"
     -DCMAKE_SHARED_LINKER_FLAGS="${_SO_LDFLAGS[*]}"
-    -DCPU_BASELINE_REQUIRE="SSE4_2"
-    # CPU dispatch changes results.
-    -DCPU_DISPATCH="FP16;AVX"
+    -DCPU_BASELINE_REQUIRE="SSE4_2;AVX"
+    # CPU dispatch for avx2 changes results.
+    -DCPU_DISPATCH="FP16"
     -DCV_DISABLE_OPTIMIZATION=OFF
     -DCMAKE_CXX_STANDARD=17
     -DCMAKE_CXX_EXTENSIONS=OFF
@@ -232,8 +241,8 @@ declare -a _CMAKE_FLAGS=(
     -DENABLE_THIN_LTO=ON
 )
 
-# Suppress python setuputils deprecation warning.
-export PYTHONWARNINGS="ignore::DeprecationWarning"
+# Suppress warning about failure to generate python typing stubs.
+export PYTHONWARNINGS="ignore::UserWarning"
 
 "$CMAKE" --log-level=WARNING -Wno-dev -GNinja "$SRC" "${_CMAKE_FLAGS[@]}"
 

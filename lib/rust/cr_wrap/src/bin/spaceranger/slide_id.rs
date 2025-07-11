@@ -1,3 +1,4 @@
+#![deny(missing_docs)]
 use crate::cytassist::CytassistMetadata;
 use anyhow::{bail, Context, Result};
 use cr_types::chemistry::ChemistryName;
@@ -9,11 +10,11 @@ use std::fs::File;
 use std::io::BufReader;
 use std::str::FromStr;
 
-const AREA_USAGE: &str = r#"
+const AREA_USAGE: &str = r"
 - Expecting A1, B1, C1, or D1 for 6.5 mm (V1-, V2-, V3-, V4-prefix) slides
 - You can use A and B for 11 mm (V5-prefix) slides
 - You can use A and D for HD v1 slides
-Capture Area provided:"#;
+Capture Area provided:";
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SlideId(String);
@@ -85,14 +86,20 @@ pub(crate) enum SlideRevision {
 }
 
 impl SlideRevision {
-    pub(crate) fn chemistry(self) -> ChemistryName {
+    pub(crate) fn chemistry(self, has_probe_set: bool) -> ChemistryName {
         match self {
             SlideRevision::V1 => ChemistryName::SpatialThreePrimeV1,
             SlideRevision::V2 => ChemistryName::SpatialThreePrimeV2,
             SlideRevision::V3 => ChemistryName::SpatialThreePrimeV3,
             SlideRevision::V4 => ChemistryName::SpatialThreePrimeV4,
             SlideRevision::V5 => ChemistryName::SpatialThreePrimeV5,
-            SlideRevision::H1 => ChemistryName::SpatialHdV1,
+            SlideRevision::H1 => {
+                if has_probe_set {
+                    ChemistryName::SpatialHdV1Rtl
+                } else {
+                    ChemistryName::SpatialHdV1ThreePrime
+                }
+            }
         }
     }
     pub(crate) fn validated_area(self, area: &AreaId) -> Result<String> {
@@ -116,6 +123,13 @@ impl SlideRevision {
         }
         Ok(area)
     }
+
+    pub(crate) fn is_visium_hd(self) -> bool {
+        match self {
+            Self::H1 => true,
+            Self::V1 | Self::V2 | Self::V3 | Self::V4 | Self::V5 => false,
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -134,25 +148,29 @@ pub(crate) enum SlideResolutionErrors {
 impl Display for SlideResolutionErrors {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let msg = match self {
-            Self::MissingFromAllSources => {
-                String::from("Slide ID and capture area information must be provided using either --slide and --area or --unknown-slide.")
-            },
+            Self::MissingFromAllSources => String::from(
+                "Slide ID and capture area information must be provided using either --slide and --area or --unknown-slide.",
+            ),
             Self::LoupeFileMismatch {
                 cli_info,
                 loupe_info,
             } => {
                 let cli_str = cli_info.cli_str();
                 let loupe_str = loupe_info.loupe_str();
-                format!("You specified {cli_str}, but during manual image alignment in Loupe you specified {loupe_str}. If the information given to Loupe was correct, remove {cli_str}. Otherwise, repeat manual image alignment in Loupe.")
-            },
+                format!(
+                    "You specified {cli_str}, but during manual image alignment in Loupe you specified {loupe_str}. If the information given to Loupe was correct, remove {cli_str}. Otherwise, repeat manual image alignment in Loupe."
+                )
+            }
             Self::ImageMetadataMismatch {
                 cli_info,
-                image_metadata ,
+                image_metadata,
             } => {
                 let cli_str = cli_info.cli_str();
                 let image_str = image_metadata.description_string();
-                format!("You specified {cli_str}, but the CytAssist run information present in the image says {image_str}. If the CytAssist run information is correct, remove {cli_str}. Otherwise, add --override-id to override the CytAssist run information.")
-            },
+                format!(
+                    "You specified {cli_str}, but the CytAssist run information present in the image says {image_str}. If the CytAssist run information is correct, remove {cli_str}. Otherwise, add --override-id to override the CytAssist run information."
+                )
+            }
         };
         write!(f, "{msg}")
     }
@@ -261,11 +279,13 @@ impl SlideInformation {
     }
 
     pub(crate) fn revision(&self) -> Result<SlideRevision> {
-        match &self{
-            Self::Known(SlideSerialCaptureArea {slide_id, area: _} ) => Ok(slide_id.revision()),
+        match &self {
+            Self::Known(SlideSerialCaptureArea { slide_id, area: _ }) => Ok(slide_id.revision()),
             Self::UnknownSlideFound(unknown_slide) => Ok(unknown_slide.revision()),
             // Should not occur. This should be handled by consolidation of slide ID.
-            Self::NoInformationFound => bail!("Either --slide and --area must be set or you should have slide and area in a loupe file or in the cytassist image or you must use --unknown-slide.")
+            Self::NoInformationFound => bail!(
+                "Either --slide and --area must be set or you should have slide and area in a loupe file or in the cytassist image or you must use --unknown-slide."
+            ),
         }
     }
 
@@ -332,14 +352,15 @@ impl SlideInformationFromDifferentSources {
             // UnknownSlide only if we find --unknown-slide
             cli: match (slide_in, area_in, unknown_slide) {
                 (Some(slide_id), Some(area), None) => {
-                    SlideInformation::Known(SlideSerialCaptureArea {
-                        slide_id,
-                        area,
-                    })
+                    SlideInformation::Known(SlideSerialCaptureArea { slide_id, area })
                 }
-                (None, None, Some(unkown_slide_name)) => SlideInformation::UnknownSlideFound(*unkown_slide_name),
+                (None, None, Some(unkown_slide_name)) => {
+                    SlideInformation::UnknownSlideFound(*unkown_slide_name)
+                }
                 (None, None, None) => SlideInformation::NoInformationFound,
-                _ => unreachable!("--slide and --area must be provided together. --slide/--area cannot be used with--unknown-slide.")
+                _ => unreachable!(
+                    "--slide and --area must be provided together. --slide/--area cannot be used with--unknown-slide."
+                ),
             },
             override_id,
         })
@@ -405,7 +426,9 @@ impl SlideInformationFromDifferentSources {
                         Ok(SlideInformation::Known(image_metadata.clone()))
                     }
                     (None, _, true) => {
-                        unreachable!("--override-id requires one of the following: slide and area, unknown-slide, or Loupe manual alignment file.")
+                        unreachable!(
+                            "--override-id requires one of the following: slide and area, unknown-slide, or Loupe manual alignment file."
+                        )
                     }
                     (None, None, _) => Err(SlideResolutionErrors::MissingFromAllSources),
                 }
@@ -539,10 +562,9 @@ mod tests {
         }
     }
 
+    /// Enum with four different things a source of truth can take
     #[derive(Debug, Deserialize)]
     #[serde(rename_all = "lowercase")]
-
-    /// Enum with four different things a source of truth can take
     enum FourWay {
         Good,    // Means that the source had the correct slide ID
         Bad,     // Means that the source had an incorrect slide ID

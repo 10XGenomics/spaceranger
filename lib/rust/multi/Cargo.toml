@@ -1,7 +1,4 @@
 [dependencies]
-csv = '1'
-lazy_static = '1'
-
 [dependencies.anyhow]
 workspace = true
 
@@ -14,10 +11,16 @@ path = '../cloud_utils'
 [dependencies.cr_types]
 path = '../cr_types'
 
-[dependencies.fastq_set]
+[dependencies.csv]
 workspace = true
 
+[dependencies.fastq_set]
+path = '../fastq_set'
+
 [dependencies.itertools]
+workspace = true
+
+[dependencies.lazy_static]
 workspace = true
 
 [dependencies.martian]
@@ -36,9 +39,7 @@ workspace = true
 workspace = true
 
 [dependencies.regex]
-default-features = false
-features = ['std', 'perf']
-version = '1'
+workspace = true
 
 [dependencies.serde]
 workspace = true
@@ -46,10 +47,16 @@ workspace = true
 [dependencies.serde_json]
 workspace = true
 
+[dependencies.strsim]
+workspace = true
+
 [dependencies.strum]
 workspace = true
 
 [dependencies.strum_macros]
+workspace = true
+
+[dependencies.thiserror]
 workspace = true
 
 [dependencies.transcriptome]
@@ -60,6 +67,9 @@ path = '../vdj_reference'
 
 [lib]
 test = false
+
+[lints]
+workspace = true
 
 [package]
 authors = ['10x Genomics']

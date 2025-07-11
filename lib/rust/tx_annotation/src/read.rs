@@ -1,8 +1,10 @@
+#![allow(missing_docs)]
 use crate::mark_dups::DupInfo;
 use crate::transcript::{
     AnnotationData, AnnotationParams, AnnotationRegion, PairAnnotationData, TranscriptAnnotator,
 };
 use anyhow::Result;
+use barcode::whitelist::ReqStrand;
 use cr_bam::bam_tags::{
     ExtraFlags, ANTISENSE_TAG, EXTRA_FLAGS_TAG, FEATURE_IDS_TAG, FEATURE_QUAL_TAG, FEATURE_RAW_TAG,
     FEATURE_SEQ_TAG, GAP_COORDINATES_TAG, GENE_ID_TAG, GENE_NAME_TAG, MULTIMAPPER_TAG, PROBE_TAG,
@@ -17,7 +19,7 @@ use cr_types::reference::feature_extraction::FeatureData;
 use cr_types::reference::feature_reference::FeatureReference;
 use cr_types::rna_read::{RnaChunk, RnaRead, UmiPart, HIGH_CONF_MAPQ};
 use cr_types::utils::calculate_median_of_sorted;
-use cr_types::{GenomeName, ReqStrand, UmiCount};
+use cr_types::{GenomeName, UmiCount};
 use fastq_set::WhichEnd;
 use itertools::Itertools;
 use martian_derive::{martian_filetype, MartianStruct};
@@ -324,7 +326,7 @@ pub struct AnnotationFiles {
 
 impl AnnotationFiles {
     pub fn make_chunks(&self, max_chunks: usize) -> Chunks<'_, ReadAnnotationsFormat> {
-        let files_per_chunk = ((self.files.len() + max_chunks - 1) / max_chunks).max(1);
+        let files_per_chunk = self.files.len().div_ceil(max_chunks).max(1);
         self.files.chunks(files_per_chunk)
     }
 }
@@ -521,7 +523,7 @@ impl ReadAnnotations {
                 .unwrap();
         });
 
-        if self.read.barcode().is_valid() {
+        if self.read.barcode_is_valid() {
             let bc_vec = self.read.barcode().to_string();
             self.primary
                 .for_each_rec(|rec| rec.push_aux(PROC_BC_SEQ_TAG, Aux::String(&bc_vec)).unwrap());
@@ -560,33 +562,22 @@ impl ReadAnnotations {
     pub fn attach_tags(&mut self, read_chunks: &[RnaChunk]) {
         if let Some(dup_info) = self.dup_info.as_ref() {
             // Set dup
-            if !dup_info.is_umi_count()
-                && !dup_info.is_low_support_umi
-                && !dup_info.is_filtered_target_umi
-            {
-                self.primary
-                    .for_each_rec(rust_htslib::bam::Record::set_duplicate);
+            if !dup_info.is_umi_count() && !dup_info.is_low_support_umi {
+                self.primary.for_each_rec(Record::set_duplicate);
             }
         }
 
-        let (is_low_support_umi, is_filtered_target_umi) =
-            if let Some(dup_info) = self.dup_info.as_ref() {
-                (dup_info.is_low_support_umi, dup_info.is_filtered_target_umi)
-            } else {
-                (false, false)
-            };
+        let is_low_support_umi = if let Some(dup_info) = self.dup_info.as_ref() {
+            dup_info.is_low_support_umi
+        } else {
+            false
+        };
 
         let is_valid_umi = self.umi_info.is_valid;
-        let is_valid_bc = self.read.barcode().is_valid();
+        let is_valid_bc = self.read.barcode_is_valid();
         let read_group = &self.read.read_chunk(read_chunks).read_group;
         self.for_each_rec(|ann| {
-            ann.attach_tags(
-                is_valid_umi,
-                is_low_support_umi,
-                is_filtered_target_umi,
-                is_valid_bc,
-                read_group,
-            );
+            ann.attach_tags(is_valid_umi, is_low_support_umi, is_valid_bc, read_group);
         });
         self.attach_barcode_tags();
         self.attach_umi_tags();
@@ -647,7 +638,7 @@ impl ReadAnnotations {
 }
 
 impl ReadAnnotations {
-    pub fn iter_ann_info(&self) -> impl Iterator<Item = &RecordAnnotation> {
+    fn iter_ann_info(&self) -> impl Iterator<Item = &RecordAnnotation> {
         std::iter::once(&self.primary)
     }
     pub fn umi_count(&self) -> Option<UmiCount> {
@@ -720,6 +711,10 @@ impl AnnotationInfo for ReadAnnotations {
         self.primary.records()
     }
 
+    /// Returns a set of genomes that the read's primary mapping maps to.
+    /// This can return more than one genome if the read is a probe where each half maps to a different genome.
+    /// Note: For paired-end reads, this will always be a set of size 0 or 1 because of explicit filtering in
+    /// `PairAnnotationData::from_pair`.
     fn mapped_genomes(&self) -> HashSet<&GenomeName> {
         self.primary.mapped_genomes()
     }
@@ -937,7 +932,11 @@ impl AnnotationInfo for RecordAnnotation {
             }
             RecordAnnotation::Probe(_, data) => {
                 if data.is_conf_mapped() {
-                    data.genome()
+                    Some(data.genomes().exactly_one().unwrap_or_else(|it| {
+                        panic!(
+                            "A confidently mapped probe must have exactly one genome; found: {it}"
+                        );
+                    }))
                 } else {
                     None
                 }
@@ -973,7 +972,16 @@ impl AnnotationInfo for RecordAnnotation {
                 None
             }
             RecordAnnotation::Probe(_, data) => {
-                data.conf_gene().map(|x| (data.genome().unwrap(), x))
+                if let Some(gene) = data.conf_gene() {
+                    let genome = data.genomes().exactly_one().unwrap_or_else(|it| {
+                        panic!(
+                            "A probe with confidently mapped gene must have exactly one genome; found: {it}"
+                        );
+                    });
+                    Some((genome, gene))
+                } else {
+                    None
+                }
             }
             RecordAnnotation::FeatureExtracted(_, _, _) => None,
             RecordAnnotation::Unmapped(_, _) => None,
@@ -1031,7 +1039,14 @@ impl AnnotationInfo for RecordAnnotation {
             }
             RecordAnnotation::Probe(_, data) => {
                 if data.is_conf_mapped() {
-                    Some((data.genome().unwrap(), AnnotationRegion::Exonic))
+                    Some((
+                        data.genomes().exactly_one().unwrap_or_else(|it| {
+                            panic!(
+                                "A confidently mapped probe must have exactly one genome; found: {it}"
+                            );
+                        }),
+                        AnnotationRegion::Exonic,
+                    ))
                 } else {
                     None
                 }
@@ -1059,7 +1074,7 @@ impl AnnotationInfo for RecordAnnotation {
 
     fn mapped_genomes(&self) -> HashSet<&GenomeName> {
         if let RecordAnnotation::Probe(_, data) = self {
-            return data.genome().into_iter().collect();
+            return data.genomes().collect();
         }
 
         let (ann1, ann2) = self.annotation();
@@ -1072,7 +1087,7 @@ impl AnnotationInfo for RecordAnnotation {
 
     fn mapped_genes(&self) -> HashSet<(&GenomeName, &Gene)> {
         if let RecordAnnotation::Probe(_, data) = self {
-            return data.genes().map(|x| (data.genome().unwrap(), x)).collect();
+            return data.mapped_genes().collect();
         }
 
         let (ann1, ann2) = self.annotation();
@@ -1085,10 +1100,10 @@ impl AnnotationInfo for RecordAnnotation {
 
     fn mapped_regions(&self) -> HashSet<(&GenomeName, AnnotationRegion)> {
         if let RecordAnnotation::Probe(_, data) = self {
-            return HashSet::from_iter(
-                data.is_mapped()
-                    .then(|| (data.genome().unwrap(), AnnotationRegion::Exonic)),
-            );
+            return data
+                .genomes()
+                .map(|x| (x, AnnotationRegion::Exonic))
+                .collect();
         }
 
         let (ann1, ann2) = self.annotation();
@@ -1133,7 +1148,7 @@ impl AnnotationInfo for RecordAnnotation {
 }
 
 impl RecordAnnotation {
-    pub fn new_se(annotator: &TranscriptAnnotator, rec: Record) -> Self {
+    fn new_se(annotator: &TranscriptAnnotator, rec: Record) -> Self {
         if rec.is_unmapped() {
             RecordAnnotation::Unmapped(rec, None)
         } else {
@@ -1142,7 +1157,7 @@ impl RecordAnnotation {
         }
     }
 
-    pub fn new_pe(annotator: &TranscriptAnnotator, rec1: Record, rec2: Record) -> Self {
+    fn new_pe(annotator: &TranscriptAnnotator, rec1: Record, rec2: Record) -> Self {
         // STAR _shouldn't_ return pairs where only a single end is mapped,
         //   but if it does, consider the pair unmapped
         if rec1.is_unmapped() || rec2.is_unmapped() {
@@ -1158,7 +1173,7 @@ impl RecordAnnotation {
     /// Construct a new RecordAnnotation from a SAM Record and MappedProbe.
     /// Return a new Probe if either Record or MappedProbe is mapped.
     /// Return an new Unmapped if both Record and MappedProbe are unmapped.
-    pub fn new_probe(rec: Record, mapped_probe: MappedProbe) -> Self {
+    fn new_probe(rec: Record, mapped_probe: MappedProbe) -> Self {
         if rec.is_unmapped() && !mapped_probe.is_mapped() {
             RecordAnnotation::Unmapped(rec, None)
         } else {
@@ -1176,13 +1191,13 @@ impl RecordAnnotation {
         }
     }
 
-    pub fn for_each_rec<F: Fn(&mut Record)>(&mut self, f: F) {
+    fn for_each_rec<F: Fn(&mut Record)>(&mut self, f: F) {
         let (rec1, rec2) = self.mut_rec();
         f(rec1);
         rec2.map(f);
     }
 
-    pub fn mut_rec(&mut self) -> (&mut Record, Option<&mut Record>) {
+    fn mut_rec(&mut self) -> (&mut Record, Option<&mut Record>) {
         match self {
             RecordAnnotation::Unmapped(ref mut rec1, ref mut rec2) => (rec1, rec2.as_mut()),
             RecordAnnotation::SeMapped(ref mut rec, _) => (rec, None),
@@ -1194,7 +1209,7 @@ impl RecordAnnotation {
         }
     }
 
-    pub fn annotation(&self) -> (Option<&AnnotationData>, Option<&AnnotationData>) {
+    fn annotation(&self) -> (Option<&AnnotationData>, Option<&AnnotationData>) {
         match self {
             RecordAnnotation::SeMapped(_, ref anno) => (Some(anno), None),
             RecordAnnotation::PeMapped(_, ref anno1, _, ref anno2, _) => (Some(anno1), Some(anno2)),
@@ -1204,7 +1219,7 @@ impl RecordAnnotation {
         }
     }
 
-    pub fn set_rescued(&mut self) {
+    fn set_rescued(&mut self) {
         match self {
             RecordAnnotation::SeMapped(_, ref mut anno) => anno.rescued = true,
             RecordAnnotation::PeMapped(_, ref mut anno1, _, ref mut anno2, _) => {
@@ -1218,7 +1233,7 @@ impl RecordAnnotation {
     }
 
     /// Add transcript TX tag to a BAM record.
-    pub fn attach_transcript_tag(&mut self) {
+    fn attach_transcript_tag(&mut self) {
         let attach_transcript_tag = |rec: &mut Record, anno: &AnnotationData| {
             if let Some(tag) = anno.make_tx_tag() {
                 rec.push_aux(TRANSCRIPT_TAG, Aux::String(&tag)).unwrap();
@@ -1239,7 +1254,7 @@ impl RecordAnnotation {
     /// Add tags to a BAM record.
     /// Set is_conf_mapped to true if the qname is confidently mapped to
     /// the transcriptome.
-    pub fn attach_basic_tags(&mut self) {
+    fn attach_basic_tags(&mut self) {
         let attach_basic_tags = |record: &mut Record, anno: &AnnotationData| {
             if let Some(tag) = anno.make_re_tag() {
                 record
@@ -1277,11 +1292,10 @@ impl RecordAnnotation {
     /// Add tags to a BAM record.
     /// Set is_conf_mapped to true if the qname is confidently mapped to
     /// the transcriptome.
-    pub fn attach_tags(
+    fn attach_tags(
         &mut self,
         is_valid_umi: bool,
         is_low_support_umi: bool,
-        is_filtered_target_umi: bool,
         is_valid_bc: bool,
         read_group: &str,
     ) {
@@ -1380,12 +1394,7 @@ impl RecordAnnotation {
         }
 
         self.attach_basic_tags();
-        self.attach_primary_tags(
-            is_valid_umi,
-            is_low_support_umi,
-            is_filtered_target_umi,
-            is_valid_bc,
-        );
+        self.attach_primary_tags(is_valid_umi, is_low_support_umi, is_valid_bc);
     }
 
     /// Add SAM tags to the primary alignment.
@@ -1393,7 +1402,6 @@ impl RecordAnnotation {
         &mut self,
         is_valid_umi: bool,
         is_low_support_umi: bool,
-        is_filtered_target_umi: bool,
         is_valid_bc: bool,
     ) {
         let is_conf_tx = self.is_conf_mapped_to_transcriptome();
@@ -1407,7 +1415,6 @@ impl RecordAnnotation {
                 is_discordant,
                 is_valid_umi,
                 is_low_support_umi,
-                is_filtered_target_umi,
                 is_valid_bc,
             );
         });
@@ -1422,7 +1429,6 @@ fn attach_primary_tags(
     is_gene_discordant: bool,
     is_valid_umi: bool,
     is_low_support_umi: bool,
-    is_filtered_target_umi: bool,
     is_valid_bc: bool,
 ) {
     // Note: only attach these flags to primary alignment
@@ -1445,16 +1451,11 @@ fn attach_primary_tags(
             flags |= ExtraFlags::GENE_DISCORDANT;
         }
 
-        if is_filtered_target_umi {
-            flags |= ExtraFlags::FILTERED_TARGET_UMI;
-        }
-
         if is_conf_mapped_to_feature
             && is_valid_bc
             && is_valid_umi
             && !rec.is_duplicate()
             && !is_low_support_umi
-            && !is_filtered_target_umi
         {
             flags |= ExtraFlags::UMI_COUNT;
         }

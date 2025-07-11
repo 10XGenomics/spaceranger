@@ -1,5 +1,6 @@
 //! This module implements the `Metric` and `JsonReport` trait
 //! for common collections (`Vec`, `HashMap`)
+#![deny(missing_docs)]
 
 use crate::{join_metric_name, JsonReport, JsonReporter, Metric, ToMetricPrefix};
 use itertools::zip_eq;

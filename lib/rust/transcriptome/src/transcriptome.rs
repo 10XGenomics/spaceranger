@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use crate::parse_gtf::{parse_gtf_line, validate_gtf_line};
 use crate::Gene;
 use anyhow::{anyhow, bail, ensure, Context, Result};
@@ -125,16 +126,6 @@ impl Transcriptome {
     /// Read a possibly-compressed GTF file from a path to a reference transcriptome.
     pub fn from_reference_path(path: &Path) -> Result<Transcriptome> {
         Transcriptome::from_gtf_path(&path.join("genes/genes.gtf"))
-    }
-
-    pub fn dummy() -> Transcriptome {
-        Transcriptome {
-            genes: Vec::new(),
-            gene_id_to_idx: HashMap::new(),
-            transcripts: Vec::new(),
-            transcript_id_to_idx: HashMap::new(),
-            gene_to_transcripts: BTreeMap::new(),
-        }
     }
 
     /// Check if there are any transcripts with no exons and return Err(<informative message>) if we find any.

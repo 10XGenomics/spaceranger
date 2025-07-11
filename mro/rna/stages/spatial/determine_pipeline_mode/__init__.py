@@ -6,7 +6,6 @@
 """Stage to determine the subpipeline mode."""
 
 import martian
-
 from cellranger.spatial.pipeline_mode import PipelineMode, Product, SlideType
 
 __MRO__ = """
@@ -44,6 +43,7 @@ def main(args, outs):
             product = Product.VISIUM
     else:
         martian.throw("Pipeline called with no image")
+        raise RuntimeError("unreachable")
 
     # Determine slide.
     if args.visium_hd_slide_name:
@@ -59,7 +59,5 @@ def main(args, outs):
     except ValueError:
         martian.throw(f"Invalid pipeline mode of {pipeline_mode}")
     outs.pipeline_mode = pipeline_mode._asdict()
-    outs.is_visium_hd = product == Product.VISIUM_HD_NOCYT_PD or (
-        product == Product.CYT and slide == SlideType.VISIUM_HD
-    )
+    outs.is_visium_hd = pipeline_mode.is_hd()
     outs.is_visium_sd = not outs.is_visium_hd

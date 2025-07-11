@@ -8,23 +8,24 @@
 from __future__ import annotations
 
 import os
-import shutil
 
 from cellranger.spatial import data_utils, slide
 from cellranger.spatial.data_utils import SLIDE_ID_EXCEPTIONS
-from cellranger.spatial.slide_design_o3 import (  # pylint: disable=no-name-in-module, import-error
-    VisiumHdLayout,
+from cellranger.spatial.pipeline_mode import PipelineMode
+from cellranger.spatial.slide_design_o3 import (
+    VisiumHdLayout,  # pylint: disable=no-name-in-module, import-error
 )
 
 __MRO__ = """
 stage HD_LAYOUT_READER(
-    in  string slide_serial_capture_area,
-    in  vlf    hd_layout_file,
-    in  string visium_hd_slide_name,
-    in  json   loupe_hd_slide_layout_json,
-    in  bool   is_pd,
-    out json   hd_layout_data_json,
-    src py     "stages/spatial/hd_layout_reader",
+    in  string         slide_serial_capture_area,
+    in  vlf            hd_layout_file,
+    in  string         visium_hd_slide_name,
+    in  json           loupe_hd_slide_layout_json,
+    in  bool           is_pd,
+    in  PipelineMode   pipeline_mode,
+    out json           hd_layout_data_json,
+    src py             "stages/spatial/hd_layout_reader",
 ) using (
     volatile = strict,
 )
@@ -38,6 +39,7 @@ def main(args, outs):
         args.visium_hd_slide_name,
         args.loupe_hd_slide_layout_json,
         args.is_pd,
+        PipelineMode(**args.pipeline_mode),
         outs.hd_layout_data_json,
     )
 
@@ -48,6 +50,7 @@ def hd_layout_reader(
     visium_hd_slide_name: str | None,
     loupe_hd_slide_layout_json: str | None,
     is_pd: bool,
+    pipeline_mode: PipelineMode,
     hd_layout_data_out: str,
 ) -> str | None:
     """Entry point for stage to run the Go-based hd_layout file reader and provide JSON output.
@@ -58,11 +61,13 @@ def hd_layout_reader(
         hd_layout_file_in (str): None (for automatic retrieval or manual pathway) or hd_layout file pathname
         visium_hd_slide_name (str): used to retrive g
         is_pd (bool): is this a PD run?
+        pipeline_mode: product and slide type for visium runs
         hd_layout_data_out (str): pathname for JSONified hd_layout data output to the pipeline
     """
     # Run hd_layout_reader with appropriate parameters for various scenarios
     if loupe_hd_slide_layout_json and os.path.exists(loupe_hd_slide_layout_json):
-        shutil.copyfile(loupe_hd_slide_layout_json, hd_layout_data_out)
+        hd_layout_data = VisiumHdLayout.from_json(loupe_hd_slide_layout_json)
+        hd_layout_data.save_as_json(hd_layout_data_out)
         return hd_layout_data_out
 
     if visium_hd_slide_name is None:
@@ -75,7 +80,9 @@ def hd_layout_reader(
     out_path = os.path.dirname(hd_layout_data_out)
 
     if data_utils.is_hd_slide(slide_sample_area_id):
-        slide_sample_id, area_id = data_utils.parse_slide_sample_area_id(slide_sample_area_id)
+        slide_sample_id, area_id = data_utils.parse_slide_sample_area_id(
+            slide_sample_area_id
+        )
         if hd_layout_file_in:
             load_file = hd_layout_file_in
         elif is_pd and slide_sample_id in SLIDE_ID_EXCEPTIONS:

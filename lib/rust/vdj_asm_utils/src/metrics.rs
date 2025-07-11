@@ -1,4 +1,5 @@
 // Bug: we report VDJ_total_reads = VDJ_total_reads_pairs.
+#![deny(missing_docs)]
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

@@ -1,4 +1,5 @@
 //! Martian stage ALIGN_AND_COUNT
+#![allow(missing_docs)]
 
 use crate::align_and_count_metrics::StageVisitor;
 use crate::align_metrics::{BarcodeMetrics, LibFeatThenBarcodeOrder};
@@ -6,9 +7,9 @@ use crate::aligner::{Aligner, BarcodeSummary, MAX_ANNOTATIONS_IN_MEM};
 use crate::barcode_sort::BarcodeOrder;
 use crate::parquet_file::{ParquetFile, ParquetWriter, PerReadGapAlignRow};
 #[cfg(feature = "tenx_internal")]
-use crate::stages::internal::get_barcode_subsampling;
+use crate::stages::internal::V1PatternFixParams;
 #[cfg(feature = "tenx_source_available")]
-use crate::stages::stubs::get_barcode_subsampling;
+use crate::stages::stubs::V1PatternFixParams;
 use crate::types::{
     BarcodeMetricsShardFile, FeatureReferenceFormat, ReadShardFile, ReadSpillFormat,
 };
@@ -31,10 +32,11 @@ use cr_types::types::{
     BarcodeSetFormat, BcUmiInfo, FeatureBarcodeCount, GemWell, ProbeBarcodeCount,
 };
 use cr_types::{
-    AlignerParam, BarcodeThenFeatureOrder, CountShardFile, FeatureCountFormat, TotalBcCountFormat,
+    AlignerParam, BarcodeThenFeatureOrder, CountShardFile, FeatureCountFormat,
+    PerLibrarySortedBarcodeCounts, SortedBarcodeCountFile,
 };
 use fastq_set::WhichEnd;
-use itertools::Itertools;
+use itertools::{zip_eq, Itertools};
 use log::warn;
 use martian::prelude::*;
 use martian_derive::{make_mro, martian_filetype, MartianStruct};
@@ -42,20 +44,18 @@ use martian_filetypes::bin_file::BinaryFormat;
 use martian_filetypes::json_file::JsonFile;
 use martian_filetypes::tabular_file::CsvFile;
 use martian_filetypes::{FileTypeRead, FileTypeWrite, LazyFileTypeIO};
-use metric::{CountMetric, TxHashSet};
+use metric::TxHashSet;
 use orbit::{StarReference, StarSettings};
 use par_proc::par_proc::{group_by_processor, Proc, MAX_ITEMS_IN_MEM};
 use parameters_toml::star_parameters;
+use rand::rngs::SmallRng;
 use rand::SeedableRng;
-// rand::StdRng does not have a stable RNG across versions, so we explicitly choose one
-use rand_chacha::ChaCha20Rng;
 use rust_htslib::bam::header::{Header, HeaderRecord};
 use rust_htslib::bam::{HeaderView, Record};
 use serde::{Deserialize, Serialize};
 use shardio::{Range, ShardReader, ShardSender, ShardWriter, SHARD_ITER_SZ as SHARD_SZ};
 use std::borrow::Borrow;
 use std::cmp::{max, Reverse};
-use std::collections::{BTreeMap, BinaryHeap};
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -72,7 +72,6 @@ const RNA_READ_SZ: usize = 1024;
 const ANN_SZ: usize = 3072; // RnaRead + BamRecords
 const BAM_BUFFER_SZ: usize = 500_000;
 const NUM_CHUNK_THREADS: usize = 4;
-const PRESUMED_BARCODE_COUNT: usize = 2_000;
 
 /// maximum numbers of reads to sample for VISIT_ANNOTATED_READS_PD
 /// we don't need to look at all reads for those metrics.
@@ -93,12 +92,12 @@ pub struct AlignAndCountMetrics {
 pub struct StageInputs {
     pub gem_well: GemWell,
     pub read_chunks: Vec<RnaChunk>,
-    pub reference_path: PathBuf,
+    pub reference_path: Option<PathBuf>,
 
     pub read_shards: ReadShards,
 
     pub feature_counts: FeatureCountFormat,
-    pub feature_reference: FeatureReferenceFormat,
+    pub feature_reference_binary: FeatureReferenceFormat,
 
     /// The target panel CSV file.
     pub target_set: Option<TargetSetFile>,
@@ -110,11 +109,6 @@ pub struct StageInputs {
     pub include_introns: bool,
     pub is_pd: bool,
     pub no_bam: bool,
-
-    /// If this is Some(r), we filter out (UMI, genes) pairs
-    /// with **less than** r reads and not include them in UMI counts.
-    /// Useful in targeting
-    pub targeted_umi_min_read_count: Option<u64>,
 
     /// Minimum alignment score to align to the transcriptome.
     /// Set the --outFilterScoreMin parameter of STAR.
@@ -129,7 +123,10 @@ pub struct StageInputs {
     /// Set to None to disable TSO trimming.
     pub trim_tso_min_score: Option<usize>,
 
-    pub total_barcode_counts: TotalBcCountFormat,
+    /// All barcode counts that were valid after correction.
+    pub corrected_barcode_counts: PerLibrarySortedBarcodeCounts,
+    /// All barcode counts that were uncorrectable.
+    pub invalid_barcode_counts: SortedBarcodeCountFile,
 
     /// Optionally specify a set of barcodes in a file. If supplied,
     /// only the barcodes listed in the file are processed through
@@ -141,10 +138,7 @@ pub struct StageInputs {
     /// set of changes and is deferred to the future
     pub barcode_subset: Option<BarcodeSetFormat>,
 
-    #[allow(unused)]
-    pub chevron_correction_factor: Option<f64>,
-    #[allow(unused)]
-    pub chevron_affected_barcodes: Option<JsonFile<Vec<String>>>,
+    pub v1_pattern_fix_params: Option<V1PatternFixParams>,
 }
 
 #[derive(Clone, Serialize, Deserialize, MartianStruct)]
@@ -313,7 +307,7 @@ where
 
                     writer.push(PerReadGapAlignRow {
                         barcode: read.barcode().to_string(),
-                        is_valid_barcode: ann.read.barcode().is_valid(),
+                        is_valid_barcode: ann.read.barcode_is_valid(),
                         umi: read.umi().to_string(),
                         probe_type: gap_info.probe_type.to_string(),
                         left_probe_id: mapped_probe.lhs_probe().unwrap().probe_id.to_string(),
@@ -360,7 +354,7 @@ where
     V: AnnotatedReadVisitor,
 {
     type Item = (Barcode, SpillVec<RnaRead, ReadSpillFormat>);
-    type Err = anyhow::Error;
+    type Err = Error;
 
     fn process(&mut self, item: Self::Item) -> Result<()> {
         let (bc, read_vec) = item;
@@ -443,35 +437,6 @@ fn star_settings(
     Ok(settings)
 }
 
-fn max_items_in_range(
-    counts: &BTreeMap<Barcode, CountMetric>,
-    range: &Range<Barcode>,
-    limit: usize,
-) -> usize {
-    let counts = match (range.start, range.end) {
-        (Some(ref s), Some(ref e)) => counts.range(s..e),
-        (Some(ref s), None) => counts.range(s..),
-        (None, Some(ref e)) => counts.range(..e),
-        (None, None) => counts.range(..),
-    };
-    counts
-        .fold(
-            std::iter::repeat(Reverse(PRESUMED_BARCODE_COUNT))
-                .take(NUM_CHUNK_THREADS)
-                .collect::<BinaryHeap<_>>(),
-            |mut acc, (_, v)| {
-                acc.push(Reverse((v.count() as usize).min(limit)));
-                while acc.len() > NUM_CHUNK_THREADS {
-                    let _ = acc.pop();
-                }
-                acc
-            },
-        )
-        .into_iter()
-        .map(|Reverse(v)| v)
-        .sum()
-}
-
 /// Choose an aligner based on the chemistry and target_set CSV file.
 /// Return STAR if target_set is null.
 /// Return the aligner specified by the aligner argument if specified.
@@ -493,10 +458,12 @@ fn choose_aligner(
     };
 
     let is_probe_set = ProbeSetReferenceMetadata::load_from(target_set)?.is_probe_set_metadata();
-    let aligner = arg_aligner.unwrap_or(if is_rtl.unwrap_or(is_probe_set) {
-        Hurtle
-    } else {
-        Star
+    let aligner = arg_aligner.unwrap_or_else(|| {
+        if is_rtl.unwrap_or(is_probe_set) {
+            Hurtle
+        } else {
+            Star
+        }
     });
 
     if aligner == Hurtle {
@@ -525,7 +492,7 @@ fn make_dummy_header_for_probes(n_probes: usize) -> HeaderView {
     let mut header = Header::new();
     for i in 0..n_probes {
         let mut header_rec = HeaderRecord::new(b"SQ");
-        header_rec.push_tag(b"SN", &format!("PROBE{i}"));
+        header_rec.push_tag(b"SN", format!("PROBE{i}"));
         header_rec.push_tag(b"LN", n_probes + 1);
         header.push_record(&header_rec);
     }
@@ -542,7 +509,7 @@ fn write_output_bam_header<T: Borrow<HeaderView>>(
     Ok(Some(bam_header))
 }
 
-#[make_mro(mem_gb = 4, volatile = strict)]
+#[make_mro(mem_gb = 9, volatile = strict)]
 impl MartianStage for AlignAndCount {
     type StageInputs = StageInputs;
     type StageOutputs = StageOutputs;
@@ -561,17 +528,19 @@ impl MartianStage for AlignAndCount {
             // The memory used by the Hurtle reference is non-zero, but it's less than the
             // wiggle room added to mem_gb below.
             0.0
-        } else {
-            let settings = star_settings(&args.reference_path, args.transcriptome_min_score)?;
+        } else if let Some(reference_path) = &args.reference_path {
+            let settings = star_settings(reference_path, args.transcriptome_min_score)?;
             settings.est_mem()? as f64 / ALN_BC_GIB
+        } else {
+            0.0
         };
 
-        let barcode_counts: BTreeMap<Barcode, CountMetric> =
-            args.total_barcode_counts.read()?.into_iter().collect();
         let make_resource =
-            |range: &Range<Barcode>, reader: &ShardReader<RnaRead, BarcodeOrder>| -> Result<_> {
-                let max_reads = max_items_in_range(&barcode_counts, range, MAX_ITEMS_IN_MEM);
-                let max_anns = max_items_in_range(&barcode_counts, range, MAX_ANNOTATIONS_IN_MEM);
+            |range: &Range<Barcode>,
+             top_n_counts: &TopCounts,
+             reader: &ShardReader<RnaRead, BarcodeOrder>| {
+                let max_reads = top_n_counts.sum_with_limit(MAX_ITEMS_IN_MEM);
+                let max_anns = top_n_counts.sum_with_limit(MAX_ANNOTATIONS_IN_MEM);
                 // if we presume ~1KB per RnaRead
                 let reads_gb = (max_reads * RNA_READ_SZ) as f64 / ALN_BC_GIB;
                 // if we presume ~3KB per ReadAnnotations
@@ -584,9 +553,9 @@ impl MartianStage for AlignAndCount {
                 // 13.04GB reference memory reservation
                 let mem_gb = (reads_gb + anns_gb + shardio_gb).min(17.96);
                 let mem_gb = (mem_gb + ref_gb + 1.5).ceil() as isize;
-                Ok(Resource::new()
+                Resource::new()
                     .threads(NUM_CHUNK_THREADS as isize)
-                    .mem_gb(mem_gb))
+                    .mem_gb(mem_gb)
             };
 
         // Figure out how many chunks to create.
@@ -605,10 +574,12 @@ impl MartianStage for AlignAndCount {
         // Create upto `MAX_ALIGN_CHUNKS_PER_LIB` chunks, with at least `READS_PER_CHUNK` read pairs per chunk
         let num_chunks = (n / READS_PER_CHUNK).clamp(1, MAX_ALIGN_CHUNKS_PER_LIB);
 
-        // The shard files are barcode ordered. We are asking the shard reader to chunk the
-        // barcode space into `num_chunks` ranges that have roughly the same number of reads.
-        // The output we get is a list of barcode ranges.
-        let chunks = reader.make_chunks(num_chunks, &Range::all());
+        // Stream the invalid counts from disk, chained with the valid counts.
+        let chunks = args
+            .invalid_barcode_counts
+            .lazy_reader()?
+            .chain(args.corrected_barcode_counts.iter_counts()?)
+            .process_results(move |counts_iter| make_chunks(n, num_chunks, counts_iter))?;
 
         // Pick a sampling rate for AnnotatedReads output. This output is only usef by PD stages.
         let read_ann_subsample_rate = (MAX_READ_ANN_SAMPLE as f32) / (max(n, 1) as f32);
@@ -620,17 +591,17 @@ impl MartianStage for AlignAndCount {
 
         let stage_def: StageDef<_> = chunks
             .into_iter()
-            .map(|range| {
+            .map(|chunk| {
                 // Create a chunk that will process all the reads that fall within this barcode range.
-                anyhow::Ok((
+                (
                     ChunkInputs {
-                        range,
+                        range: chunk.range,
                         read_ann_subsample_rate,
                     },
-                    make_resource(&range, &reader)?,
-                ))
+                    make_resource(&chunk.range, &chunk.top_n_counts, &reader),
+                )
             })
-            .try_collect()?;
+            .collect();
 
         // PD uses more memory to produce annotation files.
         Ok(stage_def.join_resource(Resource::with_mem_gb(if args.is_pd { 16 } else { 6 })))
@@ -656,7 +627,7 @@ impl MartianStage for AlignAndCount {
         let probe_set_reference = if choose_aligner_from_args(&args)? == AlignerParam::Hurtle {
             Some(ProbeSetReference::from_path(
                 args.target_set.as_ref().unwrap(),
-                &args.reference_path,
+                args.reference_path.as_deref(),
                 args.transcriptome_min_score
                     .unwrap_or(DEFAULT_TRANSCRIPTOME_MIN_SCORE),
             )?)
@@ -668,14 +639,16 @@ impl MartianStage for AlignAndCount {
         let star_reference = if is_targeted_rtl && args.no_bam {
             // For probe assays, STAR is needed only to produce alignments for the BAM file.
             None
-        } else {
+        } else if let Some(reference_path) = &args.reference_path {
             // load up the aligner and annotator
             // do this first because Orbit loads the reference in the background
             // with mmap, so we want to start this ASAP.
             Some(StarReference::load(star_settings(
-                &args.reference_path,
+                reference_path,
                 args.transcriptome_min_score,
             )?)?)
+        } else {
+            None
         };
 
         let reader = args.read_shards.reader()?;
@@ -741,16 +714,20 @@ impl MartianStage for AlignAndCount {
             None
         };
 
-        let feature_reference = args.feature_reference.read()?;
+        let feature_reference = args.feature_reference_binary.read()?;
         let feature_dist = compute_feature_dist(args.feature_counts.read()?, &feature_reference)?;
         let target_genes = feature_reference.target_genes();
 
-        let annotator = ReadAnnotator::new(
-            &args.reference_path,
-            args.chemistry_defs.primary(),
-            args.include_exons,
-            args.include_introns,
-        )?;
+        let annotator = if let Some(reference_path) = &args.reference_path {
+            Some(ReadAnnotator::new(
+                reference_path,
+                args.chemistry_defs.primary(),
+                args.include_exons,
+                args.include_introns,
+            )?)
+        } else {
+            None
+        };
 
         let n_threads = rover.get_threads().max(1);
 
@@ -790,7 +767,6 @@ impl MartianStage for AlignAndCount {
             annotator,
             args.read_chunks.clone(),
             rover.files_path().into(),
-            args.targeted_umi_min_read_count,
             probe_set_reference,
         )?;
 
@@ -798,15 +774,17 @@ impl MartianStage for AlignAndCount {
             .map(|i| rover.make_path(format!("read_annotations_{i}")))
             .collect();
 
-        let (barcodes_to_subsample, barcode_subsample_rate) = get_barcode_subsampling(&args)?;
+        let (barcodes_to_subsample, barcode_subsample_rate) = match &args.v1_pattern_fix_params {
+            Some(v1_pattern_fix_params) => v1_pattern_fix_params.barcode_subsampling()?,
+            None => (TxHashSet::default(), None),
+        };
 
         // Each thread that handles reads uses one clone() of AlignThreadProcessor struct
         // It contains:
         // - An owned StarAligner that has it's own scratch data for aligning reads
         // - An Arc<StarReference> which is the shared reference data structure used by STAR
         // - Shared FeatureReference and ReadAnnotator structs used to
-        let is_pd = args.is_pd;
-        let processors = izip!(&ann_files, per_read_gap_align_writers)
+        let processors = zip_eq(&ann_files, per_read_gap_align_writers)
             .enumerate()
             .map(|(idx, (ann_file, per_read_gap_align_writer))| {
                 anyhow::Ok(AlignThreadProcessor {
@@ -817,8 +795,8 @@ impl MartianStage for AlignAndCount {
                     pos_reads_sender: pos_reads.get_sender(),
                     bc_probe_counts_sender: bc_probe_counts.as_mut().map(|x| x.get_sender()),
                     per_read_gap_align_writer,
-                    visitor: if is_pd {
-                        let rng = ChaCha20Rng::seed_from_u64(idx as u64);
+                    visitor: if args.is_pd {
+                        let rng = SmallRng::seed_from_u64(idx as u64);
                         StageVisitor::with_ann_writer_sample(
                             metrics_writer.get_sender(),
                             target_genes.clone(),
@@ -880,7 +858,7 @@ impl MartianStage for AlignAndCount {
             pos_sorted_shard,
             bam_header,
             barcode_summary_shard,
-            annotation_files: if is_pd {
+            annotation_files: if args.is_pd {
                 Some(AnnotationFiles {
                     num_reads: num_reads_annotation_files,
                     files: ann_files,
@@ -982,6 +960,84 @@ impl MartianStage for AlignAndCount {
     }
 }
 
+/// Chunk the barcode space into num_chunks that approximately evenly divide up all reads.
+/// Track the top barcodes in each chunk for use in memory estimation.
+fn make_chunks(
+    num_reads: usize,
+    num_chunks: usize,
+    bc_count_iter: impl Iterator<Item = (Barcode, usize)>,
+) -> Vec<ChunkData> {
+    // Augment the count iterator to maintain a running sum.
+    // We use this running sum to chunk the iterator.
+    let bc_count_iter = bc_count_iter.scan(0, |sum, (bc, count)| {
+        *sum += count;
+        Some((bc, count, *sum))
+    });
+
+    let approx_n_per_chunk = num_reads / num_chunks;
+
+    // Derive a chunk key for each barcode.
+    let chunker =
+        bc_count_iter.chunk_by(|(_, _, sum)| (sum / approx_n_per_chunk).min(num_chunks - 1));
+
+    let mut chunks: Vec<_> = chunker
+        .into_iter()
+        .map(|(_, counts_iter)| {
+            let mut counts_iter = counts_iter.map(|(bc, count, _sum)| (bc, count)).peekable();
+            let start_bc = counts_iter.peek().unwrap().0;
+            let top_n_counts = counts_iter.fold(
+                TopCounts::new(NUM_CHUNK_THREADS),
+                |mut top_n, (_, count)| {
+                    top_n.observe(count);
+                    top_n
+                },
+            );
+            ChunkData {
+                range: Range {
+                    start: Some(start_bc),
+                    end: None, // we will populate end later
+                },
+                top_n_counts,
+            }
+        })
+        .collect();
+    // Populate range ends from next start.
+    let mut chunk_iter = chunks.iter_mut().peekable();
+    while let Some(chunk) = chunk_iter.next() {
+        chunk.range.end = chunk_iter
+            .peek()
+            .and_then(|next_chunk| next_chunk.range.start);
+    }
+    chunks
+}
+
+/// Track top N counts.
+struct TopCounts(Vec<Reverse<usize>>);
+
+impl TopCounts {
+    pub fn new(n: usize) -> Self {
+        Self(vec![Reverse(0); n])
+    }
+
+    pub fn observe(&mut self, count: usize) {
+        self.0.push(Reverse(count));
+        self.0.sort_unstable();
+        self.0.pop();
+    }
+
+    /// Sum all counts, clipping each value at limit.
+    pub fn sum_with_limit(&self, limit: usize) -> usize {
+        self.0.iter().map(|c| c.0.min(limit)).sum()
+    }
+}
+
+struct ChunkData {
+    /// The barcode range to read for the chunk.
+    pub range: Range<Barcode>,
+    /// The counts of the top N most populous barcodes for the chunk.
+    pub top_n_counts: TopCounts,
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -990,8 +1046,25 @@ mod test {
     use shardio::SortKey;
 
     #[test]
+    fn test_top_n() {
+        let counts = [0, 5, 3, 12, 0, 1, 4, 5];
+        let mut top_n = TopCounts::new(3);
+        for c in counts {
+            top_n.observe(c);
+        }
+        assert_eq!(
+            top_n.0.iter().map(|c| c.0).collect::<Vec<_>>(),
+            vec![12, 5, 5]
+        );
+        assert_eq!(top_n.sum_with_limit(4), 12);
+        assert_eq!(top_n.sum_with_limit(10), 20);
+    }
+
+    #[test]
     fn test_choose_aligner() -> Result<()> {
-        use cr_types::chemistry::ChemistryName::{SpatialThreePrimeV1, ThreePrimeV3, MFRP_RNA};
+        use cr_types::chemistry::ChemistryName::{
+            SpatialThreePrimeV1, ThreePrimeV3PolyA, MFRP_RNA,
+        };
         use AlignerParam::{Hurtle, Star};
 
         let hybcap_file = "test/target_panels/Immunology_targeting_hybrid.csv".into();
@@ -1016,12 +1089,15 @@ mod test {
 
         // Test chemistry and target_panel_file_format.
         let spatial_is_rtl = SpatialThreePrimeV1.is_rtl();
-        assert_eq!(choose_aligner(None, ThreePrimeV3.is_rtl(), hybcap)?, Star);
+        assert_eq!(
+            choose_aligner(None, ThreePrimeV3PolyA.is_rtl(), hybcap)?,
+            Star
+        );
         assert!(choose_aligner(None, MFRP_RNA.is_rtl(), hybcap).is_err());
         assert_eq!(choose_aligner(None, spatial_is_rtl, hybcap)?, Star);
 
         // Test chemistry and probe_set_file_format.
-        assert_eq!(choose_aligner(None, ThreePrimeV3.is_rtl(), rtl)?, Star);
+        assert_eq!(choose_aligner(None, ThreePrimeV3PolyA.is_rtl(), rtl)?, Star);
         assert_eq!(choose_aligner(None, MFRP_RNA.is_rtl(), rtl)?, Hurtle);
         assert_eq!(choose_aligner(None, spatial_is_rtl, rtl)?, Hurtle);
 

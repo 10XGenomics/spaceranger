@@ -4,8 +4,10 @@
 __MRO__ = """
 stage DISABLE_CORRECTION_FACTOR(
     in  V1PatternFixArgs v1_pattern_fix,
-    out bool disable_correction_factor,
-    src py   "stages/spatial/disable_correction_factor",
+    out bool             disable_correction_factor,
+    src py               "stages/spatial/disable_correction_factor",
+) using (
+    volatile = strict,
 )
 """
 

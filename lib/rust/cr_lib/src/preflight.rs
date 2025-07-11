@@ -1,31 +1,26 @@
+#![allow(missing_docs)]
 use anyhow::{bail, ensure, Context, Result};
 use bio::alphabets::dna::revcomp;
 use cr_h5::probe_reference_io::PROBE_DATA_LEN;
 use cr_types::probe_set::ProbeSetReferenceMetadata;
 use cr_types::reference::feature_reference::{FeatureReference, FeatureType};
-use cr_types::reference::reference_info::MULTI_GENOME_SEPARATOR;
+use cr_types::reference::probe_set_reference::TargetSetFile;
+use cr_types::reference::reference_info::{ReferenceInfo, MULTI_GENOME_SEPARATOR};
 use cr_types::types::FeatureBarcodeType;
 use cr_types::{GenomeName, TargetingMethod};
 use itertools::Itertools;
 use lazy_static::lazy_static;
-#[cfg(not(target_os = "linux"))]
-use libc::{getrlimit, rlimit, RLIMIT_NOFILE};
-#[cfg(target_os = "linux")]
-use libc::{getrlimit64 as getrlimit, rlimit64 as rlimit, RLIMIT_NOFILE};
 use metric::{TxHashMap, TxHashSet};
 use multi::config::preflight::check_file;
 use regex::bytes::Regex;
-use std::collections::HashSet;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 use transcriptome::Transcriptome;
 use vdj_reference::VdjReference;
 use vdj_types::VdjRegion;
 
 const MIN_NOFILE: u64 = 1024;
-const GLOBAL_NOFILE_PATH: &str = "/proc/sys/fs/file-max";
-const MIN_GLOBAL_NOFILE: i64 = 32_768;
 
 pub fn hostname() -> String {
     if let Ok(n) = ::hostname::get() {
@@ -34,69 +29,67 @@ pub fn hostname() -> String {
     "<unknown hostname>".to_string()
 }
 
-pub fn check_resource_limits() -> Result<()> {
-    let hard = {
-        let mut rlim: rlimit = rlimit {
-            rlim_cur: 0,
-            rlim_max: 0,
-        };
-        unsafe {
-            getrlimit(RLIMIT_NOFILE, &mut rlim as *mut rlimit);
-        }
-        rlim.rlim_max
-    };
-    if hard < MIN_NOFILE {
-        bail!(
-            "On machine: {}, process open file handle hard limit ({}) is less than {}. Please run `ulimit -n {}` before restarting the pipeline.",
-            hostname(),
-            hard,
-            MIN_NOFILE,
-            MIN_NOFILE,
-        );
-    }
-    let path = Path::new(GLOBAL_NOFILE_PATH);
-    if !path.is_file() {
-        bail!(
-            "On machine: {}, {} does not exist.",
-            hostname(),
-            GLOBAL_NOFILE_PATH
-        );
-    }
-    let mut f = File::open(path)?;
-    let mut buf = String::new();
-    let _ = f.read_to_string(&mut buf)?;
-    let global_nofile_max = buf
+/// Check the global open file handle limit on Linux. Do nothing on macOS.
+#[cfg(not(target_os = "linux"))]
+fn check_global_file_handle_limit() -> Result<()> {
+    Ok(())
+}
+#[cfg(target_os = "linux")]
+fn check_global_file_handle_limit() -> Result<()> {
+    const GLOBAL_NOFILE_PATH: &str = "/proc/sys/fs/file-max";
+    const MIN_GLOBAL_NOFILE: i64 = 32_768;
+
+    ensure!(
+        Path::new(GLOBAL_NOFILE_PATH).is_file(),
+        "On machine: {}, {GLOBAL_NOFILE_PATH} does not exist.",
+        hostname()
+    );
+
+    let files_str = std::fs::read_to_string(GLOBAL_NOFILE_PATH)?;
+    let files: i64 = files_str
         .split_ascii_whitespace()
         .next()
-        .ok_or_else(|| "".parse::<i64>().unwrap_err()) // TODO: would love to use ParseIntError here, but it's unstable
-        .and_then(str::parse::<i64>);
-    match global_nofile_max {
-        Err(_) => bail!(
-            "On machine: {}, {} contains a non-integer global open file handle limit: {buf}",
-            hostname(),
-            GLOBAL_NOFILE_PATH,
-        ),
-        Ok(max) if max < MIN_GLOBAL_NOFILE => bail!(
-            "On machine: {}, global open file handle limit ({max}) is less than {}. \
-             Please set the global file handle limit to {} before restarting the pipeline.",
-            hostname(),
-            MIN_GLOBAL_NOFILE,
-            MIN_GLOBAL_NOFILE
-        ),
-        _ => Ok(()),
-    }
+        .unwrap_or_default()
+        .parse()
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "On machine: {}, {GLOBAL_NOFILE_PATH} contains a non-integer global \
+                 open file handle limit: {files_str}",
+                hostname(),
+            )
+        })?;
+    ensure!(
+        files >= MIN_GLOBAL_NOFILE,
+        "On machine: {}, global open file handle limit ({files}) is less than {MIN_GLOBAL_NOFILE}. \
+         Please set the global file handle limit to {MIN_GLOBAL_NOFILE} before restarting the pipeline.",
+        hostname(),
+    );
+    Ok(())
 }
 
-const METADATA_KEY_PANEL_NAME: &str = "panel_name";
-const METADATA_KEY_REFERENCE_GENOME: &str = "reference_genome";
+pub fn check_resource_limits() -> Result<()> {
+    if let Some(nofile) = rustix::process::getrlimit(rustix::process::Resource::Nofile).maximum {
+        ensure!(
+            nofile >= MIN_NOFILE,
+            "On machine: {}, process open file handle hard limit ({nofile}) is less than \
+             {MIN_NOFILE}. Please run `ulimit -n {MIN_NOFILE}` before restarting the pipeline.",
+            hostname(),
+        );
+    }
 
+    check_global_file_handle_limit()
+}
+
+/// Required probe set CSV metadata.
 const REQUIRED_METADATA_ARRAY: [&str; 4] = [
-    METADATA_KEY_REFERENCE_GENOME,
-    "reference_version",
+    "panel_name",
     "panel_type",
-    METADATA_KEY_PANEL_NAME,
+    "reference_genome",
+    "reference_version",
 ];
-const HEADERS: [&str; 7] = [
+
+/// Probe set CSV headers.
+const HEADERS: [&str; 8] = [
     "gene_id",
     "bait_seq",
     "bait_id",
@@ -104,7 +97,10 @@ const HEADERS: [&str; 7] = [
     "probe_id",
     "included",
     "region",
+    "gene_name",
 ];
+
+/// Minimum number of genes in a target set.
 const MIN_TARGET_PANEL_LENGTH: usize = 10;
 
 lazy_static! {
@@ -138,12 +134,12 @@ fn validate_probe_field(field_name: &str, field_value: &str) -> Result<()> {
     Ok(())
 }
 
+/// checks that genome ref name & version match in the target panel and the reference
 pub fn check_target_panel(
-    transcriptome: &Transcriptome,
-    genomes: Vec<GenomeName>,
-    probe_set: &Path,
+    transcriptome: Option<&Transcriptome>,
+    ref_info: Option<&ReferenceInfo>,
+    probe_set: &TargetSetFile,
     targeting_method: TargetingMethod,
-    is_pd: bool,
 ) -> Result<TxHashSet<String>> {
     use TargetingMethod::{HybridCapture, TemplatedLigation};
 
@@ -154,13 +150,19 @@ pub fn check_target_panel(
         probe_set.display(),
     );
 
-    // Read the transcriptome GTF to map gene IDs to gene names.
-    let gene_name_to_id: TxHashMap<_, _> = transcriptome
-        .genes
-        .iter()
-        .map(|x| (x.name.as_str(), x.id.as_str()))
-        .collect();
-    let gene_ids: TxHashSet<_> = transcriptome.genes.iter().map(|x| x.id.as_str()).collect();
+    // Read the transcriptome GTF to map gene names to gene IDs, used for hybcap.
+    let gene_ids: TxHashSet<_> = transcriptome
+        .map(|transcriptome| transcriptome.genes.iter().map(|x| x.id.as_str()).collect())
+        .unwrap_or_default();
+    let gene_name_to_id: TxHashMap<_, _> = if let Some(transcriptome) = transcriptome {
+        transcriptome
+            .genes
+            .iter()
+            .map(|x| (x.name.as_str(), x.id.as_str()))
+            .collect()
+    } else {
+        TxHashMap::default()
+    };
 
     let metadata = ProbeSetReferenceMetadata::load_from(probe_set)?;
     let metadata_fields = metadata.keys().map(String::as_str).collect();
@@ -175,7 +177,7 @@ pub fn check_target_panel(
         missing_metadata_fields.into_iter().join("\", \""),
     );
 
-    let panel_name = &metadata[METADATA_KEY_PANEL_NAME];
+    let panel_name = metadata.panel_name();
     ensure!(
         !panel_name.contains('/'),
         "The character \"/\" cannot appear in the probe set CSV panel name: {panel_name}"
@@ -224,20 +226,34 @@ pub fn check_target_panel(
         _ => (),
     }
 
-    // Block barnyard genomes for RTL
-    if targeting_method == TemplatedLigation {
-        if !is_pd && genomes.len() > 1 {
-            bail!("Barnyard references are unsupported with probe set CSV!");
-        }
-        let probe_set_ref = &metadata[METADATA_KEY_REFERENCE_GENOME];
-        let probe_set_genomes: HashSet<&str> =
-            probe_set_ref.split(MULTI_GENOME_SEPARATOR).collect();
-        let genomes_set: HashSet<&str> = genomes.iter().map(GenomeName::as_str).collect();
-        if genomes_set != probe_set_genomes {
-            bail!(
-                "Reference genome \"{}\" does not match probe set CSV reference \"{probe_set_ref}\"",
-                genomes.iter().format(MULTI_GENOME_SEPARATOR),
-            );
+    if let (Some(ref_info), TemplatedLigation) = (ref_info, targeting_method) {
+        let probe_set_genome = metadata.reference_genome();
+        ensure!(
+            // Related to Jira: CELLRANGER-9157
+            // Potentially buggy; if ref_info.genomes is a single genome = ["GRCh38_and_extras"]
+            // and probe_set_genome.split() = ["GRCh38", "extras"]. The  error will be inscrutable:
+            // 'Reference genome "GRCh38_and_extras" does not match probe set CSV reference "GRCh38_and_extras'
+            itertools::equal(
+                ref_info.genomes.iter().map(GenomeName::as_str).sorted(),
+                probe_set_genome.split(MULTI_GENOME_SEPARATOR).sorted()
+            ),
+            "Reference genome \"{}\" does not match probe set CSV reference \"{probe_set_genome}\"",
+            ref_info.genomes.iter().format(MULTI_GENOME_SEPARATOR),
+        );
+
+        if let Some(reference_version) = &ref_info.version {
+            let probe_set_version = metadata.reference_version();
+            if probe_set_version != reference_version {
+                let msg = format!(
+                    "Reference version \"{reference_version}\" does not match \
+                     probe set CSV reference version \"{probe_set_version}\""
+                );
+                if ref_info.genomes.len() >= 2 {
+                    println!("Warning: {msg}");
+                } else {
+                    bail!("{msg}");
+                }
+            }
         }
     }
 
@@ -349,7 +365,9 @@ pub fn check_target_panel(
                 TemplatedLigation => gene_id,
                 HybridCapture => {
                     let gene = gene_id.split('.').next().unwrap();
-                    if gene_ids.contains(gene) {
+                    if transcriptome.is_none() {
+                        gene_id
+                    } else if gene_ids.contains(gene) {
                         gene
                     } else if let Some(&gene_id) = gene_name_to_id.get(gene) {
                         gene_id
@@ -410,6 +428,29 @@ pub fn check_target_panel(
                     if included.to_lowercase().as_str() == "false" {
                         excluded_n += 1;
                     };
+                }
+            }
+        }
+
+        if let Some(&gene_name_index) = hdr_to_idx.get("gene_name") {
+            let gene_id = &record[gene_id_idx];
+            let Some(gene_name) = record.get(gene_name_index) else {
+                bail!("gene_name must not be empty for {gene_id} on row {row}");
+            };
+            ensure!(
+                !gene_name.is_empty(),
+                "gene_name must not be empty for {gene_id} on row {row}",
+            );
+            validate_probe_field("gene_name", gene_name)?;
+            if let Some(transcriptome) = transcriptome {
+                if let Some(gene_index) = transcriptome.gene_id_to_idx.get(gene_id) {
+                    let transcriptome_gene_name =
+                        transcriptome.genes[gene_index.0 as usize].name.as_str();
+                    ensure!(
+                        gene_name == transcriptome_gene_name,
+                        "The gene_name {gene_name} of gene_id {gene_id} on row {row} does not \
+                         match the gene name {transcriptome_gene_name} in the transcriptome",
+                    );
                 }
             }
         }
@@ -513,8 +554,8 @@ lazy_static! {
 }
 
 pub fn check_vdj_inner_enrichment_primers(
-    vdj_ref_path: &Path,
-    vdj_ref: &VdjReference,
+    vdj_ref_path: Option<&Path>,
+    vdj_ref: Option<&VdjReference>,
     inner_enrichment_primers: &Path,
 ) -> Result<Vec<String>> {
     if !inner_enrichment_primers.is_file() {
@@ -556,33 +597,35 @@ pub fn check_vdj_inner_enrichment_primers(
         buf.clear();
         lineno += 1;
     }
-    let mut invalid_primers = vec![];
 
-    for primer in &primers {
-        let primer_rc = revcomp(primer.as_bytes());
-        let mut found = false;
-        for entry in vdj_ref.iter_region_filtered(VdjRegion::C) {
-            // the following is O(n^2), but fast for short things (which we expect here)
-            // the rust standard library provides no good way to do this, so we do it ourselves
-            if entry
-                .sequence
-                .windows(primer_rc.len())
-                .any(|s| s == primer_rc)
-            {
-                found = true;
-                break;
+    if let Some(vdj_ref) = vdj_ref {
+        let mut invalid_primers = vec![];
+        for primer in &primers {
+            let primer_rc = revcomp(primer.as_bytes());
+            let mut found = false;
+            for entry in vdj_ref.iter_region_filtered(VdjRegion::C) {
+                // the following is O(n^2), but fast for short things (which we expect here)
+                // the rust standard library provides no good way to do this, so we do it ourselves
+                if entry
+                    .sequence
+                    .windows(primer_rc.len())
+                    .any(|s| s == primer_rc)
+                {
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                invalid_primers.push(primer);
             }
         }
-        if !found {
-            invalid_primers.push(primer);
+        if !invalid_primers.is_empty() {
+            bail!(
+                "None of the C-REGIONs in the reference ({}) is targeted by the following inner enrichment primer(s): {}",
+                vdj_ref_path.unwrap().display(),
+                invalid_primers.into_iter().join(", "),
+            );
         }
-    }
-    if !invalid_primers.is_empty() {
-        bail!(
-            "None of the C-REGIONs in the reference ({}) is targeted by the following inner enrichment primer(s): {}",
-            vdj_ref_path.display(),
-            invalid_primers.into_iter().join(", "),
-        );
     }
     Ok(primers)
 }
@@ -646,33 +689,23 @@ pub fn check_vdj_known_enrichment_primers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cr_types::reference::reference_info::ReferenceInfo;
     use glob::glob;
     use insta::assert_debug_snapshot;
-    use test_refdata::{refdata_available, refdata_path};
 
     #[test]
     fn test_invalid_target_panels() -> Result<()> {
-        if !refdata_available() {
-            return Ok(());
-        }
-        let ref_path = refdata_path("GRCh38-2020-A/");
-        let txome = Transcriptome::from_reference_path(&ref_path)?;
-        let genomes = ReferenceInfo::from_reference_path(&ref_path)?.genomes;
-        let mut target_panels: Vec<_> =
-            glob("test/target_panels/invalid_csvs/*.csv")?.try_collect()?;
-        target_panels.sort();
+        let target_panels: Vec<_> = glob("test/target_panels/invalid_csvs/*.csv")?.try_collect()?;
         let outs: Vec<_> = target_panels
             .iter()
+            .sorted()
             .map(|target_panel| {
                 (
                     target_panel,
                     check_target_panel(
-                        &txome,
-                        genomes.clone(),
-                        target_panel,
+                        None,
+                        None,
+                        &TargetSetFile::from(target_panel),
                         TargetingMethod::HybridCapture,
-                        false,
                     ),
                 )
             })
@@ -687,14 +720,14 @@ mod tests {
             Path::new("../dui_tests/test_resources/reference/vdj_GRCh38_alts_ensembl-4.0.0");
         let vdj_ref = &VdjReference::from_reference_folder(vdj_ref_path).unwrap();
         assert!(check_vdj_inner_enrichment_primers(
-            vdj_ref_path,
-            vdj_ref,
+            Some(vdj_ref_path),
+            Some(vdj_ref),
             Path::new("test/preflight/vdj_human_t_inner_primers.txt")
         )
         .is_ok());
         assert!(check_vdj_inner_enrichment_primers(
-            vdj_ref_path,
-            vdj_ref,
+            Some(vdj_ref_path),
+            Some(vdj_ref),
             Path::new("test/preflight/vdj_invalid_primers.txt")
         )
         .is_err());

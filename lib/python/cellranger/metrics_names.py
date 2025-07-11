@@ -8,3 +8,7 @@ DECODED_FIDUCIALS = "num_fiducials_decoded"
 FIDUCIAL_DETECTION_RATE = "frac_fiducials_detected"
 FIDUCIAL_DECODING_RATE = "frac_fiducials_decoded_given_detected"
 OUTLIERS_DETECTED = "num_incorrect_decodings"
+HD_LAYOUT_OFFSET_ABOVE_THRESHOLD = "hd_layout_offset.is_predicted_offset_outside_range"
+HD_LAYOUT_OFFSET_FELLBACK_TO_PRE_REFINED_FIT = (
+    "hd_layout_offset.is_pre_refinement_offset_good_but_fit_bad"
+)

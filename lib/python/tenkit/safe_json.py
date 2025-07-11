@@ -200,6 +200,7 @@ def _make_iterencode(
     sort_keys: bool,
     item_separator: str,
     key_separator: str,
+    *,
     # Adapted from the standard library lib/python3.8/json/encoder.py
     ## HACK: hand-optimized bytecode; turn globals into locals
     # pylint: disable=redefined-builtin,too-many-arguments
@@ -282,7 +283,7 @@ def _make_iterencode(
             yield from enc(_sanitize_scalar(obj), depth)
         elif (dict_items := _dict_items(obj)) is not None:
             yield from _iterencode_dict(dict_items, depth)
-        elif isinstance(obj, ndarray) and obj.ndim == 0 or isinstance(obj, generic):
+        elif (isinstance(obj, ndarray) and obj.ndim == 0) or isinstance(obj, generic):
             yield from enc(_sanitize_scalar(obj.item()), depth)
         elif hasattr(obj, "__iter__"):
             # Anything else that looks like a list.

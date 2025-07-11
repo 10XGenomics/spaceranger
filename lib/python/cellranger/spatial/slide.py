@@ -97,15 +97,16 @@ def call_hd_layout_reader_info(input_file) -> dict:
 
 def call_gprreader_info_gpr(input_file) -> dict:
     """Given a .gpr file, return the file metadata by calling gprreader."""
-    with tempfile.TemporaryDirectory() as out_path:
-        call_gprreader("info_gpr", input_file, None, out_path)
+    # Please dont create tempfile in a context manager, as that leads to python
+    # trying delete the file, which can cause issues when operating off an NFS
+    # and prevents martian from accounting for the disk usage.
+    out_path = tempfile.mkdtemp()
+    call_gprreader("info_gpr", input_file, None, out_path)
 
-        _, basename_ext = os.path.split(input_file)
-        basename, _ = os.path.splitext(basename_ext)
-        gpr_json = os.path.join(out_path, basename + ".json")
-        gpr_data = read_from_json(gpr_json)
-
-        os.remove(gpr_json)
+    _, basename_ext = os.path.split(input_file)
+    basename, _ = os.path.splitext(basename_ext)
+    gpr_json = os.path.join(out_path, basename + ".json")
+    gpr_data = read_from_json(gpr_json)
 
     return gpr_data
 
@@ -113,9 +114,11 @@ def call_gprreader_info_gpr(input_file) -> dict:
 def load_gal_for_whitelist(wl_name: str):
     """Given a whitelist name, read and return a GAL file."""
     gal_path = get_galfile_path(wl_name)
-    with tempfile.TemporaryDirectory() as out_path:
-        call_gprreader("galparse", gal_path, None, out_path)
-        gal_json = read_from_json(os.path.join(out_path, wl_name + ".json"))
+    # Please dont create tempfile in a context manager, as that leads to python
+    # trying delete the file, which can cause issues when operating off an NFS
+    out_path = tempfile.mkdtemp()
+    call_gprreader("galparse", gal_path, None, out_path)
+    gal_json = read_from_json(os.path.join(out_path, wl_name + ".json"))
 
     if "areas" not in gal_json.keys():
         martian.exit(f"read malformed slide layout (GAL) file from {wl_name}")

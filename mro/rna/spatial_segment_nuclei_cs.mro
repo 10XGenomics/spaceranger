@@ -1,0 +1,66 @@
+@include "spatial_segmentation.mro"
+@include "_spatial_preflights.mro"
+@include "_spatial_stages.mro"
+
+filetype geojson;
+
+stage GET_SEGMENT_WEBSUMMARY_IMAGE(
+    in  file tissue_image,
+    out png  tissue_hires_image,
+    out json barebones_scalefactors,
+    src py   "stages/spatial/get_segment_websummary_image",
+) split (
+) using (
+    vmem_gb = 32,
+)
+
+pipeline SPATIAL_SEGMENT_NUCLEI_CS(
+    in  string  sample_id,
+    in  string  sample_desc,
+    in  file    tissue_image,
+    in  int     max_nucleus_diameter_px,
+    out tiff    nucleus_instance_mask,
+    out geojson nucleus_segmentations,
+    out html    websummary,
+)
+{
+    call SPATIAL_SEGMENT_NUCLEI_PREFLIGHTS(
+        tissue_image            = self.tissue_image,
+        max_nucleus_diameter_px = self.max_nucleus_diameter_px,
+    ) using (
+        preflight = true,
+    )
+
+    call GET_SEGMENT_WEBSUMMARY_IMAGE(
+        tissue_image = self.tissue_image,
+    )
+
+    call SEGMENT_NUCLEI(
+        tissue_image_paths      = [self.tissue_image],
+        max_nucleus_diameter_px = self.max_nucleus_diameter_px,
+        fiducial_bounding_box_on_tissue_image = null,
+    )
+
+    call SEGMENTATION_SPATIAL_PLOTS(
+        hd_feature_slice   = null,
+        analysis_csv       = null,
+        cell_segmentations = SEGMENT_NUCLEI.nucleus_segmentations,
+        tissue_hires_image = GET_SEGMENT_WEBSUMMARY_IMAGE.tissue_hires_image,
+        scale_factors_json = GET_SEGMENT_WEBSUMMARY_IMAGE.barebones_scalefactors,
+    )
+
+    call GENERATE_SEGMENT_WEBSUMMARY(
+        sample_id                    = self.sample_id,
+        sample_desc                  = self.sample_desc,
+        spatial_segmentation_chart   = SEGMENTATION_SPATIAL_PLOTS.spatial_segmentation_chart,
+        segment_nuclei_metrics       = SEGMENT_NUCLEI.segment_nuclei_metrics,
+        max_nucleus_diameter_px_used = SEGMENT_NUCLEI.max_nucleus_diameter_px_used,
+        num_nuclei_detected          = SEGMENT_NUCLEI.num_nuclei_detected,
+    )
+
+    return (
+        nucleus_instance_mask = SEGMENT_NUCLEI.nucleus_instance_mask,
+        nucleus_segmentations = SEGMENT_NUCLEI.nucleus_segmentations,
+        websummary            = GENERATE_SEGMENT_WEBSUMMARY.summary,
+    )
+}

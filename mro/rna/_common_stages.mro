@@ -96,7 +96,6 @@ stage PARSE_TARGET_FEATURES(
     in  path     reference_path,
     in  json     gene_index,
     in  bool     filter_probes,
-    in  bool     no_target_umi_filter,
     in  bool     no_bam,
     in  bool     is_pd,
     in  bool     is_antibody_only,
@@ -106,12 +105,12 @@ stage PARSE_TARGET_FEATURES(
     out csv      target_panel_or_probe_set,
     out csv      target_gene_indices,
     out bool     disable_targeted,
-    out bool     disable_target_umi_filter,
     out bool     no_bam,
     out string   target_set_name,
     out string   targeting_method,
     out tps.json target_panel_summary,
     src py       "stages/common/parse_target_features",
 ) using (
-    mem_gb = 4,
+    mem_gb   = 4,
+    volatile = strict,
 )

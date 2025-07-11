@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use anyhow::{anyhow, bail, ensure, Result};
 use nom::branch::alt;
 use nom::bytes::complete::{is_not, tag, take_until, take_while, take_while1};
@@ -28,13 +29,13 @@ pub struct Record<'a> {
     pub attributes: AttrVec<'a>,
 }
 
-impl<'a> Record<'a> {
+impl Record<'_> {
     pub fn all_attributes(&self) -> Vec<(String, String)> {
         let mut vec: Vec<(String, String)> = Vec::new();
 
         for (k, v) in &self.attributes {
-            let k = std::str::from_utf8(k).unwrap().to_string();
-            let v = std::str::from_utf8(v).unwrap().to_string();
+            let k = str::from_utf8(k).unwrap().to_string();
+            let v = str::from_utf8(v).unwrap().to_string();
             vec.push((k, v));
         }
 
@@ -44,7 +45,7 @@ impl<'a> Record<'a> {
     pub fn get_attr(&self, attribute: &str) -> Result<String> {
         for (k, v) in &self.attributes {
             if k == &attribute.as_bytes() {
-                return Ok(std::str::from_utf8(v)?.to_string());
+                return Ok(str::from_utf8(v)?.to_string());
             }
         }
 
@@ -79,7 +80,7 @@ pub fn parse_gtf_line(line: &[u8]) -> IResult<&[u8], Record<'_>> {
     all_consuming(v)(line)
 }
 
-impl<'a> PartialOrd for Record<'a> {
+impl PartialOrd for Record<'_> {
     fn partial_cmp(&self, other: &Record<'_>) -> Option<Ordering> {
         let r = self.seqname.cmp(other.seqname);
         if r != Ordering::Equal {

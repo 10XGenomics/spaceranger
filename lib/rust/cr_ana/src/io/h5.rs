@@ -1,4 +1,5 @@
 //! I/O HDF5 helper functions
+#![deny(missing_docs)]
 
 use crate::types::{
     clustering_key, ClusteringKey, ClusteringResult, ClusteringType, EmbeddingResult,
@@ -10,6 +11,7 @@ use itertools::FoldWhile::{Continue, Done};
 use itertools::Itertools;
 use ndarray::{s, Array2};
 use std::collections::BTreeMap;
+use std::str::FromStr;
 
 const VERSION_DS: &str = "version";
 const VERSION: i64 = 2;
@@ -49,7 +51,7 @@ pub(crate) fn matrix_feature_types(matrix: &H5File) -> Result<BTreeMap<FeatureTy
     let feature_types = dataset
         .read_1d::<FA>()?
         .iter()
-        .map(|x| x.parse::<FeatureType>())
+        .map(|x| FeatureType::from_str(x))
         .fold_while(Ok(BTreeMap::default()), |mut acc, x| match x {
             Ok(x) => {
                 *acc.as_mut().unwrap().entry(x).or_insert(0) += 1;
@@ -185,6 +187,7 @@ pub(crate) fn save_pca(pca_h5: &H5File, result: &PcaResult<'_>) -> Result<()> {
         .shape(variance_explained.dim())
         .create(pca::VARIANCE)?
         .write(variance_explained)?;
+    file.close()?;
     Ok(())
 }
 
@@ -203,7 +206,7 @@ pub(crate) fn combine_pcas<'a>(
         for num_pcs in in_group.member_names()? {
             let in_group = in_group.group(&num_pcs)?;
             let components_staging_area = in_group.dataset(pca::COMPONENTS)?;
-            let mut components = ndarray::Array2::<f64>::zeros((1, 1));
+            let mut components = Array2::<f64>::zeros((1, 1));
             let mut dispersion = ndarray::Array1::<f64>::zeros(1);
             let mut features_selected = ndarray::Array1::<FA>::from_elem(1, FA::new());
             let mut variance_explained = ndarray::Array1::<f64>::zeros(1);
@@ -243,6 +246,7 @@ pub(crate) fn combine_pcas<'a>(
                 .write(&variance_explained)?;
         }
     }
+    output.close()?;
     Ok(())
 }
 
@@ -366,6 +370,7 @@ pub(crate) fn save_clustering(path: &H5File, result: &ClusteringResult) -> Resul
         .new_dataset::<i64>()
         .create(clustering::NUM)?
         .write_scalar(labels.iter().max().unwrap_or(&0))?;
+    file.close()?;
     Ok(())
 }
 
@@ -423,6 +428,7 @@ pub(crate) fn combine_clusterings<'a>(
                 .write_scalar(&num_clusters)?;
         }
     }
+    output.close()?;
     Ok(())
 }
 
@@ -461,6 +467,7 @@ pub(crate) fn save_embedding(path: &H5File, result: &EmbeddingResult<'_>) -> Res
             feature_type.as_snake_case(),
             dims,
         ))?)?;
+    file.close()?;
     Ok(())
 }
 

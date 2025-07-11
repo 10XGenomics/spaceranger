@@ -1,8 +1,19 @@
-use crate::stages::align_and_count::StageInputs;
+#![deny(missing_docs)]
 use anyhow::Result;
 use barcode::Barcode;
+use martian_derive::MartianStruct;
+use martian_filetypes::json_file::JsonFile;
 use metric::TxHashSet;
+use serde::Deserialize;
 
-pub fn get_barcode_subsampling(_args: &StageInputs) -> Result<(TxHashSet<Barcode>, Option<f64>)> {
-    Ok((TxHashSet::default(), None))
+#[derive(Clone, Deserialize, MartianStruct)]
+pub struct V1PatternFixParams {
+    pub affected_barcodes: JsonFile<Vec<String>>,
+    pub correction_factor: f64,
+}
+
+impl V1PatternFixParams {
+    pub fn barcode_subsampling(&self) -> Result<(TxHashSet<Barcode>, Option<f64>)> {
+        Ok((TxHashSet::default(), None))
+    }
 }

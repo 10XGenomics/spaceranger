@@ -1,3 +1,4 @@
+#![deny(missing_docs)]
 use crate::parse_aggr_csv::MULTI_OUTS;
 use itertools::Itertools;
 use std::path::PathBuf;

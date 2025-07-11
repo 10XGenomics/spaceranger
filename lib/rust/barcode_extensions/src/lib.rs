@@ -1,3 +1,5 @@
+//! barcode_extensions
+#![deny(missing_docs)]
 #[cfg(feature = "tenx_internal")]
 mod internal;
 #[cfg(feature = "tenx_internal")]

@@ -1,4 +1,5 @@
 //! Martian stage MULTI_SETUP_CHUNKS
+#![allow(missing_docs)]
 
 use anyhow::{ensure, Result};
 use barcode::WhitelistSpec;
@@ -23,12 +24,11 @@ pub struct MultiSetupChunksStageInputs {
 #[derive(Clone, Serialize, Deserialize, MartianStruct, PartialEq)]
 pub struct MultiSetupChunksStageOutputs {
     pub chunks: Vec<RnaChunk>,
-    /// Gel Bead barcode whitelist or the spot barcode in Visium
-    pub barcode_whitelist: Option<String>,
+    /// Gel Bead barcode whitelist(s) or the spot barcode in Visium
+    pub barcode_whitelists: Vec<String>,
     pub visium_hd_slide_name: Option<String>,
 }
 
-// This is our stage struct
 pub struct MultiSetupChunks;
 
 #[make_mro]
@@ -94,23 +94,25 @@ impl MartianMain for MultiSetupChunks {
             })
             .collect();
 
-        let barcode_whitelist = args
+        let barcode_whitelists = args
             .chemistry_defs
             .values()
             .filter_map(|x| {
-                x.barcode_whitelist()
+                x.barcode_whitelist_spec()
                     .option_gel_bead()
                     .and_then(WhitelistSpec::whitelist_name)
             })
-            .dedup()
-            .at_most_one()
-            .unwrap()
-            .map(String::from);
+            .unique()
+            .map(String::from)
+            .collect();
 
         let visium_hd_slide_name = args
             .chemistry_defs
             .values()
-            .filter_map(|x| x.barcode_whitelist().map_option(WhitelistSpec::slide_name))
+            .filter_map(|x| {
+                x.barcode_whitelist_spec()
+                    .map_option(WhitelistSpec::slide_name)
+            })
             .flatten()
             .dedup()
             .at_most_one()
@@ -119,7 +121,7 @@ impl MartianMain for MultiSetupChunks {
 
         Ok(MultiSetupChunksStageOutputs {
             chunks,
-            barcode_whitelist,
+            barcode_whitelists,
             visium_hd_slide_name,
         })
     }

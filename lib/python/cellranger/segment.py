@@ -107,15 +107,12 @@ EXTRA_FLAGS_LOW_SUPPORT_UMI = 2
 # EXTRA_FLAGS_GENE_DISCORDANT = 4
 EXTRA_FLAGS_UMI_COUNT = 8
 EXTRA_FLAGS_CONF_MAPPED_FEATURE = 16
-EXTRA_FLAGS_FILTERED_TARGET_UMI = 32
+## No longer used
+# EXTRA_FLAGS_FILTERED_TARGET_UMI = 32
 
 
 def is_read_low_support_umi(read: AlignedSegment) -> bool:
     return (get_read_extra_flags(read) & EXTRA_FLAGS_LOW_SUPPORT_UMI) > 0
-
-
-def is_read_filtered_target_umi(read: AlignedSegment) -> bool:
-    return (get_read_extra_flags(read) & EXTRA_FLAGS_FILTERED_TARGET_UMI) > 0
 
 
 def is_read_umi_count(read: AlignedSegment) -> bool:
@@ -150,7 +147,6 @@ def is_read_dupe_candidate(
         and (umi is not None or not use_umis)
         and (get_read_barcode(read) is not None)
         and not is_read_low_support_umi(read)
-        and not is_read_filtered_target_umi(read)
         and (
             is_read_conf_mapped_to_transcriptome(read, high_conf_mapq)
             or is_read_conf_mapped_to_feature(read)

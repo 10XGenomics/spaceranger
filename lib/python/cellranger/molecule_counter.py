@@ -22,9 +22,6 @@ import cellranger.h5_constants as h5_constants
 import cellranger.hdf5 as cr_h5
 import cellranger.rna.library as rna_library
 import cellranger.utils as cr_utils
-
-# pylint: disable=no-name-in-module,import-error
-from cellranger.fast_utils import concatenate_molecule_infos
 from cellranger.feature_ref import FeatureReference
 from cellranger.rna.library import LIBRARY_TYPE
 from cellranger.targeted.targeted_constants import TARGETING_METHOD_TL
@@ -116,7 +113,6 @@ IS_AGGREGATED_METRIC = "is_aggregated"
 TARGETING_METHOD_METRIC = "targeting_method"
 MOLECULE_INFO_TYPE_METRIC = "molecule_info_type"
 MOLECULE_INFO_TYPE_RAW = "raw"
-MOLECULE_INFO_TYPE_PERSAMPLE = "per_sample"
 MOLECULE_INFO_TYPE_COUNT = "count"
 ANALYSIS_PARAMETERS_METRIC = "analysis_parameters"
 
@@ -146,10 +142,13 @@ HDF5_CHUNK_SIZE = 32768
 # Per-barcode metadata. Sparse (not every barcode is listed)
 class BarcodeInfo(NamedTuple):
     # Array-ized list of (barcode_idx, library_idx, genome_idx)
+    PASS_FILTER_BARCODE_IDX = 0
+    PASS_FILTER_LIBRARY_IDX = 1
+    PASS_FILTER_GENOME_IDX = 2
     pass_filter: np.ndarray
     # tuples where presence indicates passing filter.
     # This is a binary 3-d sparse matrix in COO format.
-    genomes: str  # Genome strings for genome 0..j
+    genomes: list[str]  # Genome strings for genome 0..j
 
 
 BARCODE_INFO_DTYPES = {
@@ -177,7 +176,7 @@ def _write_barcodes(mc: MoleculeCounter, barcodes):
     else:
         # If there are multiple barcode lengths, use the largest for the numpy dtype.
         max_barcode_len = max(len(x) for x in barcodes)
-        barcode_dtype = np.dtype("S%d" % max_barcode_len)
+        barcode_dtype = np.dtype(("S", max_barcode_len))
         mc.h5.create_dataset(
             BARCODE_DS_NAME,
             data=np.fromiter(barcodes, barcode_dtype, count=len(barcodes)),
@@ -200,7 +199,7 @@ def create_dataset(mc: MoleculeCounter, name: str):
 def get_barcode_index_to_retain(mc: MoleculeCounter, tgt_chunk_len=2000000) -> np.ndarray:
     """Get barcode indices which have nonzero counts or pass the filter."""
     barcode_info = mc.get_barcode_info()
-    unique_bc_idx = barcode_info.pass_filter[:, 0]
+    unique_bc_idx = barcode_info.pass_filter[:, BarcodeInfo.PASS_FILTER_BARCODE_IDX]
     for chunk_start, chunk_len in mc.get_chunks(tgt_chunk_len, preserve_boundaries=False):
         unique_bc_idx = np.union1d(
             unique_bc_idx,
@@ -435,11 +434,21 @@ class MoleculeCounter:
                 return whitelist.get("slide", None)
         return None
 
+    def is_visium_hd(self):
+        return self.get_visium_hd_slide_name() is not None
+
     def get_gem_groups(self) -> list[int]:
         return [int(x) for x in self.get_metric(GEM_GROUPS_METRIC).keys()]
 
     def get_genomes(self) -> list[str]:
-        return self.feature_reference.get_genomes(feature_type=rna_library.DEFAULT_LIBRARY_TYPE)
+        """Get a sorted list of genomes, excluding the empty-string genome of feature barcoding."""
+        assert self.feature_reference is not None
+        return self.feature_reference.get_genomes()
+
+    def get_genomes_with_empty_string(self) -> list[str]:
+        """Get a sorted list of genomes, including the empty-string genome of feature barcoding."""
+        assert self.feature_reference is not None
+        return self.feature_reference.get_genomes_with_empty_string()
 
     def get_molecule_info_type(self) -> str:
         return self.get_all_metrics().get(MOLECULE_INFO_TYPE_METRIC, MOLECULE_INFO_TYPE_COUNT)
@@ -547,9 +556,9 @@ class MoleculeCounter:
 
         pass_filter = barcode_info.pass_filter
 
-        pf_barcode_idx = pass_filter[:, 0]
-        pf_library_idx = pass_filter[:, 1]
-        pf_genome_idx = pass_filter[:, 2]
+        pf_barcode_idx = pass_filter[:, BarcodeInfo.PASS_FILTER_BARCODE_IDX]
+        pf_library_idx = pass_filter[:, BarcodeInfo.PASS_FILTER_LIBRARY_IDX]
+        pf_genome_idx = pass_filter[:, BarcodeInfo.PASS_FILTER_GENOME_IDX]
 
         mask = np.ones(pass_filter.shape[0], dtype=bool)
         if genome_idx is not None:
@@ -705,9 +714,8 @@ class MoleculeCounter:
                 elif key == h5_constants.H5_FEATURE_REF_ATTR:
                     mc.feature_reference = FeatureReference.from_hdf5(mc.h5[key])
                 elif (
-                    key == V3_METRICS_GROUP_NAME
-                    or key == BARCODE_INFO_GROUP_NAME
-                    or key == METRICS_JSON_DATASET_NAME
+                    key
+                    in (V3_METRICS_GROUP_NAME, BARCODE_INFO_GROUP_NAME, METRICS_JSON_DATASET_NAME)
                     or key in UNIMPLEMENTED_PROBE_KEYS
                 ):
                     pass
@@ -847,7 +855,9 @@ class MoleculeCounter:
                 future
             ]
 
-        new_pass_filter[:, 0] = [new_positions[x] for x in new_pass_filter[:, 0]]
+        new_pass_filter[:, BarcodeInfo.PASS_FILTER_BARCODE_IDX] = [
+            new_positions[x] for x in new_pass_filter[:, BarcodeInfo.PASS_FILTER_BARCODE_IDX]
+        ]
         new_barcode_info = BarcodeInfo(
             pass_filter=new_pass_filter,
             genomes=old_barcode_info.genomes,
@@ -944,96 +954,6 @@ class MoleculeCounter:
 
     def save(self):
         self.h5.close()
-
-    @staticmethod
-    def merge_barcode_infos(bc_infos: list[BarcodeInfo]) -> BarcodeInfo:
-        """Merge a BarcodeInfo into another BarcodeInfo.
-
-        Args:
-          bc_infos (list of BarcodeInfo): Input BarcodeInfos.
-
-        Returns:
-          BarcodeInfo:
-        """
-        assert len(bc_infos) > 0
-        genomes = bc_infos[0].genomes
-
-        # Total number of barcodes with any information
-        pfs = []
-        for bc_info in bc_infos:
-            assert bc_info.pass_filter.shape[1] == 3
-            assert bc_info.genomes == genomes
-            pfs.append(bc_info.pass_filter)
-
-        new_pf = np.concatenate(pfs, axis=0)
-
-        # Deduplicate the tuples. Unique throws an error on a zero-row array.
-        if new_pf.shape[0] > 0:
-            new_pf = np.unique(new_pf, axis=0)
-
-        return BarcodeInfo(
-            pass_filter=new_pf,
-            genomes=genomes,
-        )
-
-    @staticmethod
-    def concatenate(out_filename, in_filenames, metrics: dict | None = None) -> None:
-        """Concatenate MoleculeCounter HDF5 files.
-
-        Args:
-          out_filename (str): Output HDF5 filename
-          in_filenames (list of str): Input HDF5 filenames
-          metrics (dict): Metrics to write
-        """
-        # Load reference info from first file
-        first_mc = MoleculeCounter.open(in_filenames[0], "r")
-        feature_ref = first_mc.get_feature_ref()
-        barcodes = first_mc.get_barcodes()
-        library_info = first_mc.get_library_info()
-
-        feature_ids = [f.id for f in feature_ref.feature_defs]
-
-        # print 'Merging barcode info'
-        bc_infos = []
-        for filename in in_filenames:
-            with MoleculeCounter.open(filename, "r") as mc:
-                bc_infos.append(mc.get_barcode_info())
-        merged_bc_info = MoleculeCounter.merge_barcode_infos(bc_infos)
-
-        # print 'Concatenating molecule info files'
-        out_mc = MoleculeCounter.open(
-            out_filename,
-            mode="w",
-            feature_ref=feature_ref,
-            barcodes=barcodes,
-            library_info=library_info,
-            barcode_info=merged_bc_info,
-        )
-
-        # TODO: This inefficient code block is to check assumption which should always be true.
-        total_rows = 0
-        for filename in in_filenames:
-            with MoleculeCounter.open(filename, mode="r") as in_mc:
-                # Assert that these data are compatible
-                assert in_mc.get_library_info() == library_info
-                assert np.array_equal(in_mc.get_barcodes(), barcodes)
-                fref = in_mc.get_feature_ref()
-                assert [f.id for f in fref.feature_defs] == feature_ids
-
-                # if no metrics specified, copy them from the first file
-                if metrics is None:
-                    metrics = in_mc.get_all_metrics()
-                total_rows += in_mc.nrows()
-
-        out_mc.set_all_metrics(metrics)
-        out_mc.save()
-
-        # Now use Rust to concatenate all the columns
-        concatenate_molecule_infos(out_filename, in_filenames)
-
-        # Slow validation check here
-        with MoleculeCounter.open(out_filename, "r") as mc:
-            assert total_rows == mc.nrows(), "Concatenation did not produce expected results."
 
     def find_last_occurrence_of_chunk_key(self, from_row: int) -> int:
         num_rows = self.nrows()
@@ -1325,10 +1245,15 @@ class MoleculeCounter:
         queue.put(total_mapped_reads)
 
     @staticmethod
-    def is_targeted_library(library) -> bool:
+    def is_targeted_library(library: dict[str, Any]) -> bool:
+        """Return whether this library is targeted GEX."""
         return library[
             rna_library.LIBRARY_TYPE
         ] == rna_library.GENE_EXPRESSION_LIBRARY_TYPE and rna_library.has_target_set(library)
+
+    def is_targeted(self) -> bool:
+        """Return whether any library is targeted GEX."""
+        return any(self.is_targeted_library(lib) for lib in self.get_library_info())
 
 
 class MergedBarcodes(list):
@@ -1337,7 +1262,7 @@ class MergedBarcodes(list):
     def write_to_disk(self, filename):
         """Write to disk."""
         max_barcode_len = max(len(x) for x in self)
-        barcode_dtype = np.dtype("S%d" % max_barcode_len)
+        barcode_dtype = np.dtype(("S", max_barcode_len))
         with h5py.File(filename, "w") as h5:
             h5.create_dataset(
                 BARCODE_DS_NAME,

@@ -1,3 +1,4 @@
+#![deny(missing_docs)]
 use anyhow::{anyhow, bail, Result};
 use cr_types::reference::feature_reference::FeatureType;
 use cr_types::FeatureBarcodeType;
@@ -105,7 +106,7 @@ impl FromStr for ClusteringType {
     }
 }
 
-impl<'a> TryFrom<&'a str> for ClusteringType {
+impl TryFrom<&str> for ClusteringType {
     type Error = anyhow::Error;
 
     fn try_from(s: &str) -> Result<Self> {
@@ -186,10 +187,14 @@ impl ClusteringResult {
     pub(crate) fn desc(&self) -> Cow<'static, str> {
         match self.feature_type {
             FeatureType::Gene => self.clustering_type.desc(),
+            FeatureType::Peaks => Cow::Owned(format!("Peaks {}", self.clustering_type.desc())),
             FeatureType::Barcode(FeatureBarcodeType::Antibody) => {
                 Cow::Owned(format!("Antibody {}", self.clustering_type.desc()))
             }
             FeatureType::Barcode(_) => unimplemented!(),
+            FeatureType::ProteinExpression => {
+                Cow::Owned(format!("Protein {}", self.clustering_type.desc()))
+            }
         }
     }
 }

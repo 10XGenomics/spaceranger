@@ -1,6 +1,8 @@
+//! slide_design_o3
+#![deny(missing_docs)]
 #![allow(non_snake_case)]
 
-use numpy::PyArray2;
+use numpy::{PyArray2, PyArrayMethods};
 use pyanyhow::Result;
 use pyo3::prelude::*;
 use slide_design::{
@@ -78,6 +80,7 @@ struct VisiumHdSlideWrapper(VisiumHdSlide);
 #[pymethods]
 impl VisiumHdSlideWrapper {
     #[new]
+    #[pyo3(signature = (slide_name, layout=None))]
     fn from_name_and_layout(slide_name: &str, layout: Option<VisiumHdLayout>) -> Result<Self> {
         Ok(VisiumHdSlideWrapper(VisiumHdSlide::from_name_and_layout(
             slide_name, layout,
@@ -127,8 +130,8 @@ impl VisiumHdSlideWrapper {
     fn spot_xy_with_transform<'py>(
         &self,
         py: Python<'py>,
-        transform: &PyArray2<f64>,
-    ) -> &'py PyArray2<f64> {
+        transform: &Bound<'py, PyArray2<f64>>,
+    ) -> Bound<'py, PyArray2<f64>> {
         let transform = Transform::from_owned_array(transform.to_owned_array());
         PyArray2::from_vec2(
             py,
@@ -149,18 +152,22 @@ impl VisiumHdSlideWrapper {
         self.0.has_two_part_barcode()
     }
 
+    #[pyo3(signature = (binning_scale=None))]
     fn num_rows(&self, binning_scale: Option<u32>) -> usize {
         self.0.num_rows(binning_scale)
     }
 
+    #[pyo3(signature = (binning_scale=None))]
     fn num_cols(&self, binning_scale: Option<u32>) -> usize {
         self.0.num_cols(binning_scale)
     }
 
+    #[pyo3(signature = (binning_scale=None))]
     fn num_spots(&self, binning_scale: Option<u32>) -> usize {
         self.0.num_spots(binning_scale)
     }
 
+    #[pyo3(signature = (binning_scale=None))]
     fn grid_size(&self, binning_scale: Option<u32>) -> PyGridIndex2D {
         self.0.grid_size(binning_scale).into()
     }
@@ -190,15 +197,15 @@ impl VisiumHdSlideWrapper {
         self.0.oligos(OligoPart::Bc2).to_vec()
     }
 
-    pub fn bc1_embeddings<'py>(&self, py: Python<'py>) -> &'py PyArray2<bool> {
+    pub fn bc1_embeddings<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<bool>> {
         PyArray2::from_vec2(py, &self.embeddings(|s| s.bc1.as_ref().unwrap())).unwrap()
     }
 
-    pub fn bc2_embeddings<'py>(&self, py: Python<'py>) -> &'py PyArray2<bool> {
+    pub fn bc2_embeddings<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<bool>> {
         PyArray2::from_vec2(py, &self.embeddings(|s| s.bc2.as_ref().unwrap())).unwrap()
     }
 
-    pub fn transform_spot_colrow_to_xy<'py>(&self, py: Python<'py>) -> &'py PyArray2<f64> {
+    pub fn transform_spot_colrow_to_xy<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f64>> {
         PyArray2::from_owned_array(py, self.0.transform_spot_colrow_to_xy().inner())
     }
 }
@@ -219,7 +226,7 @@ impl VisiumHdSlideWrapper {
 
 /// Use the slide design code from python
 #[pymodule]
-fn slide_design_o3(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
+fn slide_design_o3(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<VisiumHdSlideWrapper>()?;
     m.add_class::<VisiumHdLayout>()?;
     Ok(())

@@ -32,11 +32,6 @@ stage CELLRANGER_PREFLIGHT(
 def run_preflight_checks(args):
     cr_preflight.check_os()
 
-    cr_preflight.check_chemistry(
-        args.chemistry,
-        args.sample_def,
-    )
-
     cr_preflight.check_sample_info(
         args.sample_def, args.reference_path, args.full_check, args.feature_reference
     )

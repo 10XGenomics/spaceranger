@@ -1,4 +1,5 @@
 //! Secondary analysis pipeline for testing
+#![deny(missing_docs)]
 
 use crate::stage_testing::run_stage;
 use crate::stages::pca::{PcaStage, PcaStageInputs};

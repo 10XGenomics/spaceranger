@@ -1,0 +1,648 @@
+@include "sc_rna_analyzer.mro"
+@include "_common_cloupe_stages.mro"
+@include "_cr_lib_stages.mro"
+@include "_spatial_reporting_stages.mro"
+@include "_spatial_stages.mro"
+@include "_spatial_write_binned_matrices.mro"
+
+filetype zip;
+filetype h5;
+filetype tiff;
+filetype h4;
+filetype png;
+filetype cloupe;
+
+struct MinimalSegmentedOutputs(
+    npy           expanded_spot_mask,
+    npy           spot_mask,
+    npy           minimum_distance_mask,
+    npy           closest_object_mask,
+    h5            raw_feature_cell_matrix_h5                 "Unfiltered feature-barcode matrices HDF5" "raw_feature_cell_matrix.h5",
+    h5            filtered_feature_cell_matrix_h5            "Filtered feature-barcode matrices HDF5"   "filtered_feature_cell_matrix.h5",
+    path          analysis,
+    path          analysis_csv,
+    path          raw_feature_cell_matrix,
+    path          filtered_feature_cell_matrix,
+    geojson       nucleus_segmentations,
+    geojson       cell_segmentations,
+    geojson       graphclust_annotated_nucleus_segmentations,
+    geojson       graphclust_annotated_cell_segmentations,
+    cloupe        cloupe,
+    SpatialFolder spatial,
+)
+
+struct SegmentedOutputsCs(
+    h5            raw_feature_cell_matrix_h5                 "Unfiltered feature-barcode matrices HDF5" "raw_feature_cell_matrix.h5",
+    h5            filtered_feature_cell_matrix_h5            "Filtered feature-barcode matrices HDF5"   "filtered_feature_cell_matrix.h5",
+    path          analysis_csv                               "Secondary analysis output CSV"            "analysis",
+    path          raw_feature_cell_matrix,
+    path          filtered_feature_cell_matrix,
+    geojson       nucleus_segmentations,
+    geojson       cell_segmentations,
+    geojson       graphclust_annotated_nucleus_segmentations,
+    geojson       graphclust_annotated_cell_segmentations,
+    cloupe        cloupe,
+    SpatialFolder spatial,
+)
+
+struct SegmentationInputs(
+    geojson user_provided_segmentations        "User provided nucleus segmentations",
+    csv     square_barcode_to_cell_map         "User provided barcode to cell ID map CSV",
+    tiff    instance_mask_tiff                 "User provided instance mask TIFF (uint32 or uint16) of segmentation (in microscope image space)",
+    npy     instance_mask_npy                  "User provided instance mask npy (uint32) of segmentation (in microscope image space)",
+    int     max_nucleus_diameter_px            "Maximum diameter of a nucleus that stardist can handle",
+    int     barcode_assignment_distance_micron "Max distance of a barcode from a nuclei (in micron) to assign the barcode to the nucleus",
+)
+
+stage NORMALIZE_TISSUE_IMAGE(
+    in  file[] tissue_image_paths,
+    in  json   fiducial_bounding_box_on_tissue_image,
+    out file   normalized_tissue_image,
+    out json   crop_bbox_used,
+    out json   input_image_bbox,
+    src py     "stages/spatial/normalize_tissue_image",
+) split (
+) using (
+    mem_gb   = 2,
+    vmem_gb  = 64,
+    volatile = strict,
+)
+
+stage RUN_NUCLEI_SEGMENTATION(
+    in  file    normalized_tissue_image,
+    in  int     max_nucleus_diameter_px,
+    in  json    crop_bbox_used,
+    in  json    input_image_bbox,
+    out tiff    nucleus_instance_mask,
+    out geojson nucleus_segmentations,
+    out json    segment_nuclei_metrics,
+    out int     num_nuclei_detected,
+    out int     max_nucleus_diameter_px_used,
+    src py      "stages/spatial/run_nuclei_segmentation",
+) split (
+) using (
+    mem_gb   = 2,
+    vmem_gb  = 64,
+    volatile = strict,
+)
+
+pipeline SEGMENT_NUCLEI(
+    in  file[]  tissue_image_paths,
+    in  int     max_nucleus_diameter_px,
+    in  json    fiducial_bounding_box_on_tissue_image,
+    out tiff    nucleus_instance_mask,
+    out geojson nucleus_segmentations,
+    out json    segment_nuclei_metrics,
+    out int     max_nucleus_diameter_px_used,
+    out int     num_nuclei_detected,
+)
+{
+    call NORMALIZE_TISSUE_IMAGE(
+        * = self,
+    )
+
+    call RUN_NUCLEI_SEGMENTATION(
+        normalized_tissue_image = NORMALIZE_TISSUE_IMAGE.normalized_tissue_image,
+        crop_bbox_used          = NORMALIZE_TISSUE_IMAGE.crop_bbox_used,
+        input_image_bbox        = NORMALIZE_TISSUE_IMAGE.input_image_bbox,
+        max_nucleus_diameter_px = self.max_nucleus_diameter_px,
+    )
+
+    return (
+        * = RUN_NUCLEI_SEGMENTATION,
+    )
+}
+
+stage GENERATE_LOUPE_SEGMENTATION_PRIMITIVES(
+    in  h5 hd_feature_slice,
+    out h5 spatial_cell_segment_mask,
+    src py "stages/spatial/generate_loupe_segmentation_primitives",
+) using (
+    mem_gb   = 4,
+    volatile = strict,
+)
+
+stage ANNOTATE_GEOJSON_WITH_GRAPHCLUST(
+    in  path    analysis_csv,
+    in  geojson nucleus_segmentations,
+    out geojson annotated_segmentations,
+    src py      "stages/spatial/annotate_geojson_with_graphclust",
+) split (
+) using (
+    mem_gb   = 8,
+    volatile = strict,
+)
+
+stage GET_SEGMENTED_DIFFEXP_JSON(
+    in  path analysis_csv,
+    out json diffexp,
+    src py   "stages/spatial/get_segmented_diffexp_json",
+) using (
+    volatile = strict,
+)
+
+stage CONSOLIDATE_DISABLE_CELL_SEGMENTATION(
+    in  bool disable_downstream_segmentation_processing_in,
+    in  bool no_secondary_analysis_in,
+    out bool no_secondary_analysis,
+    src py   "stages/spatial/consolidate_disable_cell_segmentation",
+) using (
+    volatile = strict,
+)
+
+stage USER_PROVIDED_SEGMENTATIONS(
+    in  csv     square_barcode_to_cell_map,
+    in  tiff    instance_mask_tiff,
+    in  npy     instance_mask_npy,
+    in  geojson user_provided_segmentations,
+    out bool    segmentation_from_user,
+    src py      "stages/spatial/user_provided_segmentations",
+) using (
+    volatile = strict,
+)
+
+stage SETUP_SEGMENTATION_PROCESSING(
+    in  geojson user_provided_segmentations,
+    in  geojson pipeline_generated_segmentations,
+    in  csv     square_barcode_to_cell_map,
+    in  int     barcode_assignment_distance_micron_in,
+    out int     barcode_assignment_distance_micron,
+    out geojson nucleus_segmentations,
+    src py      "stages/spatial/setup_segmentation_processing",
+) using (
+    volatile = strict,
+)
+
+stage CLEAN_SPOT_MASK(
+    in  npy raw_segmentation_spot_mask,
+    out npy segmentation_spot_mask,
+    src py  "stages/spatial/clean_spot_mask",
+) using (
+    mem_gb   = 4,
+    volatile = strict,
+)
+
+stage DERASTERISE_MASK(
+    in  npy     segmentation_spot_mask,
+    in  h5      hd_feature_slice,
+    out geojson segmentation_tissue_image_geojson,
+    src py      "stages/spatial/derasterise_mask",
+) split (
+    in  int     chunk_ind_start,
+    in  int     chunk_ind_end,
+    out geojson chunk_segmentation_tissue_image_geojson,
+) using (
+    mem_gb   = 2,
+    volatile = strict,
+)
+
+stage COMPUTE_SEGMENTATION_METRICS(
+    in  h5   filtered_feature_cell_matrix,
+    in  h5   hd_feature_slice,
+    in  h5   molecule_info,
+    in  int  max_nucleus_diameter_px,
+    out json segmentation_metrics,
+    src py   "stages/spatial/compute_segmentation_metrics",
+) split (
+) using (
+    volatile = strict,
+)
+
+stage SEGMENTATION_ANALYSIS_PLOTS(
+    in  h5      filtered_feature_cell_matrix,
+    in  h5      hd_feature_slice,
+    in  geojson cell_segmentations,
+    in  path    analysis,
+    out json    cell_area_chart,
+    out json    features_per_bc_chart,
+    out json    counts_per_bc_chart,
+    out json    segmentation_umap_chart,
+    src py      "stages/spatial/segmentation_analysis_plots",
+) split (
+) using (
+    volatile = strict,
+)
+
+stage SEGMENTATION_SPATIAL_PLOTS(
+    in  h5      hd_feature_slice,
+    in  path    analysis_csv,
+    in  geojson cell_segmentations,
+    in  png     tissue_hires_image,
+    in  json    scale_factors_json,
+    out json    spatial_segmentation_chart,
+    src py      "stages/spatial/segmentation_spatial_plots",
+) using (
+    mem_gb   = 16,
+    volatile = strict,
+)
+
+stage ADD_SEGMENTATION_MASKS_TO_FEATURE_SLICE(
+    in  h5   hd_feature_slice_h5_in,
+    in  npy  segmentation_mask,
+    in  npy  cell_segmentation_mask,
+    in  npy  minimum_distance_mask,
+    in  npy  closest_object_mask,
+    in  bool disable_downstream_analysis,
+    in  bool is_pd,
+    out h5   hd_feature_slice_h5_out      "HD Feature Slice"  "hd_feature_slice.h5",
+    src py   "stages/spatial/add_segmentation_mask_to_feature_slice",
+) using (
+    mem_gb   = 12,
+    volatile = strict,
+)
+
+stage SETUP_WRITING_SPATIAL_DIRECTORY(
+    in  json scalefactors_in,
+    in  bool disable_downstream_analysis_in,
+    out bool disable_downstream_analysis,
+    out json scalefactors,
+    src py   "stages/spatial/setup_writing_spatial_directory",
+) using (
+    volatile = strict,
+)
+
+pipeline SEGMENT_COUNT_SHARDS(
+    in  int               gem_well,
+    in  csf[]             counts,
+    in  frf.bincode       feature_reference,
+    in  map<ChemistryDef> chemistry_defs,
+    in  string            sample_id,
+    in  npy               segmentation_spot_mask,
+    out h5                raw_feature_cell_matrix_h5,
+    out h5                filtered_feature_cell_matrix_h5,
+    out path              raw_feature_cell_matrix,
+    out path              filtered_feature_cell_matrix,
+    out bool              disable_downstream_analysis,
+)
+{
+    call BIN_SPOTS_TO_CELLS(
+        * = self,
+    )
+
+    call WRITE_BINNED_H5_MATRIX(
+        gem_well          = self.gem_well,
+        counts            = [BIN_SPOTS_TO_CELLS.cell_counts],
+        feature_reference = self.feature_reference,
+        chemistry_defs    = self.chemistry_defs,
+        sample_id         = self.sample_id,
+        barcode_index     = BIN_SPOTS_TO_CELLS.cell_barcode_index,
+    ) using (
+        disabled = BIN_SPOTS_TO_CELLS.disable_writing_matrices,
+    )
+
+    call WRITE_BINNED_MATRICES(
+        sample_id             = self.sample_id,
+        raw_matrix_h5         = WRITE_BINNED_H5_MATRIX.matrix,
+        chemistry_defs        = self.chemistry_defs,
+        filtered_bin_barcodes = BIN_SPOTS_TO_CELLS.filtered_cell_barcodes,
+    ) using (
+        disabled = BIN_SPOTS_TO_CELLS.disable_writing_matrices,
+    )
+
+    return (
+        raw_feature_cell_matrix_h5   = WRITE_BINNED_H5_MATRIX.matrix,
+        raw_feature_cell_matrix      = WRITE_BINNED_MATRICES.raw_matrices_mex,
+        filtered_feature_cell_matrix_h5 = WRITE_BINNED_MATRICES.filtered_matrices_h5,
+        filtered_feature_cell_matrix = WRITE_BINNED_MATRICES.filtered_matrices_mex,
+        disable_downstream_analysis  = BIN_SPOTS_TO_CELLS.disable_writing_matrices,
+    )
+}
+
+pipeline SEGMENT_TO_FEATURE_CELL_MATRIX(
+    in  int                gem_well,
+    in  geojson            pipeline_generated_segmentations,
+    in  h5                 hd_feature_slice,
+    in  SegmentationInputs segmentation_inputs,
+    in  csf[]              counts,
+    in  frf.bincode        feature_reference,
+    in  map<ChemistryDef>  chemistry_defs,
+    in  string             sample_id,
+    in  json               tissue_image_shape,
+    out npy                expanded_spot_mask,
+    out npy                spot_mask,
+    out npy                minimum_distance_mask,
+    out npy                closest_object_mask,
+    out h5                 raw_feature_cell_matrix_h5,
+    out geojson            nucleus_segmentations,
+    out geojson            cell_segmentations,
+    out h5                 filtered_feature_cell_matrix_h5,
+    out bool               disable_downstream_analysis,
+    out path               raw_feature_cell_matrix,
+    out path               filtered_feature_cell_matrix,
+)
+{
+    call SETUP_SEGMENTATION_PROCESSING(
+        user_provided_segmentations = self.segmentation_inputs.user_provided_segmentations,
+        pipeline_generated_segmentations = self.pipeline_generated_segmentations,
+        square_barcode_to_cell_map  = self.segmentation_inputs.square_barcode_to_cell_map,
+        barcode_assignment_distance_micron_in = self.segmentation_inputs.barcode_assignment_distance_micron,
+    )
+
+    call PREPROCESS_INSTANCE_MASK(
+        instance_mask_tiff         = self.segmentation_inputs.instance_mask_tiff,
+        instance_mask_npy          = self.segmentation_inputs.instance_mask_npy,
+        square_barcode_to_cell_map = self.segmentation_inputs.square_barcode_to_cell_map,
+        hd_feature_slice           = self.hd_feature_slice,
+        tissue_image_shape         = self.tissue_image_shape,
+    )
+
+    call PREPROCESS_NUCLEUS_SEGMENTATION_GEOJSON(
+        segmentations       = SETUP_SEGMENTATION_PROCESSING.nucleus_segmentations,
+        spot_mask_from_user = PREPROCESS_INSTANCE_MASK.spot_mask_from_user,
+        hd_feature_slice    = self.hd_feature_slice,
+    )
+
+    call CLEAN_SPOT_MASK(
+        raw_segmentation_spot_mask = PREPROCESS_NUCLEUS_SEGMENTATION_GEOJSON.spot_mask,
+    )
+
+    call DERASTERISE_MASK as DERASTERISE_NUCLEUS_MASK(
+        hd_feature_slice       = self.hd_feature_slice,
+        segmentation_spot_mask = CLEAN_SPOT_MASK.segmentation_spot_mask,
+    )
+
+    call ASSIGN_NUCLEI(
+        hd_feature_slice = self.hd_feature_slice,
+        spot_mask        = CLEAN_SPOT_MASK.segmentation_spot_mask,
+        barcode_assignment_distance_micron = SETUP_SEGMENTATION_PROCESSING.barcode_assignment_distance_micron,
+    )
+
+    call DERASTERISE_MASK(
+        hd_feature_slice       = self.hd_feature_slice,
+        segmentation_spot_mask = ASSIGN_NUCLEI.expanded_spot_mask,
+    )
+
+    call SEGMENT_COUNT_SHARDS(
+        segmentation_spot_mask = ASSIGN_NUCLEI.expanded_spot_mask,
+        *                      = self,
+    )
+
+    return (
+        raw_feature_cell_matrix_h5   = SEGMENT_COUNT_SHARDS.raw_feature_cell_matrix_h5,
+        filtered_feature_cell_matrix_h5 = SEGMENT_COUNT_SHARDS.filtered_feature_cell_matrix_h5,
+        disable_downstream_analysis  = SEGMENT_COUNT_SHARDS.disable_downstream_analysis,
+        spot_mask                    = CLEAN_SPOT_MASK.segmentation_spot_mask,
+        expanded_spot_mask           = ASSIGN_NUCLEI.expanded_spot_mask,
+        minimum_distance_mask        = ASSIGN_NUCLEI.minimum_distance_mask,
+        closest_object_mask          = ASSIGN_NUCLEI.closest_object_mask,
+        nucleus_segmentations        = DERASTERISE_NUCLEUS_MASK.segmentation_tissue_image_geojson,
+        cell_segmentations           = DERASTERISE_MASK.segmentation_tissue_image_geojson,
+        raw_feature_cell_matrix      = SEGMENT_COUNT_SHARDS.raw_feature_cell_matrix,
+        filtered_feature_cell_matrix = SEGMENT_COUNT_SHARDS.filtered_feature_cell_matrix,
+    )
+}
+
+pipeline _PROCESS_SEGMENTATIONS(
+    in  int                     gem_well,
+    in  geojson                 pipeline_generated_segmentations,
+    in  h5                      hd_feature_slice,
+    in  csf[]                   counts,
+    in  SegmentationInputs      segmentation_inputs,
+    in  frf.bincode             feature_reference,
+    in  map<ChemistryDef>       chemistry_defs,
+    in  string                  sample_id,
+    in  json                    tissue_image_shape,
+    in  bool                    is_pd,
+    in  bool                    no_secondary_analysis,
+    out bool                    no_segmentation_secondary_analysis,
+    out bool                    disable_downstream_analysis,
+    out MinimalSegmentedOutputs minimal_segmented_outs,
+)
+{
+    call SEGMENT_TO_FEATURE_CELL_MATRIX(
+        * = self,
+    )
+
+    call CONSOLIDATE_DISABLE_CELL_SEGMENTATION(
+        disable_downstream_segmentation_processing_in = SEGMENT_TO_FEATURE_CELL_MATRIX.disable_downstream_analysis,
+        no_secondary_analysis_in = self.no_secondary_analysis,
+    )
+
+    call SC_RNA_ANALYZER as SPATIAL_CELL_RNA_ANALYZER(
+        aggregate_barcodes = null,
+        analyzer_inputs    = {
+            aggr_library_info:          null,
+            cbc_alpha:                  null,
+            cbc_knn:                    null,
+            cbc_realign_panorama:       null,
+            cbc_sigma:                  null,
+            chemistry_batch_correction: false,
+            enable_tsne:                true,
+            exclude_genes:              null,
+            filtered_matrices_h5:       SEGMENT_TO_FEATURE_CELL_MATRIX.filtered_feature_cell_matrix_h5,
+            force_cells:                null,
+            graphclust_neighbors:       null,
+            graphclust_resolution:      0.3,
+            is_pd:                      self.is_pd,
+            is_spatial:                 true,
+            is_visium_hd:               true,
+            max_clusters:               null,
+            molecule_info:              null,
+            neighbor_a:                 null,
+            neighbor_b:                 null,
+            no_secondary_analysis:      CONSOLIDATE_DISABLE_CELL_SEGMENTATION.no_secondary_analysis,
+            num_analysis_bcs:           null,
+            num_pca_bcs:                null,
+            num_pca_genes:              null,
+            num_principal_comps:        null,
+            random_seed:                null,
+            skip_multigenome_analysis:  true,
+            tsne_input_pcs:             null,
+            tsne_max_dims:              null,
+            tsne_max_iter:              null,
+            tsne_mom_switch_iter:       null,
+            tsne_perplexity:            null,
+            tsne_stop_lying_iter:       null,
+            tsne_theta:                 null,
+            umap_implementation:        "original",
+            umap_input_pcs:             null,
+            umap_max_dims:              null,
+            umap_metric:                null,
+            umap_min_dist:              null,
+            umap_n_neighbors:           null,
+            use_bcs:                    null,
+            use_genes:                  null,
+        },
+    ) using (
+        disabled = CONSOLIDATE_DISABLE_CELL_SEGMENTATION.no_secondary_analysis,
+    )
+
+    call ANNOTATE_GEOJSON_WITH_GRAPHCLUST as ANNOTATE_RAW_GEOJSON(
+        analysis_csv          = SPATIAL_CELL_RNA_ANALYZER.common_analyzer.analysis_csv,
+        nucleus_segmentations = SEGMENT_TO_FEATURE_CELL_MATRIX.nucleus_segmentations,
+    ) using (
+        disabled = CONSOLIDATE_DISABLE_CELL_SEGMENTATION.no_secondary_analysis,
+    )
+
+    call ANNOTATE_GEOJSON_WITH_GRAPHCLUST as ANNOTATE_BOUNDS_EXPANDED_GEOJSON(
+        analysis_csv          = SPATIAL_CELL_RNA_ANALYZER.common_analyzer.analysis_csv,
+        nucleus_segmentations = SEGMENT_TO_FEATURE_CELL_MATRIX.cell_segmentations,
+    ) using (
+        disabled = CONSOLIDATE_DISABLE_CELL_SEGMENTATION.no_secondary_analysis,
+    )
+
+    return (
+        minimal_segmented_outs      = {
+            analysis:                                   SPATIAL_CELL_RNA_ANALYZER.common_analyzer.analysis,
+            analysis_csv:                               SPATIAL_CELL_RNA_ANALYZER.common_analyzer.analysis_csv,
+            cell_segmentations:                         SEGMENT_TO_FEATURE_CELL_MATRIX.cell_segmentations,
+            closest_object_mask:                        SEGMENT_TO_FEATURE_CELL_MATRIX.closest_object_mask,
+            cloupe:                                     null,
+            expanded_spot_mask:                         SEGMENT_TO_FEATURE_CELL_MATRIX.expanded_spot_mask,
+            filtered_feature_cell_matrix:               SEGMENT_TO_FEATURE_CELL_MATRIX.filtered_feature_cell_matrix,
+            filtered_feature_cell_matrix_h5:            SEGMENT_TO_FEATURE_CELL_MATRIX.filtered_feature_cell_matrix_h5,
+            graphclust_annotated_cell_segmentations:    ANNOTATE_BOUNDS_EXPANDED_GEOJSON.annotated_segmentations,
+            graphclust_annotated_nucleus_segmentations: ANNOTATE_RAW_GEOJSON.annotated_segmentations,
+            minimum_distance_mask:                      SEGMENT_TO_FEATURE_CELL_MATRIX.minimum_distance_mask,
+            nucleus_segmentations:                      SEGMENT_TO_FEATURE_CELL_MATRIX.nucleus_segmentations,
+            raw_feature_cell_matrix:                    SEGMENT_TO_FEATURE_CELL_MATRIX.raw_feature_cell_matrix,
+            raw_feature_cell_matrix_h5:                 SEGMENT_TO_FEATURE_CELL_MATRIX.raw_feature_cell_matrix_h5,
+            spatial:                                    null,
+            spot_mask:                                  SEGMENT_TO_FEATURE_CELL_MATRIX.spot_mask,
+        },
+        no_segmentation_secondary_analysis = CONSOLIDATE_DISABLE_CELL_SEGMENTATION.no_secondary_analysis,
+        disable_downstream_analysis = SEGMENT_TO_FEATURE_CELL_MATRIX.disable_downstream_analysis,
+    )
+}
+
+pipeline WRITE_SPATIAL_FOLDER(
+    in  SpatialFolder spatial_in,
+    in  json          scalefactors,
+    out SpatialFolder spatial,
+)
+{
+    return (
+        spatial = {
+            aligned_fiducials:              self.spatial_in.aligned_fiducials,
+            aligned_tissue_image:           self.spatial_in.aligned_tissue_image,
+            barcode_fluorescence_intensity: null,
+            cytassist_image:                self.spatial_in.cytassist_image,
+            detected_tissue_image:          self.spatial_in.detected_tissue_image,
+            scalefactors_json:              self.scalefactors,
+            spatial_enrichment:             null,
+            tissue_hires_image:             self.spatial_in.tissue_hires_image,
+            tissue_lowres_image:            self.spatial_in.tissue_lowres_image,
+            tissue_positions:               null,
+            tissue_positions_parquet:       null,
+            tissue_transform_json:          null,
+        },
+    )
+}
+
+pipeline PROCESS_SEGMENTATIONS(
+    in  int                     gem_well,
+    in  geojson                 pipeline_generated_segmentations,
+    in  h5                      hd_feature_slice,
+    in  csf[]                   counts,
+    in  SegmentationInputs      segmentation_inputs,
+    in  frf.bincode             feature_reference,
+    in  map<ChemistryDef>       chemistry_defs,
+    in  string                  sample_id,
+    in  bool                    is_pd,
+    in  bool                    disable_segmentation,
+    in  bool                    no_secondary_analysis,
+    in  string                  sample_desc,
+    in  file[]                  tissue_image_paths,
+    in  int                     dark_images,
+    in  txt                     fiducial_positions_list,
+    in  json                    dzi_info,
+    in  path[]                  dzi_tiles_paths,
+    in  json                    base_scalefactors,
+    in  json                    tissue_image_shape,
+    in  string                  visium_hd_slide_name,
+    in  string[]                image_page_names,
+    in  csv                     base_tissue_positions,
+    in  SpatialFolder           spatial,
+    out bool                    no_segmentation_secondary_analysis,
+    out h5                      hd_feature_slice_h5_out,
+    out MinimalSegmentedOutputs minimal_segmented_outs,
+)
+{
+    call _PROCESS_SEGMENTATIONS(
+        * = self,
+    ) using (
+        disabled = self.disable_segmentation,
+    )
+
+    call ADD_SEGMENTATION_MASKS_TO_FEATURE_SLICE(
+        hd_feature_slice_h5_in      = self.hd_feature_slice,
+        segmentation_mask           = _PROCESS_SEGMENTATIONS.minimal_segmented_outs.spot_mask,
+        cell_segmentation_mask      = _PROCESS_SEGMENTATIONS.minimal_segmented_outs.expanded_spot_mask,
+        minimum_distance_mask       = _PROCESS_SEGMENTATIONS.minimal_segmented_outs.minimum_distance_mask,
+        closest_object_mask         = _PROCESS_SEGMENTATIONS.minimal_segmented_outs.closest_object_mask,
+        disable_downstream_analysis = _PROCESS_SEGMENTATIONS.disable_downstream_analysis,
+        is_pd                       = self.is_pd,
+    )
+
+    call GENERATE_LOUPE_SEGMENTATION_PRIMITIVES(
+        hd_feature_slice = ADD_SEGMENTATION_MASKS_TO_FEATURE_SLICE.hd_feature_slice_h5_out,
+    )
+
+    call CLOUPE_PREPROCESS as CELLSEG_CLOUPE_PREPROCESS(
+        pipestance_type              = "SPATIAL_RNA_COUNTER_PD",
+        sample_id                    = self.sample_id,
+        sample_desc                  = self.sample_desc,
+        analysis                     = _PROCESS_SEGMENTATIONS.minimal_segmented_outs.analysis,
+        filtered_gene_bc_matrices_h5 = _PROCESS_SEGMENTATIONS.minimal_segmented_outs.filtered_feature_cell_matrix_h5,
+        metrics_json                 = null,
+        aggregation_csv              = null,
+        gem_group_index_json         = null,
+        image_page_names             = self.image_page_names,
+        tissue_image_paths           = self.tissue_image_paths,
+        dark_images                  = self.dark_images,
+        tissue_positions             = self.base_tissue_positions,
+        fiducial_positions_list      = self.fiducial_positions_list,
+        dzi_info                     = self.dzi_info,
+        dzi_tiles_paths              = self.dzi_tiles_paths,
+        scale_factors_json           = self.base_scalefactors,
+        no_secondary_analysis        = _PROCESS_SEGMENTATIONS.no_segmentation_secondary_analysis,
+        barcode_whitelist            = null,
+        hd_slide_name                = self.visium_hd_slide_name,
+        loupe_map                    = null,
+        product_type                 = "sp",
+        cells_per_tag                = null,
+        cells_per_sample             = null,
+        cells_per_protospacer        = null,
+        spatial_enrichment           = null,
+        spatial_deconvolution_path   = null,
+        disable_cloupe               = self.disable_segmentation,
+        matrix_type                  = "cell",
+        spatial_cell_segment_mask    = GENERATE_LOUPE_SEGMENTATION_PRIMITIVES.spatial_cell_segment_mask,
+        spatial_cell_segment_geojson = _PROCESS_SEGMENTATIONS.minimal_segmented_outs.cell_segmentations,
+    )
+
+    call SETUP_WRITING_SPATIAL_DIRECTORY(
+        scalefactors_in = self.base_scalefactors,
+        disable_downstream_analysis_in = _PROCESS_SEGMENTATIONS.disable_downstream_analysis,
+    )
+
+    call WRITE_SPATIAL_FOLDER(
+        spatial_in   = self.spatial,
+        scalefactors = SETUP_WRITING_SPATIAL_DIRECTORY.scalefactors,
+    ) using (
+        disabled = SETUP_WRITING_SPATIAL_DIRECTORY.disable_downstream_analysis,
+    )
+
+    return (
+        minimal_segmented_outs  = {
+            analysis:                                   _PROCESS_SEGMENTATIONS.minimal_segmented_outs.analysis,
+            analysis_csv:                               _PROCESS_SEGMENTATIONS.minimal_segmented_outs.analysis_csv,
+            cell_segmentations:                         _PROCESS_SEGMENTATIONS.minimal_segmented_outs.cell_segmentations,
+            closest_object_mask:                        _PROCESS_SEGMENTATIONS.minimal_segmented_outs.closest_object_mask,
+            cloupe:                                     CELLSEG_CLOUPE_PREPROCESS.output_for_cloupe,
+            expanded_spot_mask:                         _PROCESS_SEGMENTATIONS.minimal_segmented_outs.expanded_spot_mask,
+            filtered_feature_cell_matrix:               _PROCESS_SEGMENTATIONS.minimal_segmented_outs.filtered_feature_cell_matrix,
+            filtered_feature_cell_matrix_h5:            _PROCESS_SEGMENTATIONS.minimal_segmented_outs.filtered_feature_cell_matrix_h5,
+            graphclust_annotated_cell_segmentations:    _PROCESS_SEGMENTATIONS.minimal_segmented_outs.graphclust_annotated_cell_segmentations,
+            graphclust_annotated_nucleus_segmentations: _PROCESS_SEGMENTATIONS.minimal_segmented_outs.graphclust_annotated_nucleus_segmentations,
+            minimum_distance_mask:                      _PROCESS_SEGMENTATIONS.minimal_segmented_outs.minimum_distance_mask,
+            nucleus_segmentations:                      _PROCESS_SEGMENTATIONS.minimal_segmented_outs.nucleus_segmentations,
+            raw_feature_cell_matrix:                    _PROCESS_SEGMENTATIONS.minimal_segmented_outs.raw_feature_cell_matrix,
+            raw_feature_cell_matrix_h5:                 _PROCESS_SEGMENTATIONS.minimal_segmented_outs.raw_feature_cell_matrix_h5,
+            spatial:                                    WRITE_SPATIAL_FOLDER.spatial,
+            spot_mask:                                  _PROCESS_SEGMENTATIONS.minimal_segmented_outs.spot_mask,
+        },
+        no_segmentation_secondary_analysis = _PROCESS_SEGMENTATIONS.no_segmentation_secondary_analysis,
+        hd_feature_slice_h5_out = ADD_SEGMENTATION_MASKS_TO_FEATURE_SLICE.hd_feature_slice_h5_out,
+    )
+}

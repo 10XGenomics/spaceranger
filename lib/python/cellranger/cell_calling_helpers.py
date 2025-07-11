@@ -4,7 +4,7 @@ from __future__ import annotations
 import enum
 import itertools
 from collections import Counter, OrderedDict
-from collections.abc import Collection, Container, Iterable, Mapping
+from collections.abc import Collection, Container, Iterable, Mapping, Sized
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -143,7 +143,7 @@ def get_filter_method_name(fm: FilterMethod) -> str:
     elif fm == FilterMethod.TARGETED:
         return "targeted"
     else:
-        raise ValueError("Unsupported filter method value %d" % fm)
+        raise ValueError(f"Unsupported filter method value {fm}")
 
 
 def get_filter_method_from_string(name: str) -> FilterMethod:
@@ -160,7 +160,7 @@ def get_filter_method_from_string(name: str) -> FilterMethod:
     elif name == "targeted":
         return FilterMethod.TARGETED
     else:
-        raise ValueError("Unknown filter method value %d" % name)
+        raise ValueError(f"Unknown filter method value {name}")
 
 
 def validate_cell_calling_args(
@@ -416,10 +416,8 @@ def remove_bcs_from_high_occupancy_gems(
 
     # Revised filtered barcodes
     filtered_bcs = [bc for bc in filtered_bcs if bc not in barcodes_in_high_occupancy_gem_set]
-    for k in genome_filtered_bcs:
-        genome_filtered_bcs[k] = [
-            bc for bc in genome_filtered_bcs[k] if bc not in barcodes_in_high_occupancy_gem_set
-        ]
+    for k, v in genome_filtered_bcs.items():
+        genome_filtered_bcs[k] = [bc for bc in v if bc not in barcodes_in_high_occupancy_gem_set]
 
     return filtered_bcs, genome_filtered_bcs, summary
 
@@ -817,22 +815,19 @@ def merge_filtered_metrics(
 
 
 def combine_initial_metrics(
-    genomes: Iterable[str],
     filtered_metrics_groups: Mapping[MetricGroups, BarcodeFilterResults],
-    genome_filtered_bcs,
-    summary,
+    genome_filtered_bcs: Mapping[str, Sized],
+    summary: dict[str, Any],
 ):
+    """Flatten filtered_metrics_groups by concatenating the genome prefix with each metric."""
     # Combine initial-cell-calling metrics
-    for genome in genomes:
+    for genome, barcodes in genome_filtered_bcs.items():
         # Merge metrics over all gem groups and samples for this genome
         txome_metrics = {k: v for k, v in filtered_metrics_groups.items() if k.genome == genome}
         txome_summary = merge_filtered_metrics(txome_metrics)
-
         prefix = genome + "_" if genome else ""
         summary.update({(f"{prefix}{key}"): summary for key, summary in txome_summary.items()})
-
-        summary[f"{prefix}filtered_bcs"] = len(genome_filtered_bcs.get(genome, {}))
-
+        summary[f"{prefix}filtered_bcs"] = len(barcodes)
     return summary
 
 

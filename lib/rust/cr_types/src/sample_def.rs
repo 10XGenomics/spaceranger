@@ -1,7 +1,4 @@
-//!
-//! There is code in fastq_set::sample_def, but having it in Cellranger makes
-//! more sense
-
+#![allow(missing_docs)]
 use crate::serde_helpers::NumberOrStr;
 use crate::LibraryType;
 use anyhow::{bail, ensure, Result};
@@ -95,7 +92,6 @@ impl Default for SampleDef {
 
 impl SampleDef {
     // Check for missing FASTQ files.
-    #[allow(unused)]
     pub fn check_fastqs(&self, help_text: &str) -> Result<()> {
         let read_path = self.read_path.display();
         match self.fastq_mode {
@@ -134,7 +130,10 @@ impl SampleDef {
                         if let LaneSpec::Lanes(lanes) = &lane_spec {
                             for sample_index in sample_indices {
                                 ensure!(
-                                    lanes.iter().any(|lane| dir.contains_index_with_lane(sample_index, *lane)),
+                                    lanes
+                                        .iter()
+                                        .any(|lane| dir
+                                            .contains_index_with_lane(sample_index, *lane)),
                                     "No input FASTQs were found for the sample index {sample_index} \
                                     and lanes {:?} in the path: {read_path}",
                                     lanes.iter().sorted().join(",")

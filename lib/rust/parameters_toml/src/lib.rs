@@ -1,50 +1,5 @@
-// Warning groups (as of rust 1.55)
-#![deny(
-    future_incompatible,
-    nonstandard_style,
-    rust_2018_compatibility,
-    rust_2021_compatibility,
-    rust_2018_idioms,
-    unused
-)]
-// Other warnings (as of rust 1.55)
-#![deny(
-    asm_sub_register,
-    bad_asm_style,
-    bindings_with_variant_name,
-    clashing_extern_declarations,
-    confusable_idents,
-    const_item_mutation,
-    deprecated,
-    deref_nullptr,
-    drop_bounds,
-    dyn_drop,
-    elided_lifetimes_in_paths,
-    exported_private_dependencies,
-    function_item_references,
-    improper_ctypes,
-    improper_ctypes_definitions,
-    incomplete_features,
-    inline_no_sanitize,
-    invalid_value,
-    irrefutable_let_patterns,
-    large_assignments,
-    mixed_script_confusables,
-    non_shorthand_field_patterns,
-    no_mangle_generic_items,
-    overlapping_range_endpoints,
-    renamed_and_removed_lints,
-    stable_features,
-    temporary_cstring_as_ptr,
-    trivial_bounds,
-    type_alias_bounds,
-    uncommon_codepoints,
-    unconditional_recursion,
-    unknown_lints,
-    unnameable_test_items,
-    unused_comparisons,
-    while_true
-)]
+//! parameters_toml
+#![deny(missing_docs)]
 
 use anyhow::{Context, Result};
 use log::warn;
@@ -68,12 +23,6 @@ struct Parameters {
     star_parameters: String,
     /// Alternative minimum UMI read length
     umi_min_read_length: Option<usize>,
-    /// Maximum number of multiplexing capture tags allowed
-    max_multiplexing_tags: usize,
-    /// 5' chemistries with multiplexing
-    fiveprime_multiplexing: bool,
-    /// 3' LT chemistries with multiplexing
-    threeprime_lt_multiplexing: bool,
     /// Minimum fraction of the single major probe barcode for
     /// singleplex FRP libraries
     min_major_probe_bc_frac: f64,
@@ -87,9 +36,6 @@ const DEFAULT_PARAMETERS: Parameters = Parameters {
     vdj_max_reads_per_barcode: 80_000,
     star_parameters: String::new(),
     umi_min_read_length: None,
-    max_multiplexing_tags: 12,
-    fiveprime_multiplexing: true,
-    threeprime_lt_multiplexing: false,
     min_major_probe_bc_frac: 0.7,
 };
 static PARAMETERS: OnceLock<Result<Parameters>> = OnceLock::new();
@@ -115,8 +61,10 @@ fn parameters() -> &'static Result<Parameters> {
     })
 }
 
+/// Get a parameter from parameters.toml
 macro_rules! parameter_getter {
     ($a:ident, $t:ty) => {
+        /// Get this parameter from parameters.toml
         pub fn $a() -> Result<&'static $t> {
             let val = match parameters() {
                 Err(e) => return Err(anyhow::anyhow!(e)),
@@ -136,8 +84,5 @@ parameter_getter!(min_fraction_whitelist_match, f64);
 parameter_getter!(min_barcode_similarity, f64);
 parameter_getter!(vdj_max_reads_per_barcode, usize);
 parameter_getter!(umi_min_read_length, Option<usize>);
-parameter_getter!(max_multiplexing_tags, usize);
-parameter_getter!(fiveprime_multiplexing, bool);
-parameter_getter!(threeprime_lt_multiplexing, bool);
 parameter_getter!(min_major_probe_bc_frac, f64);
 parameter_getter!(star_parameters, str);

@@ -14,6 +14,8 @@ import tenkit.safe_json as tk_safe_json
 from cellranger.spatial.loupe_util import LoupeParser
 from cellranger.spatial.tissue_regist import (
     FEATURE_MATCHING,
+    INIT_METHOD_USED_KEY,
+    INIT_TRANSFORM_LIST_KEY,
     ITK_ERROR_PREFIX,
     register_from_init_transform,
 )
@@ -55,8 +57,8 @@ stage REGISTER_FROM_INIT(
 def split(args):
     with open(args.initial_transform_info_json) as f:
         info = json.load(f)
-        init_method_used = info["init_method_used"]
-        init_transform_list = info["init_transform_list"]
+        init_method_used = info[INIT_METHOD_USED_KEY]
+        init_transform_list = info[INIT_TRANSFORM_LIST_KEY]
     chunks = []
     join_mem_gb = 8
     mem_gb_chunk = 12
@@ -87,6 +89,7 @@ def main(args, outs):
         raise ValueError("Registration target image should have dimension of 2")
     cyta_img = (cyta_img - np.min(cyta_img)) / (np.max(cyta_img) - np.min(cyta_img))
     if args.is_visium_hd and args.fid_perp_tmat:
+        # cv2.warpPerspective uses center-based sub-pixel coordinates
         center_based_perp_tmat = convert_transform_corner_to_center(np.array(args.fid_perp_tmat))
         # shape[::-1] because cv2 uses (width, height) convention
         cyta_img = cv2.warpPerspective(cyta_img, center_based_perp_tmat, cyta_img.shape[::-1])
@@ -102,7 +105,6 @@ def main(args, outs):
         learning_rate,
         outs.chunk_max_mutual_info_init_debug,
     )
-
     if args.is_visium_hd and args.fid_perp_tmat:
         transform_mat = transform_mat @ np.array(args.fid_perp_tmat)
 

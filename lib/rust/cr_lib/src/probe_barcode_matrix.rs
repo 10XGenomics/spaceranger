@@ -1,4 +1,5 @@
 //! Probe barcode matrix I/O
+#![deny(missing_docs)]
 
 use anyhow::{bail, Context, Result};
 use barcode::Barcode;
@@ -8,10 +9,10 @@ use cr_h5::{extend_dataset, make_column_ds, write_column_ds};
 use cr_types::probe_set::{is_deprecated_probe, Probe, ProbeRegion, ProbeSetReference, ProbeType};
 use cr_types::reference::feature_reference::TargetSet;
 use cr_types::reference::probe_set_reference::TargetSetFile;
-use cr_types::{BarcodeIndex, CountShardFile, ProbeBarcodeCount};
+use cr_types::{BarcodeIndex, CountShardFile, GenomeName, ProbeBarcodeCount};
 use hdf5::types::FixedAscii;
 use hdf5::{File, Group};
-use itertools::{process_results, Itertools};
+use itertools::Itertools;
 use martian_filetypes::json_file::JsonFile;
 use martian_filetypes::FileTypeRead;
 use metric::TxHashSet;
@@ -45,6 +46,7 @@ pub struct ProbeCounts {
     pub ref_sequence_name: String,
     pub ref_sequence_pos: Option<usize>,
     pub cigar_string: String,
+    pub genome: GenomeName,
 }
 
 impl ProbeCounts {
@@ -70,6 +72,7 @@ impl From<ProbeCounts> for Probe {
     fn from(probe: ProbeCounts) -> Probe {
         Probe {
             probe_id: probe.probe_id,
+            probe_seq: String::new(),
             gene: Gene {
                 name: probe.gene_name,
                 id: probe.gene_id,
@@ -80,6 +83,7 @@ impl From<ProbeCounts> for Probe {
             ref_sequence_name: probe.ref_sequence_name,
             ref_sequence_pos: probe.ref_sequence_pos,
             cigar_string: probe.cigar_string,
+            genome: probe.genome,
         }
     }
 }
@@ -152,7 +156,7 @@ fn write_probe_columns(
         probe_region_strings.push(make_fixed_ascii(&probe_region_string)?);
 
         // Put in the genome as another dataset
-        genome_strings.push(make_fixed_ascii(&psr.genome)?);
+        genome_strings.push(make_fixed_ascii(&probe.genome)?);
     }
 
     // Write vectors to the H5 matrix
@@ -218,12 +222,12 @@ fn write_probe_matrix_h5_helper(
     // Barcode_counts is used to construct the indptr of the sparse matrix
     let mut barcode_counts = vec![0; barcode_index.len()];
 
-    process_results(reader.iter()?, |iter| {
-        for (barcode, counts) in &iter.group_by(|x| x.barcode) {
+    reader.iter()?.process_results(|iter| {
+        for (barcode, counts) in &iter.chunk_by(|x| x.barcode) {
             // If not in the filtered barcodes, we dont process the the UMI
-            if !barcode_index.contains_barcode(&barcode) {
+            let Some(barcode_index) = barcode_index.get(&barcode) else {
                 continue;
-            }
+            };
 
             // Count all counts corresponding to a barcode
             // probe_idx is the index of the probe. Thus indices_buf maintains
@@ -238,7 +242,6 @@ fn write_probe_matrix_h5_helper(
             }
 
             // barcode_counts maintain difference of adjacent indptr
-            let barcode_index = barcode_index.get_index(&barcode);
             // Just making sure that the shards are indeed sorted by barcodes
             assert_eq!(barcode_counts[barcode_index], 0);
             barcode_counts[barcode_index] = n;
@@ -283,7 +286,7 @@ fn write_probe_matrix_h5_helper(
 /// Uses a barcode index of barcodes to include in the H5 matrix
 pub fn write_probe_bc_matrix(
     probe_set_path: &TargetSetFile,
-    reference_path: &Path,
+    reference_path: Option<&Path>,
     probe_barcode_path: &[CountShardFile],
     h5_path: &Path,
     bc_index: &BarcodeIndex,

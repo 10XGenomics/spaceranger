@@ -1,3 +1,4 @@
+#![deny(missing_docs)]
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
 
@@ -29,14 +30,11 @@ impl<T: From<u8> + Into<u8>> BitEncoded<T> {
             bits: 0,
         }
     }
+
     pub fn push(&mut self, val: T) {
         self.bits |= bit_flag(val.into());
     }
-    #[cfg(test)]
-    #[allow(unused)]
-    pub fn inspect_bits(self) -> u8 {
-        self.bits
-    }
+
     pub fn iter(self) -> BitEncodedIter<T> {
         BitEncodedIter {
             phantom: PhantomData,

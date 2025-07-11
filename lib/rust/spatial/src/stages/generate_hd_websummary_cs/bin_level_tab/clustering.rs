@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use serde::{Deserialize, Serialize};
 use tenx_websummary::components::{
     ButtonSelector, ButtonSelectorOption, Card, DifferentialExpressionTable, HdClusteringPlot,
@@ -26,7 +27,7 @@ pub struct HdClusteringTemplate {
 
 #[derive(Serialize, Deserialize, HtmlTemplate)]
 pub struct DifferentialExpression {
-    title: tenx_websummary::components::Title,
+    title: Title,
     table: DifferentialExpressionTable,
 }
 

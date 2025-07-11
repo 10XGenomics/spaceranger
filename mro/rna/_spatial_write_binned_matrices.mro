@@ -1,0 +1,18 @@
+@include "_spatial_stages.mro"
+
+filetype h5;
+filetype json;
+
+stage WRITE_BINNED_MATRICES(
+    in  string            sample_id,
+    in  h5                raw_matrix_h5,
+    in  map<ChemistryDef> chemistry_defs,
+    in  json              filtered_bin_barcodes,
+    out h5                filtered_matrices_h5,
+    out path              filtered_matrices_mex,
+    out path              raw_matrices_mex,
+    src py                "stages/spatial/write_binned_matrices",
+) split (
+) using (
+    volatile = strict,
+)

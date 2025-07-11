@@ -1,5 +1,6 @@
 //! Martian stage COLLATE_METRICS
 //! This stage receives per barcode metrics from ALIGN_AND_COUNT and creates the summary JSON.
+#![allow(missing_docs)]
 
 use crate::align_metrics::{BarcodeKind, BarcodeMetrics, LibFeatThenBarcodeOrder, VisitorMetrics};
 use crate::types::{BarcodeMetricsShardFile, FeatureReferenceFormat};
@@ -11,7 +12,7 @@ use cr_types::reference::reference_info::ReferenceInfo;
 use cr_types::{
     GenomeName, LibraryType, MetricsFile, SampleAssignment, SampleBarcodes, SampleBarcodesFile,
 };
-use itertools::{process_results, Itertools};
+use itertools::{chain, Itertools};
 use json_report_derive::JsonReport;
 use martian::prelude::*;
 use martian_derive::{make_mro, MartianStruct};
@@ -25,7 +26,6 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::iter::zip;
 use std::ops::Add;
-use std::path::PathBuf;
 
 const FILTERED_BARCODES_SUFFIX: &str = "_in_filtered_barcodes";
 
@@ -53,8 +53,8 @@ impl From<&AggregateBarcode> for AggregateBarcodesMetrics {
 #[derive(Clone, Deserialize, MartianStruct)]
 pub struct CollateMetricsStageInputs {
     pub per_barcode_metrics: Vec<BarcodeMetricsShardFile>,
-    pub reference_path: PathBuf,
-    pub feature_reference: FeatureReferenceFormat,
+    pub reference_info: Option<ReferenceInfo>,
+    pub feature_reference_binary: FeatureReferenceFormat,
     pub filtered_barcodes: Option<FilteredBarcodesCsv>,
     pub aggregate_barcodes: Option<CsvFile<AggregateBarcode>>,
     pub sample_barcodes: Option<SampleBarcodesFile>,
@@ -95,7 +95,7 @@ struct FilteredBarcodesMetrics {
     filtered_barcodes_metrics: Option<VisitorMetrics>,
 }
 
-impl std::ops::Add for FilteredBarcodesMetrics {
+impl Add for FilteredBarcodesMetrics {
     type Output = Self;
 
     fn add(self, rhs: Self) -> Self {
@@ -183,7 +183,7 @@ fn calculate_metrics_per_library(
     genomes: &[GenomeName],
     csv_writer: &mut BufWriter<File>,
 ) -> Result<TxHashMap<LibraryType, FilteredBarcodesMetrics>> {
-    iter.group_by(|x| x.library_type)
+    iter.chunk_by(|x| x.library_type)
         .into_iter()
         .map(|(library_type, bc_metrics_iter)| {
             if library_type == LibraryType::Gex {
@@ -201,7 +201,7 @@ fn calculate_metrics_per_library(
                         (None, _) => true,
                     }
                 })
-                .group_by(|x| x.barcode)
+                .chunk_by(|x| x.barcode)
                 .into_iter()
                 .map(|(barcode, mut group)| {
                     let metrics = match barcode {
@@ -257,13 +257,13 @@ impl MartianStage for CollateMetrics {
         args: Self::StageInputs,
         _rover: MartianRover,
     ) -> Result<StageDef<Self::ChunkInputs>> {
-        let mem_gb = if args.sample_barcodes.is_some() { 5 } else { 1 };
+        let mem_gb = if args.sample_barcodes.is_some() { 6 } else { 1 };
         Ok(SampleBarcodes::read_samples(args.sample_barcodes.as_ref())?
             .into_iter()
             .map(|sample| {
                 (
                     CollateMetricsChunkInputs { sample },
-                    Resource::with_mem_gb(mem_gb),
+                    Resource::with_mem_gb(mem_gb).vmem_gb(4 + mem_gb),
                 )
             })
             .collect())
@@ -285,9 +285,17 @@ impl MartianStage for CollateMetrics {
             .into_barcodes(&chunk_args.sample)
             .map(TxHashSet::from_iter);
 
-        let ref_info = ReferenceInfo::from_reference_path(&args.reference_path)?;
-
-        let has_targeted_gex = args.feature_reference.read()?.target_set.is_some();
+        let feature_ref = args.feature_reference_binary.read()?;
+        let has_targeted_gex = feature_ref.target_set.is_some();
+        // TODO: Jira: CELLRANGER-9147: Consider using reference_genomes from reference_info
+        let genomes: Vec<GenomeName> = feature_ref
+            .feature_defs
+            .into_iter()
+            .map(|x| x.genome)
+            .filter(|x| !x.is_empty())
+            .unique()
+            .sorted()
+            .collect();
 
         let per_barcode_metrics: CsvFile<_> = rover.make_path("per_barcode_metrics");
         let mut csv_writer = per_barcode_metrics.buf_writer()?;
@@ -296,12 +304,12 @@ impl MartianStage for CollateMetrics {
         // the appropriate prefix. The shard files are sorted by (library_type, barcode).
         let metrics_reader: ShardReader<BarcodeMetrics, LibFeatThenBarcodeOrder> =
             ShardReader::open_set(&args.per_barcode_metrics)?;
-        let per_lib_type_metrics = process_results(metrics_reader.iter()?, |iter| {
+        let per_lib_type_metrics = metrics_reader.iter()?.process_results(|iter| {
             calculate_metrics_per_library(
                 iter,
                 barcodes_for_sample.as_ref(),
                 filtered_barcodes.as_ref(),
-                &ref_info.genomes,
+                &genomes,
                 &mut csv_writer,
             )
         })??;
@@ -320,7 +328,7 @@ impl MartianStage for CollateMetrics {
             .map(|(library_type, metrics)| {
                 (
                     library_type,
-                    metrics.make_report(library_type, &ref_info.genomes, has_targeted_gex),
+                    metrics.make_report(library_type, &genomes, has_targeted_gex),
                 )
             })
             .collect();
@@ -337,10 +345,14 @@ impl MartianStage for CollateMetrics {
             } else {
                 JsonReporter::default()
             };
+        let reference_info_report = args
+            .reference_info
+            .map(|x| x.to_json_reporter())
+            .unwrap_or_default();
 
         let metrics: TxHashMap<_, _> = chain!(
             per_lib_type_reports.to_json_reporter(),
-            ref_info.into_json_report(),
+            reference_info_report,
             aggregate_barcode_metrics,
         )
         .collect();

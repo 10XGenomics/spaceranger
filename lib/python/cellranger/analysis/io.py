@@ -51,8 +51,7 @@ def save_h5(f: tables.File, group: str, key: str, namedtuple: NamedTuple):
         version = int(getattr(f.root, VERSION_KEY))
         if version != VERSION:
             raise ValueError(
-                "Attempted to write analysis HDF5 version %d data to a version %d file"
-                % (VERSION, version)
+                f"Attempted to write analysis HDF5 version {VERSION} data to a version {version} file"
             )
     else:
         f.create_array(f.root, VERSION_KEY, np.int64(VERSION))

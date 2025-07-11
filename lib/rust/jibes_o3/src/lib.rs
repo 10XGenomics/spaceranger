@@ -1,11 +1,13 @@
+//! jibes_o3
 // JIBES implemented in Rust, this code is a mirror of the python code in cellranger.analysis.jibes
 // with the regression and model fitting steps optimized to use significantly less memory and run
 // a lot faster.  Any changes here should be reflected in the python code and vice-versa.
+#![deny(missing_docs)]
 
 use ndarray::prelude::*;
 use ndarray::{Array, Array1, Array2};
 use ndarray_stats::QuantileExt;
-use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1};
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1};
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 //use pyo3::{wrap_pyfunction};
@@ -58,27 +60,28 @@ struct JibesModelO3 {
 #[pymethods]
 impl JibesModelO3 {
     #[new]
+    #[pyo3(signature = (backgrounds, foregrounds, std_devs, frequencies=None, blank_prob=None, n_gems=None))]
     fn new(
-        backgrounds: &PyArray1<f64>,
-        foregrounds: &PyArray1<f64>,
-        std_devs: &PyArray1<f64>,
-        frequencies: Option<&PyArray1<f64>>,
+        backgrounds: &Bound<'_, PyArray1<f64>>,
+        foregrounds: &Bound<'_, PyArray1<f64>>,
+        std_devs: &Bound<'_, PyArray1<f64>>,
+        frequencies: Option<&Bound<'_, PyArray1<f64>>>,
         blank_prob: Option<f64>,
         n_gems: Option<i32>,
     ) -> Self {
-        let num_tags = backgrounds.len();
+        let num_tags = backgrounds.len().unwrap();
         assert!(
-            num_tags == std_devs.len(),
+            num_tags == std_devs.len().unwrap(),
             "Backgrounds does not match std_devs"
         );
         assert!(
-            num_tags == foregrounds.len(),
+            num_tags == foregrounds.len().unwrap(),
             "Tags does not match std_devs"
         );
         // In case we ever want to enable frequencies
         let freqs = match frequencies {
             Some(x) => {
-                assert!(num_tags == x.len(), "Tags does not match std_devs");
+                assert!(num_tags == x.len().unwrap(), "Tags does not match std_devs");
                 x.to_vec().unwrap()
             }
             None => Array::from_elem(num_tags, 1.0 / (num_tags as f64)).to_vec(),
@@ -253,6 +256,22 @@ impl JibesEMO3 {
                 coefficients[0] = y_bar - MIN_FOREGROUND_DELTA * x_bar;
             }
 
+            // Check if the coefficients are Nan (happens if all UMI counts for tag are equal)
+            // such that the regression matrix isn't full rank.
+            if coefficients.iter().any(|&x| x.is_nan()) {
+                // By convention we will set the foreground to the minimum foreground and the
+                // background to the average counts seen since we can't explain a constant
+                // with two two values in a deterministic way.  This should be `first_elem` most
+                // of the time.
+                let avg_cnts = self
+                    .counts
+                    .axis_iter(Axis(0))
+                    .map(|row| row[k])
+                    .fold(0.0, |sum, cnt| sum + cnt)
+                    / (self.n() as f64);
+                coefficients[0] = avg_cnts;
+                coefficients[1] = MIN_FOREGROUND_DELTA;
+            }
             self.model.background[k] = coefficients[0];
             self.model.foreground[k] = coefficients[1];
 
@@ -289,7 +308,7 @@ impl JibesEMO3 {
 impl JibesEMO3 {
     #[getter]
     #[allow(non_snake_case)]
-    fn get_X<'py>(&self, py: Python<'py>) -> &'py PyArray2<f64> {
+    fn get_X<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f64>> {
         // Get the regression matrix present in the python code (need to add intercept term to latent states)
 
         let mut array = Array2::<f64>::zeros((self.z() as usize, (self.k() + 1) as usize));
@@ -306,7 +325,7 @@ impl JibesEMO3 {
     }
 
     #[getter]
-    fn get_posterior<'py>(&self, py: Python<'py>) -> &'py PyArray2<f64> {
+    fn get_posterior<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f64>> {
         // Get the regression matrix present in the python code (need to add intercept term to latent states)
         PyArray2::from_array(py, &self.posterior)
     }
@@ -322,8 +341,12 @@ impl JibesEMO3 {
         n_gems: i32,
     ) -> Self {
         // Copy this to rust to make it easier to deal with
-        let cnt_data =
-            pyarray2_to_array2_f64(data.getattr(py, "counts").unwrap().extract(py).unwrap());
+        let cnt_data = pyarray2_to_array2_f64(
+            data.getattr(py, "counts")
+                .unwrap()
+                .downcast_bound(py)
+                .unwrap(),
+        );
         // What's the largest k-let we're likely to see?
         let n = cnt_data.dim().0;
         let estimated_cells = calculate_expected_total_cells(n as i32, n_gems)
@@ -546,29 +569,25 @@ fn calculate_expected_total_cells(n_bcs: i32, n_gems: i32) -> PyResult<f64> {
 fn generate_all_multiplets(num_tags: i32, max_multiplets: i32, k_let_limited: bool) -> Array2<f64> {
     Python::with_gil(|py| {
         let combinatorics = PyModule::import(py, "cellranger.analysis.combinatorics").unwrap();
-        let total: &PyArray2<i32> = combinatorics
+        let total = combinatorics
             .getattr("generate_all_multiplets_as_array")
             .unwrap()
             .call1((num_tags, max_multiplets, k_let_limited))
-            .unwrap()
-            .downcast::<PyArray2<i32>>()
             .unwrap();
-        pyarray2_to_array2_i32(total)
+        pyarray2_to_array2_i32(total.downcast::<PyArray2<i32>>().unwrap())
     })
 }
 
 fn get_multiplet_counts_unrounded(estimated_cells: f64, n_gems: i32) -> Vec<f64> {
     Python::with_gil(|py| {
         let cr_fa = PyModule::import(py, "cellranger.feature.feature_assigner").unwrap();
-        let probs: &PyArray1<f64> = cr_fa
+        let probs = cr_fa
             .getattr("get_multiplet_counts_unrounded")
             .unwrap()
             .call1((estimated_cells, n_gems))
-            .unwrap()
-            .extract()
             .unwrap();
-        //println!("Probs = {}", probs);
-        probs.to_vec().unwrap()
+        println!("Probs = {probs}");
+        probs.downcast::<PyArray1<f64>>().unwrap().to_vec().unwrap()
     })
 }
 
@@ -587,7 +606,7 @@ fn get_multiplet_counts<'py>(
 
 // These should be generic but ran into some small issue with PyArray<T> when I tried,
 // just replicated two functions for now.
-fn pyarray2_to_array2_i32(src: &PyArray2<i32>) -> Array2<f64> {
+fn pyarray2_to_array2_i32(src: &Bound<'_, PyArray2<i32>>) -> Array2<f64> {
     let dims = src.dims();
     let rows = dims[0];
     let cols = dims[1];
@@ -602,7 +621,7 @@ fn pyarray2_to_array2_i32(src: &PyArray2<i32>) -> Array2<f64> {
     result
 }
 
-fn pyarray2_to_array2_f64(src: &PyArray2<f64>) -> Array2<f64> {
+fn pyarray2_to_array2_f64(src: &Bound<'_, PyArray2<f64>>) -> Array2<f64> {
     let dims = src.dims();
     let rows = dims[0];
     let cols = dims[1];
@@ -619,7 +638,7 @@ fn pyarray2_to_array2_f64(src: &PyArray2<f64>) -> Array2<f64> {
 
 /// The jibes python classes implemented in Rust
 #[pymodule]
-fn jibes_o3(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
+fn jibes_o3(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<JibesModelO3>()?;
     m.add_class::<JibesEMO3>()?;
     // This function is was added for one unit test

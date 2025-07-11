@@ -1,8 +1,8 @@
-[dependencies]
-lazy_static = '1'
-
 [lib]
 test = false
+
+[lints]
+workspace = true
 
 [package]
 authors = ['10x Genomics']

@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use crate::transcriptome::Transcriptome;
 use anyhow::Result;
 use martian_filetypes::tabular_file::TsvFile;

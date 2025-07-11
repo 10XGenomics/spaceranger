@@ -9,7 +9,7 @@ path = '../barcode'
 path = '../cr_types'
 
 [dependencies.fastq_set]
-workspace = true
+path = '../fastq_set'
 
 [dependencies.hdf5]
 workspace = true
@@ -35,9 +35,6 @@ workspace = true
 [dependencies.rand_distr]
 workspace = true
 
-[dependencies.rand_pcg]
-workspace = true
-
 [dependencies.serde]
 workspace = true
 
@@ -60,6 +57,9 @@ slow_tests = []
 
 [lib]
 test = false
+
+[lints]
+workspace = true
 
 [package]
 authors = ['10x Genomics']

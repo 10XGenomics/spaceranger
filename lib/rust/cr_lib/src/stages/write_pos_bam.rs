@@ -1,4 +1,5 @@
 //! Martian stage WRITE_POS_BAM
+#![allow(missing_docs)]
 
 use crate::{env, AlignShardFile, BamFile};
 use anyhow::{bail, Result};
@@ -108,7 +109,7 @@ pub struct WritePosBam;
 
 #[derive(Deserialize, Clone, MartianStruct)]
 pub struct StageInputs {
-    pub bam_header: PathBuf,
+    pub bam_header: Option<PathBuf>,
     pub alignments: Vec<AlignShardFile>,
     pub read_chunks: Vec<RnaChunk>,
     pub target_set_name: Option<String>,
@@ -145,7 +146,7 @@ pub struct StageOutputs {
 }
 
 fn attach_read_group_tags<'a>(
-    header: &mut bam::Header,
+    header: &mut Header,
     read_chunks: impl IntoIterator<Item = &'a RnaChunk>,
 ) {
     for read_group in read_chunks.into_iter().map(|x| &x.read_group).unique() {
@@ -155,7 +156,7 @@ fn attach_read_group_tags<'a>(
         // ID: {read_group}, SM: {sample_id}, LB: {library_id}.{gem_group}, PU: {read_group}
         record.push_tag(b"ID", read_group);
         record.push_tag(b"SM", parts[0]);
-        record.push_tag(b"LB", &format!("{}.{}", parts[1], parts[2]));
+        record.push_tag(b"LB", format!("{}.{}", parts[1], parts[2]));
         record.push_tag(b"PU", read_group);
         record.push_tag(b"PL", "ILLUMINA");
         header.push_record(&record);
@@ -163,7 +164,7 @@ fn attach_read_group_tags<'a>(
 }
 
 /// Add BAM header comments that are used by bamtofastq.
-fn attach_bamtofastq_comments(header: &mut bam::Header, read_chunks: &[RnaChunk]) {
+fn attach_bamtofastq_comments(header: &mut Header, read_chunks: &[RnaChunk]) {
     let bamtofastq_header_comments = read_chunks
         .iter()
         .map(|x| x.chemistry.name.bamtofastq_headers())
@@ -176,23 +177,23 @@ fn attach_bamtofastq_comments(header: &mut bam::Header, read_chunks: &[RnaChunk]
 }
 
 fn attach_library_info_comments(
-    header: &mut bam::Header,
+    header: &mut Header,
     read_chunks: &[RnaChunk],
     target_set_name: Option<&str>,
 ) {
     let library_infos = make_library_info(read_chunks, target_set_name);
     for info in library_infos {
-        let comment = format!(r#"library_info:{}"#, serde_json::to_string(&info).unwrap());
+        let comment = format!(r"library_info:{}", serde_json::to_string(&info).unwrap());
         header.push_comment(comment.as_bytes());
     }
 }
 
 fn attach_slide_serial_capture_area(
-    header: &mut bam::Header,
+    header: &mut Header,
     slide_serial_capture_area: Option<String>,
 ) {
     if let Some(capture_area) = slide_serial_capture_area {
-        let comment = format!(r#"slide_serial_capture_area:{capture_area}"#);
+        let comment = format!(r"slide_serial_capture_area:{capture_area}");
         header.push_comment(comment.as_bytes());
     }
 }
@@ -220,7 +221,7 @@ pub fn make_header(
     )?;
 
     let header_view = bam::HeaderView::from_bytes(&header);
-    let mut header = bam::Header::from_template(&header_view);
+    let mut header = Header::from_template(&header_view);
     // only the first of these is used in the `samtools cat` later
     if write_header {
         attach_read_group_tags(&mut header, read_chunks);
@@ -282,7 +283,7 @@ impl MartianStage for WritePosBam {
 
         // Read in the header text & initialize the BAM file with it.
         let header = make_header(
-            Some(&args.bam_header),
+            args.bam_header.as_deref(),
             &args.read_chunks,
             args.target_set_name.as_deref(),
             chunk_args.write_header,
@@ -342,7 +343,7 @@ impl MartianStage for WritePosBam {
     ) -> Result<Self::StageOutputs> {
         //Determine the time of BAM index needed
         let header: Header = make_header(
-            Some(&args.bam_header),
+            args.bam_header.as_deref(),
             &args.read_chunks,
             args.target_set_name.as_deref(),
             false,
@@ -439,7 +440,7 @@ mod tests {
     fn test_fail_bam_comparison() {
         let chunk = get_test_chunk();
         let args = StageInputs {
-            bam_header: PathBuf::from("test/multi/write_bam_multi/test1/bam_header"),
+            bam_header: Some(PathBuf::from("test/multi/write_bam_multi/test1/bam_header")),
             alignments: vec![AlignShardFile::from(
                 "test/multi/write_bam_multi/test1/pos_sorted.asf",
             )],
@@ -470,7 +471,7 @@ mod tests {
     fn test_single_sample() {
         let chunk = get_test_chunk();
         let args = StageInputs {
-            bam_header: PathBuf::from("test/multi/write_bam_multi/test1/bam_header"),
+            bam_header: Some(PathBuf::from("test/multi/write_bam_multi/test1/bam_header")),
             alignments: vec![AlignShardFile::from(
                 "test/multi/write_bam_multi/test1/pos_sorted.asf",
             )],
@@ -503,7 +504,7 @@ mod tests {
         let chunk = get_test_chunk();
 
         let args = StageInputs {
-            bam_header: PathBuf::from("test/multi/write_bam_multi/test1/bam_header"),
+            bam_header: Some(PathBuf::from("test/multi/write_bam_multi/test1/bam_header")),
             alignments: vec![AlignShardFile::from(
                 "test/multi/write_bam_multi/test1/pos_sorted.asf",
             )],

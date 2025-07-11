@@ -1,4 +1,5 @@
 //! Bin name used in visium HD
+#![allow(missing_docs)]
 
 use anyhow::{bail, Context, Result};
 use martian::AsMartianPrimaryType;

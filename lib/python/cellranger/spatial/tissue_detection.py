@@ -13,6 +13,7 @@ import skimage.feature
 import skimage.filters
 from matplotlib import colors
 from matplotlib.patches import Polygon
+from skimage.util import img_as_ubyte
 
 import cellranger.constants as cr_constants
 import cellranger.spatial.image_util as image_util
@@ -45,7 +46,7 @@ cmap_otsu_sum_markers = colors.LinearSegmentedColormap.from_list("", otsu_sum_tu
 
 def float_image_to_ubyte(img) -> np.ndarray:
     """Convert float image to ubyte."""
-    return skimage.img_as_ubyte(
+    return img_as_ubyte(
         np.interp(
             img,
             (img.min(), img.max()),
@@ -376,14 +377,15 @@ def get_mask(
         plot (bool): whether to return the intermediate qc figure. Defaults to False.
 
     Returns:
-        Tuple[np.ndarray, np.ndarray, np.ndarray]: the binary tissue mask, qc figure,
-            and intermediate qc figure
+        Tuple[np.ndarray, np.ndarray, np.ndarray, bool]: the binary tissue mask, qc figure,
+            intermediate qc figure, and if grabcut failed
     """
     if len(original.shape) != 2:
         raise RuntimeError(f"non-2D image (color?) passed to get_mask nD={len(original.shape)}")
 
     cv2.setRNGSeed(0)
     np.random.seed(0)
+    grabcut_failed = False
 
     if bounding_box is None or use_full_fov:
         height, width = original.shape[:2]
@@ -422,9 +424,15 @@ def get_mask(
     bgmodel = np.zeros((1, 65), dtype="float64")
     fgmodel = np.zeros((1, 65), dtype="float64")
 
-    mask, bgmodel, fgmodel = cv2.grabCut(
-        img, markers_gc, None, bgmodel, fgmodel, 6, cv2.GC_INIT_WITH_MASK
-    )
+    try:
+        mask, bgmodel, fgmodel = cv2.grabCut(
+            img, markers_gc, None, bgmodel, fgmodel, 6, cv2.GC_INIT_WITH_MASK
+        )
+    except cv2.error as err:
+        print(f"grabcut failed: {err}")
+        mask = cv2.GC_FGD * np.ones_like(markers_gc)
+        grabcut_failed = True
+
     mask = np.where((mask == 2) | (mask == 0), 0, 1)
 
     # generate qc image as 24-bit RGB instead of crazy float64 RGB
@@ -476,7 +484,7 @@ def get_mask(
     qc_img = unbox(
         original, bounding_box_to_use, qc_img, border_thickness=2, interp=cv2.INTER_NEAREST
     )
-    return (mask, qc_img, init_qc, gc_markers)
+    return (mask, qc_img, init_qc, gc_markers, grabcut_failed)
 
 
 def get_mask_v2(
@@ -503,14 +511,15 @@ def get_mask_v2(
         plot (bool): whether to return the intermediate qc figure. Defaults to False.
 
     Returns:
-        Tuple[np.ndarray, np.ndarray, np.ndarray]: the binary tissue mask, qc figure,
-            and intermediate qc figure
+        Tuple[np.ndarray, np.ndarray, np.ndarray, bool]: the binary tissue mask, qc figure,
+            intermediate qc figure, and if grabcut failed
     """
     if len(original.shape) != 2:
         raise RuntimeError(f"non-2D image (color?) passed to get_mask nD={len(original.shape)}")
 
     cv2.setRNGSeed(0)
     np.random.seed(0)
+    grabcut_failed = False
 
     height, width = original.shape[:2]
     if bounding_box is None or use_full_fov:
@@ -551,9 +560,14 @@ def get_mask_v2(
     bgmodel = np.zeros((1, 65), dtype="float64")
     fgmodel = np.zeros((1, 65), dtype="float64")
 
-    mask, bgmodel, fgmodel = cv2.grabCut(
-        img, markers_gc, None, bgmodel, fgmodel, 8, cv2.GC_INIT_WITH_MASK, gamma=1.0
-    )
+    try:
+        mask, bgmodel, fgmodel = cv2.grabCut(
+            img, markers_gc, None, bgmodel, fgmodel, 8, cv2.GC_INIT_WITH_MASK, gamma=1.0
+        )
+    except cv2.error as err:
+        print(f"grabcut failed: {err}")
+        mask = cv2.GC_FGD * np.ones_like(markers_gc)
+        grabcut_failed = True
     mask = np.where((mask == 2) | (mask == 0), 0, 1)
 
     # generate qc image as 24-bit RGB instead of crazy float64 RGB
@@ -605,7 +619,7 @@ def get_mask_v2(
     qc_img = unbox(
         original, bounding_box_to_use, qc_img, border_thickness=2, interp=cv2.INTER_NEAREST
     )
-    return (mask, qc_img, init_qc, gc_markers)
+    return (mask, qc_img, init_qc, gc_markers, grabcut_failed)
 
 
 def get_bounding_box(pts_xy: np.ndarray, padding: float) -> list[tuple[float, float]]:

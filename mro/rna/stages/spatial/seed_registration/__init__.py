@@ -22,6 +22,8 @@ from cellranger.spatial.loupe_util import LoupeParser
 from cellranger.spatial.tissue_regist import (
     CENTROID_ALIGNMENT,
     FEATURE_MATCHING,
+    INIT_METHOD_USED_KEY,
+    INIT_TRANSFORM_LIST_KEY,
     TARGET_IMG_MAX_SIZE_UM,
     TARGET_IMG_MIN_SIZE_UM,
     get_centroid_alignment_transforms,
@@ -141,6 +143,7 @@ def split(args):
         "chunks": chunks,
         "join": {
             "__mem_gb": join_mem_gb,
+            "__vmem_gb": join_mem_gb + 14,
         },
     }
 
@@ -166,6 +169,7 @@ def main(args, outs):
         fiducial_mask = None
 
     if args.is_visium_hd and args.fid_perp_tmat:
+        # cv2.warpPerspective uses center-based sub-pixel coordinates
         center_based_perp_tmat = convert_transform_corner_to_center(np.array(args.fid_perp_tmat))
         # shape[::-1] because cv2 uses (width, height) convention
         cyta_img = cv2.warpPerspective(cyta_img, center_based_perp_tmat, cyta_img.shape[::-1])
@@ -225,7 +229,7 @@ def join(args, outs, chunk_defs, chunk_outs):
 
     if args.loupe_tissue_registration_json and os.path.exists(args.loupe_tissue_registration_json):
         with open(outs.initial_transform_info_json, "w") as f:
-            json.dump({"init_transform_list": [], "init_method_used": ""}, f)
+            json.dump({INIT_TRANSFORM_LIST_KEY: [], INIT_METHOD_USED_KEY: ""}, f)
         return
 
     fm_success = False
@@ -257,6 +261,7 @@ def join(args, outs, chunk_defs, chunk_outs):
         cyta_img = io.imread(args.tissue_detection_image).astype(np.float32)
 
         if args.is_visium_hd and args.fid_perp_tmat:
+            # cv2.warpPerspective uses center-based sub-pixel coordinates
             center_based_perp_tmat = convert_transform_corner_to_center(
                 np.array(args.fid_perp_tmat)
             )
@@ -281,8 +286,8 @@ def join(args, outs, chunk_defs, chunk_outs):
     with open(outs.initial_transform_info_json, "w") as f:
         json.dump(
             {
-                "init_transform_list": init_transform_list,
-                "init_method_used": FEATURE_MATCHING if fm_success else CENTROID_ALIGNMENT,
+                INIT_TRANSFORM_LIST_KEY: init_transform_list,
+                INIT_METHOD_USED_KEY: FEATURE_MATCHING if fm_success else CENTROID_ALIGNMENT,
             },
             f,
         )

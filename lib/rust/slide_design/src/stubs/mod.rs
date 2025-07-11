@@ -1,4 +1,7 @@
+//! slide_design::stubs
+#![allow(missing_docs)]
 #![allow(unused)]
+
 use anyhow::Result;
 use martian::AsMartianPrimaryType;
 use serde::{Deserialize, Serialize};
@@ -8,6 +11,7 @@ use std::path::Path;
 #[serde(rename_all = "snake_case")]
 pub enum OligoPart {
     Bc1,
+    Bc2,
 }
 
 impl AsMartianPrimaryType for OligoPart {

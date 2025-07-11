@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use crate::stages::compute_bin_metrics::BinMetrics;
 use cr_websummary::PrettyMetric;
 use serde::Serialize;

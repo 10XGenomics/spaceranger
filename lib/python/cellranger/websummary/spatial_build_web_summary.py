@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 
+import cellranger.matrix as cr_matrix
 import cellranger.metrics_names as metrics_names
 import cellranger.report as cr_report  # pylint: disable=no-name-in-module
 import cellranger.rna.library as rna_library
@@ -15,17 +16,19 @@ import cellranger.webshim.common as cr_webshim
 import cellranger.websummary.analysis_tab_core as cr_atc
 import cellranger.websummary.sample_properties as sp
 import cellranger.websummary.web_summary_builder as ws_builder
+from cellranger.analysis.singlegenome import UMAP_NAME
 from cellranger.reference_paths import get_reference_genomes
 from cellranger.spatial.data_utils import (
     IMAGEX_LOWRES,
     IMAGEY_LOWRES,
-    get_lowres_coordinates,
     get_scalefactors,
 )
 from cellranger.spatial.image import WebImage
 from cellranger.spatial.loupe_util import LoupeParser
+from cellranger.spatial.spatial_pandas_utils import get_lowres_coordinates
 from cellranger.targeted.targeted_constants import TARGETING_METHOD_HC, TARGETING_METHOD_TL
 from cellranger.websummary.metrics import (
+    SpatialHDMetricAnnotations,
     SpatialHDTemplateLigationMetricAnnotations,
     SpatialMetricAnnotations,
     SpatialTargetedMetricAnnotations,
@@ -49,7 +52,7 @@ SENSITIVITY_PLOT_HELP = {
                 "Spots with greater UMI counts likely have higher RNA content than spots "
                 "with fewer UMI counts. ",
                 "(right) Total UMI counts for spots displayed by a 2-dimensional embedding produced "
-                "by the t-SNE algorithm. In this space, pairs of spots that are close to each other "
+                "by the UMAP algorithm. In this space, pairs of spots that are close to each other "
                 "have more similar gene expression profiles than spots that are distant from each "
                 "other.",
             ],
@@ -64,9 +67,19 @@ def create_common_spatial_summaries(args, outs, metrics_csv_out=None):
 
     it is shared by both the PD and CS code.
     """
-    write_merged_metrics_json(args, outs)
+    write_merged_metrics_json(
+        args,
+        outs,
+        extra_file_paths=[args.target_panel_summary] if args.target_panel_summary else None,
+    )
 
-    ref_genomes = get_reference_genomes(args.reference_path)
+    if args.reference_path:
+        ref_genomes = get_reference_genomes(args.reference_path)
+    elif args.matrix:
+        ref_genomes = cr_matrix.CountMatrix.get_genomes_from_h5(args.matrix)
+    else:
+        ref_genomes = []
+
     redundant_loupe_alignment = _is_loupe_alignment_redundant(
         args.loupe_alignment_file, args.cytassist_image_paths, args.tissue_image_paths
     )
@@ -94,6 +107,7 @@ def create_common_spatial_summaries(args, outs, metrics_csv_out=None):
         cmdline=os.environ.get("CMDLINE", "NA"),
         cytassist_run_metrics=args.cytassist_run_metrics,
         itk_error_string=args.itk_error_string,
+        grabcut_failed=args.grabcut_failed,
     )
     sample_data_paths = sp.SampleDataPaths(
         summary_path=outs.metrics_summary_json,
@@ -107,7 +121,9 @@ def create_common_spatial_summaries(args, outs, metrics_csv_out=None):
         gex_fbc_correlation_heatmap_path=args.gex_fbc_correlation_heatmap,
         feature_metrics_path=args.per_feature_metrics_csv,
     )
-    sample_data = cr_webshim.load_sample_data(sample_properties, sample_data_paths)
+    sample_data = cr_webshim.load_sample_data(
+        sample_properties, sample_data_paths, projections=(UMAP_NAME,)
+    )
 
     spatial_args = SpatialReportArgs(
         sample_id=args.sample_id,
@@ -133,24 +149,29 @@ def create_common_spatial_summaries(args, outs, metrics_csv_out=None):
     # Determine which spatial metrics csv should be used
     spatial_mets = (
         # Hyb capture spatial metrics
-        # Also use hybcap targeted metrics for 3'GEX with a probe set and with STAR aligner,
+        # Also use hyb capture targeted metrics for 3'GEX with a probe set and with STAR aligner,
         # which is used to support aggr'ing 3'GEX with RTL.
         SpatialTargetedMetricAnnotations()
         if args.targeting_method == TARGETING_METHOD_HC
         or (args.targeting_method == TARGETING_METHOD_TL and args.aligner == "star")
-        # RTL spatial metrics
         else (
-            SpatialTemplateLigationMetricAnnotations()
-            if args.targeting_method == TARGETING_METHOD_TL
-            and args.aligner != "star"
-            and not sample_properties.is_visium_hd
+            # 3p' spatial metrics
+            SpatialHDMetricAnnotations()
+            if sample_properties.is_visium_hd and args.targeting_method is None
             else (
-                SpatialHDTemplateLigationMetricAnnotations()
+                # RTL spatial metrics
+                SpatialTemplateLigationMetricAnnotations()
                 if args.targeting_method == TARGETING_METHOD_TL
                 and args.aligner != "star"
-                and sample_properties.is_visium_hd
-                # Regular spatial metrics
-                else SpatialMetricAnnotations()
+                and not sample_properties.is_visium_hd
+                else (
+                    SpatialHDTemplateLigationMetricAnnotations()
+                    if args.targeting_method == TARGETING_METHOD_TL
+                    and args.aligner != "star"
+                    and sample_properties.is_visium_hd
+                    # SD 3p' spatial metrics
+                    else SpatialMetricAnnotations()
+                )
             )
         )
     )
@@ -187,9 +208,21 @@ def _add_image_alignment_alarms(web_sum_data, sample_data, metadata):
     assert isinstance(metadata, SpatialMetricAnnotations)
     alarms = metadata.gen_metric_list(
         sample_data.summary,
-        [metrics_names.SUSPECT_ALIGNMENT, metrics_names.REORIENTATION_NEEDED],
+        [
+            metrics_names.SUSPECT_ALIGNMENT,
+            metrics_names.REORIENTATION_NEEDED,
+            metrics_names.HD_LAYOUT_OFFSET_ABOVE_THRESHOLD,
+            metrics_names.HD_LAYOUT_OFFSET_FELLBACK_TO_PRE_REFINED_FIT,
+        ],
         [],
     )
+    # Remove HD_LAYOUT_OFFSET_FELLBACK_TO_PRE_REFINED_FIT if HD_LAYOUT_OFFSET_ABOVE_THRESHOLD exists
+    if metrics_names.HD_LAYOUT_OFFSET_ABOVE_THRESHOLD in [metric.key for metric in alarms]:
+        alarms = [
+            metric
+            for metric in alarms
+            if metric.key != metrics_names.HD_LAYOUT_OFFSET_FELLBACK_TO_PRE_REFINED_FIT
+        ]
     alarm_dicts = [metric.alarm_dict for metric in alarms if metric.alarm_dict]
     if alarm_dicts:
         web_sum_data.alarms.extend(alarm_dicts)
@@ -214,6 +247,8 @@ def build_web_summary_data_spatial(sample_properties, sample_data, spatial_args)
             metadata = SpatialHDTemplateLigationMetricAnnotations()
         else:
             metadata = SpatialTargetedMetricAnnotations()
+    elif sample_properties.is_visium_hd:
+        metadata = SpatialHDMetricAnnotations(intron_mode_alerts=sample_properties.include_introns)
     else:
         metadata = SpatialMetricAnnotations(intron_mode_alerts=sample_properties.include_introns)
 
@@ -255,6 +290,7 @@ def build_web_summary_data_spatial(sample_properties, sample_data, spatial_args)
         SPATIAL_COMMAND_NAME,
         zoom_images,
         regist_images,
+        projection=UMAP_NAME,
     )
 
     _add_image_alignment_alarms(web_sum_data, sample_data, metadata)
@@ -304,17 +340,23 @@ def build_web_summary_data_spatial(sample_properties, sample_data, spatial_args)
     umi_spatial_plot = umi_on_spatial_plot(
         sample_data, coords, lowres_tissue, library_type=rna_library.GENE_EXPRESSION_LIBRARY_TYPE
     )
-    umi_tsne_plot = cr_atc.umi_on_tsne_plot(sample_data, spatial=True)
-    if umi_spatial_plot and umi_tsne_plot:
+    umi_umap_plot = cr_atc.umi_on_projection_plot(
+        sample_data,
+        library_type=rna_library.GENE_EXPRESSION_LIBRARY_TYPE,
+        projection=UMAP_NAME,
+        spatial=True,
+        tag_type=None,
+    )
+    if umi_spatial_plot and umi_umap_plot:
         web_sum_data.analysis_tab["umi_plots"] = {
             "help_txt": SENSITIVITY_PLOT_HELP,
             "umi_spatial_plot": umi_spatial_plot,
-            cr_atc.UMI_TSNE_PLOT: umi_tsne_plot,
+            cr_atc.UMI_UMAP_PLOT: umi_umap_plot,
         }
     return web_sum_data
 
 
-def write_merged_metrics_json(args, outs):
+def write_merged_metrics_json(args, outs, extra_file_paths: list | None = None):
     # pylint: disable=missing-function-docstring
     # Both manual and automatic alignment pathways should generate the
     # fraction of spots under tissue metric
@@ -330,8 +372,12 @@ def write_merged_metrics_json(args, outs):
     }
     reorientation_dict = {"reorientation_mode": args.reorientation_mode}
     loupe_alignment_dict = {"loupe_alignment_file": args.loupe_alignment_file}
+
+    files_to_merge = [args.summary]
+    if extra_file_paths:
+        files_to_merge.extend(extra_file_paths)
     cr_report.merge_jsons(
-        args.summaries,
+        files_to_merge,
         outs.metrics_summary_json,
         [alignment_dict, id_dict, reorientation_dict, loupe_alignment_dict],
     )

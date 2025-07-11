@@ -1,3 +1,4 @@
+#![deny(missing_docs)]
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till};
 use nom::character::complete::{char, space0, space1};
@@ -73,7 +74,7 @@ impl<'a> SectionHdr<'a> {
     }
 }
 
-impl<'a> Display for SectionHdr<'a> {
+impl Display for SectionHdr<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "[{}]", self.fragment)
     }
@@ -344,10 +345,10 @@ mod tests {
     fn one_section() -> Result<()> {
         let xtra = XtraData::new("tests::one_section");
         let scsv = Span::new_extra(
-            r#"
+            r"
             # comment
             [hi]
-            yes,1, 2"#,
+            yes,1, 2",
             xtra,
         );
         let (_input, parsed) = section_csv(scsv)?;
@@ -391,11 +392,11 @@ mod tests {
     fn avoid_early_comment_termination() -> Result<()> {
         let xtra = XtraData::new("tests::avoid_early_comment_termination");
         let scsv = Span::new_extra(
-            r#"
+            r"
             # i am a comment
             [hi] #this should be a valid comment too
             col1,col2,col3
-            val1,val#2,val3 # real comment"#,
+            val1,val#2,val3 # real comment",
             xtra,
         );
         let (_input, parsed) = section_csv(scsv)?;
@@ -486,11 +487,11 @@ aaa,"b\"bb",ccc
     fn spaces_in_headers() -> Result<()> {
         let xtra = XtraData::new("tests::spaces_in_headers");
         let scsv = Span::new_extra(
-            r#"
+            r"
             # comment
             [    hi there      ]
             yes,1, 2
-            "#,
+            ",
             xtra,
         );
         let (_input, parsed) = section_csv(scsv)?;

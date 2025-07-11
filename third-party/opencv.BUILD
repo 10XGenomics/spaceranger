@@ -6,6 +6,7 @@ load(
 load(
     "@tenx_bazel_rules//rules/conda:conda_manifest.bzl",
     "conda_deps",
+    "conda_files",
     "conda_manifest",
 )
 
@@ -16,52 +17,32 @@ license(
     package_name = "opencv",
     additional_info = {
         "homepage": "https://opencv.org/",
-        "version": "4.5.4",
+        "version": "4.10.0",
         "manifest": "third-party/deps.bzl",
-        "pURL": "pkg:github/opencv/opencv@4.5.4",
+        "pURL": "pkg:github/opencv/opencv@4.10.0",
     },
-    copyright_notice = "Copyright (C) 2000-2015, Intel Corporation, " +
-                       "2009-2011, Willow Garage Inc., " +
-                       "2015, Itseez Inc., " +
-                       "2015, OpenCV Foundation",
+    copyright_notice = """Copyright (C) 2000-2022, Intel Corporation, all rights reserved.
+Copyright (C) 2009-2011, Willow Garage Inc., all rights reserved.
+Copyright (C) 2009-2016, NVIDIA Corporation, all rights reserved.
+Copyright (C) 2010-2013, Advanced Micro Devices, Inc., all rights reserved.
+Copyright (C) 2015-2023, OpenCV Foundation, all rights reserved.
+Copyright (C) 2008-2016, Itseez Inc., all rights reserved.
+Copyright (C) 2019-2023, Xperience AI, all rights reserved.
+Copyright (C) 2019-2022, Shenzhen Institute of Artificial Intelligence and Robotics for Society, all rights reserved.
+Copyright (C) 2022-2023, Southern University of Science And Technology, all rights reserved.""",
     license_kinds = [
         "@rules_license//licenses/spdx:Apache-2.0",
     ],
     license_text = "src/LICENSE",
+    package_version = "4.10.0",
 )
 
-alias(
-    name = "conda_package_py_opencv_python",
-    actual = ":cv2",
-    visibility = ["@anaconda//:__pkg__"],
-)
-
-filegroup(
-    name = "conda_package_py_opencv_hdrs",
-    visibility = ["@anaconda//:__pkg__"],
-)
-
-filegroup(
-    name = "conda_package_py_opencv_libs",
-    visibility = ["@anaconda//:__pkg__"],
-)
-
-filegroup(
-    name = "conda_package_py_opencv_solibs",
-    visibility = ["@anaconda//:__pkg__"],
-)
-
-filegroup(
-    name = "conda_package_py_opencv_data",
-    srcs = [
+conda_files(
+    name = "files",
+    link_safe_runfiles = [
         ":cv2",
     ],
     visibility = ["@anaconda//:__pkg__"],
-)
-
-exports_files(
-    ["BUILD.bazel"],
-    visibility = ["//visibility:public"],
 )
 
 filegroup(
@@ -81,7 +62,7 @@ genrule(
         "version.txt",
         "src/CMakeLists.txt",
         "@anaconda//:eigen",
-        "@anaconda//:jpeg",
+        "@anaconda//:libjpeg-turbo",
         "@anaconda//:libffi",
         "@anaconda//:libgcc-ng",
         "@anaconda//:libpng",
@@ -132,7 +113,6 @@ genrule(
 conda_manifest(
     name = "conda_metadata",
     info_files = ["info/index.json"],
-    manifest = "info/files",
     visibility = ["//visibility:public"],
 )
 
@@ -140,8 +120,8 @@ conda_deps(
     name = "conda_deps",
     visibility = ["@anaconda//:__pkg__"],
     deps = [
-        "@anaconda//:jpeg",
         "@anaconda//:libgcc-ng",
+        "@anaconda//:libjpeg-turbo",
         "@anaconda//:libpng",
         "@anaconda//:libstdcxx-ng",
         "@anaconda//:libtiff",

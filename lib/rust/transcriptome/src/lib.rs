@@ -1,3 +1,5 @@
+//! transcriptome
+#![deny(missing_docs)]
 pub mod parse_gtf;
 pub mod python_gene_index;
 mod transcript_index;

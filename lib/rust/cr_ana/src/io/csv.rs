@@ -1,4 +1,5 @@
 //! I/O CSV helper functions
+#![deny(missing_docs)]
 
 use crate::types::{clustering_key, ClusteringResult, ClusteringType, EmbeddingResult, PcaResult};
 use anyhow::{anyhow, Result};
@@ -117,7 +118,7 @@ pub(crate) fn combine_pcas(
             "variance.csv",
         ] {
             if Path::exists(in_component_dir.join(file).as_ref()) {
-                std::fs::copy(in_component_dir.join(file), out_component_dir.join(file))?;
+                copy(in_component_dir.join(file), out_component_dir.join(file))?;
             }
         }
     }
@@ -154,7 +155,7 @@ pub(crate) fn combine_clusterings(
             let src = part.as_ref().join(&subdir).join("clusters.csv");
             if src.exists() {
                 let dst = path.join(subdir).join("clusters.csv");
-                std::fs::copy(src, dst)?;
+                copy(src, dst)?;
             }
         }
     }

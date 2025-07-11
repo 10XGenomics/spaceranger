@@ -1,12 +1,12 @@
+#![allow(missing_docs)]
 use super::probe_set_reference::TargetSetFile;
-use crate::probe_set::is_deprecated_probe;
+use crate::probe_set::{is_deprecated_probe, strip_deprecated_prefix, ProbeSetReferenceMetadata};
 use crate::reference::reference_info::ReferenceInfo;
-use crate::types::{FeatureBarcodeType, GenomeName};
-use crate::LibraryType;
+use crate::{FeatureBarcodeType, FeatureID, FeatureName, GenomeName, LibraryType};
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use csv::{self, StringRecord};
 use fastq_set::read_pair::WhichRead;
-use itertools::Itertools;
+use itertools::{chain, Itertools};
 use martian::{AsMartianPrimaryType, MartianPrimaryType};
 use martian_derive::{martian_filetype, MartianStruct, MartianType};
 use martian_filetypes::tabular_file::CsvFileNoHeader;
@@ -14,10 +14,9 @@ use martian_filetypes::LazyFileTypeIO;
 use metric::{AsMetricPrefix, TxHashMap, TxHashSet};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use serde_with::{DeserializeFromStr, SerializeDisplay};
+use serde_with::DeserializeFromStr;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
-use std::fmt::Display;
 use std::fs::File;
 use std::io::{BufReader, Cursor, Read, Write};
 use std::path::Path;
@@ -59,13 +58,12 @@ pub struct FeatureConfig {
     pub beam_mode: Option<BeamMode>,
     pub specificity_controls: Option<SpecificityControls>,
     pub functional_map: Option<HashMap<String, String>>,
+    pub hashtag_ids: Option<Vec<String>>,
 }
 
 pub const MHC_ALLELE: &str = "mhc_allele";
 pub const NO_ALLELE: &str = "no_allele";
-
-pub const SC5P_BEAM_SET_A: &str = include_str!("whitelist/SC5P_BEAM_SetA.csv");
-pub const DEFAULT_BEAM_SET: &str = SC5P_BEAM_SET_A;
+pub const HASHTAG: &str = "hashtag";
 
 #[derive(PartialEq, Eq, Hash, Debug, Clone, Copy, Serialize, Deserialize, MartianType, Display)]
 #[serde(rename_all = "lowercase")]
@@ -93,21 +91,11 @@ impl FromStr for BeamMode {
 }
 
 pub fn load_feature_set<R: Read + AsRef<[u8]>>(reader: R) -> Result<Vec<FeatureDef>> {
-    Ok(FeatureReference::new(
-        &ReferenceInfo::default(),
-        &Transcriptome::dummy(),
-        Some(Cursor::new(reader)),
-        None,
-        None,
-        None,
-        None,
+    Ok(
+        FeatureReference::new(&[], None, Some(Cursor::new(reader)), None, None, None, None)
+            .unwrap()
+            .feature_defs,
     )
-    .unwrap()
-    .feature_defs)
-}
-
-pub fn load_default_beam_set() -> Result<Vec<FeatureDef>> {
-    load_feature_set(DEFAULT_BEAM_SET.as_bytes())
 }
 
 pub type TargetGeneIndicesFile = CsvFileNoHeader<u32>;
@@ -169,14 +157,15 @@ impl TargetSet {
     }
 }
 
-// NOTE: we cannot use serde(untagged) due to incompatibility with bincode.
-// Thus the use of SerializeDisplay and DeserializeFromStr.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, SerializeDisplay, DeserializeFromStr,
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, DeserializeFromStr,
 )]
+#[serde(into = "&str")]
 pub enum FeatureType {
     Gene,
     Barcode(FeatureBarcodeType),
+    ProteinExpression, // used by Xenium for in situ protein expression
+    Peaks,
 }
 
 impl AsMartianPrimaryType for FeatureType {
@@ -190,38 +179,48 @@ impl FeatureType {
         *self == Self::Barcode(FeatureBarcodeType::Multiplexing)
     }
 
+    const GENE_EXP: &'static str = "Gene Expression";
+    const PROTEIN_EXP: &'static str = "Protein Expression";
+    const PEAKS: &'static str = "Peaks";
+
+    /// Return the string representation of this feature type.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Gene => Self::GENE_EXP,
+            Self::Barcode(x) => x.as_str(),
+            Self::ProteinExpression => Self::PROTEIN_EXP,
+            Self::Peaks => Self::PEAKS,
+        }
+    }
+
     const GENE_EXP_SNAKE_CASE: &'static str = "gene_expression";
+    const PROTEIN_EXP_SNAKE_CASE: &'static str = "protein_expression";
+    const PEAKS_SNAKE_CASE: &'static str = "peaks";
 
     /// Return a snake_case representation of this feature type.
     pub fn as_snake_case(&self) -> &'static str {
         match self {
             Self::Gene => Self::GENE_EXP_SNAKE_CASE,
             Self::Barcode(bc) => bc.as_snake_case(),
+            Self::ProteinExpression => Self::PROTEIN_EXP_SNAKE_CASE,
+            Self::Peaks => Self::PEAKS_SNAKE_CASE,
         }
     }
 
     /// Parse a snake-case representation of this feature type.
     pub fn from_snake_case(s: &str) -> Result<Self> {
-        if s == Self::GENE_EXP_SNAKE_CASE {
-            return Ok(Self::Gene);
-        }
-        if let Ok(fbt) = FeatureBarcodeType::from_snake_case(s) {
-            return Ok(Self::Barcode(fbt));
-        }
-        bail!("unable to parse '{s}' as a feature type");
+        Ok(match s {
+            Self::GENE_EXP_SNAKE_CASE => Self::Gene,
+            Self::PROTEIN_EXP_SNAKE_CASE => Self::ProteinExpression,
+            Self::PEAKS_SNAKE_CASE => Self::Peaks,
+            _ => FeatureType::Barcode(FeatureBarcodeType::from_snake_case(s)?),
+        })
     }
 }
 
-impl Display for FeatureType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Gene => {
-                write!(f, "Gene Expression")
-            }
-            Self::Barcode(ft) => {
-                write!(f, "{ft}")
-            }
-        }
+impl From<FeatureType> for &'static str {
+    fn from(value: FeatureType) -> &'static str {
+        value.as_str()
     }
 }
 
@@ -229,10 +228,12 @@ impl FromStr for FeatureType {
     type Err = <FeatureBarcodeType as FromStr>::Err;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s == "Gene Expression" {
-            return Ok(Self::Gene);
-        }
-        Ok(Self::Barcode(FeatureBarcodeType::from_str(s)?))
+        Ok(match s {
+            Self::GENE_EXP => Self::Gene,
+            Self::PROTEIN_EXP => Self::ProteinExpression,
+            Self::PEAKS => Self::Peaks,
+            _ => Self::Barcode(FeatureBarcodeType::from_str(s)?),
+        })
     }
 }
 
@@ -241,6 +242,12 @@ impl From<FeatureType> for LibraryType {
         match value {
             FeatureType::Gene => LibraryType::Gex,
             FeatureType::Barcode(ft) => LibraryType::FeatureBarcodes(ft),
+            FeatureType::Peaks => LibraryType::Atac,
+            FeatureType::ProteinExpression => {
+                unimplemented!(
+                    "Protein Expression can't be converted to a LibraryType; the concept of library is not valid here."
+                )
+            }
         }
     }
 }
@@ -250,7 +257,13 @@ impl AsMetricPrefix for FeatureType {
     fn as_metric_prefix(&self) -> Option<&str> {
         match self {
             Self::Gene => None,
+            Self::Peaks => None,
             Self::Barcode(ft) => ft.as_metric_prefix(),
+            Self::ProteinExpression => {
+                unimplemented!(
+                    "Protein Expression can't be converted to a metric prefix as there should be no metrics computed based on it here."
+                )
+            }
         }
     }
 }
@@ -392,12 +405,11 @@ impl FeatureDef {
         let bc_regex = Regex::new(r"\(BC\)").unwrap();
         let pat = bc_regex.replace(&pat, &self.sequence);
 
-        return pat
-            .chars()
+        pat.chars()
             .fold(0usize, |len, c| match c.to_ascii_uppercase() {
                 'A' | 'C' | 'G' | 'T' | 'N' => len + 1,
                 _ => len,
-            });
+            })
     }
 }
 
@@ -427,6 +439,27 @@ impl FeatureReferenceFile {
     }
 }
 
+/// Return the genome name of this feature ID.
+pub fn get_genome_from_feature_id<'a>(id: &str, genomes: &'a [GenomeName]) -> &'a GenomeName {
+    match genomes {
+        [] => panic!("Trying to get genome from feature ID without any genomes"),
+        [genome] => genome,
+        _ => {
+            let stripped_id = GenomeName::from(strip_deprecated_prefix(id));
+            genomes
+                .iter()
+                .find(|&g| stripped_id.starts_with(g.as_str()))
+                .with_context(|| {
+                    format!(
+                        "Genome for feature {id} not in genome list {}",
+                        genomes.iter().format(", ")
+                    )
+                })
+                .unwrap()
+        }
+    }
+}
+
 /// Contains all the 'features' in a GEX analysis.  A feature
 /// is either a gene from the standard genome reference, or
 /// a Feature Barcode declared in the feature reference.
@@ -435,8 +468,8 @@ impl FeatureReferenceFile {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct FeatureReference {
     pub feature_defs: Vec<FeatureDef>,
-    /// For each feature type, a hashmap from the pattern sequence to the feature_id
-    pub feature_maps: HashMap<FeatureType, HashMap<String, Vec<usize>>>,
+    /// For each feature barcode type, a hashmap from the pattern sequence to the feature_id
+    pub feature_maps: HashMap<FeatureBarcodeType, HashMap<String, Vec<usize>>>,
     // Lookup a gene index given a gene
     pub gene_to_index: HashMap<Gene, usize>,
     // Optional set of on-target features
@@ -461,155 +494,147 @@ impl FeatureReference {
         feature_config: Option<&FeatureConfig>,
     ) -> Result<Self> {
         let rdr = BufReader::new(File::open(path)?);
-        let fref = FeatureReference::new(
-            &ReferenceInfo::default(),
-            &Transcriptome::dummy(),
-            Some(rdr),
-            None,
-            None,
-            None,
-            feature_config,
-        )?;
+        let fref = FeatureReference::new(&[], None, Some(rdr), None, None, None, feature_config)?;
         Ok(fref)
     }
 
     /// Read a feature reference from a transcriptome reference, probe set, and feature reference CSV.
     pub fn from_paths(
-        transcriptome_reference_path: &Path,
+        transcriptome_reference_path: Option<&Path>,
         feature_reference: Option<&FeatureReferenceFile>,
-        use_feature_types: Option<TxHashSet<FeatureType>>,
         target_set_name: Option<&str>,
         target_set_path: Option<&TargetSetFile>,
         target_features_path: Option<&TargetGeneIndicesFile>,
         feature_config: Option<&FeatureConfig>,
     ) -> Result<Self> {
-        let ref_info = ReferenceInfo::from_reference_path(transcriptome_reference_path)?;
-        let txome = Transcriptome::from_reference_path(transcriptome_reference_path)?;
+        assert!(
+            transcriptome_reference_path.is_some()
+                || target_set_path.is_some()
+                || feature_reference.is_some()
+        );
 
-        let target_set = if let (Some(name), Some(path)) = (target_set_name, target_features_path) {
-            Some(TargetSet::load(name, path)?)
-        } else {
-            None
-        };
+        let transcriptome_genomes = transcriptome_reference_path
+            .map(ReferenceInfo::from_reference_path)
+            .transpose()?
+            .map(|x| x.genomes);
+        let probe_set_genomes = target_set_path
+            .map(ProbeSetReferenceMetadata::load_from)
+            .transpose()?
+            .map(|x| x.reference_genomes());
+        let genomes = transcriptome_genomes
+            .or(probe_set_genomes)
+            .unwrap_or_default();
+
+        let txome = transcriptome_reference_path
+            .map(Transcriptome::from_reference_path)
+            .transpose()?;
+
+        let target_set = target_set_name
+            .zip(target_features_path)
+            .map(|(name, path)| TargetSet::load(name, path))
+            .transpose()?;
 
         let feature_ref_stream = feature_reference
             .map(|x| File::open(x).with_context(|| x.display().to_string()))
             .transpose()?;
 
-        let gene_ids_and_included = target_set_path
-            .map(|x| x.read_gene_ids_and_included(transcriptome_reference_path))
+        let target_genes_and_included = target_set_path
+            .map(|x| x.read_genes_and_included(transcriptome_reference_path))
             .transpose()?;
 
         FeatureReference::new(
-            &ref_info,
-            &txome,
+            &genomes,
+            txome.as_ref(),
             feature_ref_stream,
-            use_feature_types,
+            target_set_name,
             target_set,
-            gene_ids_and_included.as_deref(),
+            target_genes_and_included.as_deref(),
             feature_config,
         )
     }
 
     /// Create a new feature reference. See `from_paths` for details.
+    #[allow(clippy::too_many_arguments)]
     pub fn new<R: Read>(
-        ref_info: &ReferenceInfo,
-        txome: &Transcriptome,
+        genomes: &[GenomeName],
+        txome: Option<&Transcriptome>,
         csv_stream: Option<R>,
-        use_feature_types: Option<TxHashSet<FeatureType>>,
+        target_set_name: Option<&str>,
         target_set: Option<TargetSet>,
-        gene_ids_and_included: Option<&[(String, bool)]>,
+        target_genes_and_included: Option<&[(FeatureID, FeatureName, bool)]>,
         feature_config: Option<&FeatureConfig>,
     ) -> Result<FeatureReference> {
-        fn get_genome_from_str(
-            feature: &str,
-            genomes: &[GenomeName],
-            targeted: bool,
-        ) -> GenomeName {
-            if genomes.len() == 1 {
-                return genomes[0].clone();
-            }
-            for genome in genomes {
-                if feature.starts_with(genome.as_str())
-                    || (targeted
-                        && is_deprecated_probe(feature)
-                        && feature.contains(genome.as_str()))
-                {
-                    return genome.clone();
-                }
-            }
+        // Create gene features
+        let mut fdefs: Vec<_> = txome
+            .map(|x| x.genes.as_slice())
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+            .map(|(index, gene)| FeatureDef {
+                index,
+                id: gene.id.clone(),
+                name: gene.name.clone(),
+                genome: get_genome_from_feature_id(&gene.id, genomes).clone(),
+                sequence: String::default(),
+                pattern: String::default(),
+                read: WhichRead::R2,
+                feature_type: FeatureType::Gene,
+                tags: HashMap::new(),
+            })
+            .collect();
 
-            panic!(
-                "couldn't find genome for feature {feature} in genome list {}",
-                genomes.iter().format(", ")
-            );
-        }
+        // Create non-gene probe features.
+        let probe_features = target_genes_and_included
+            .unwrap_or_default()
+            .iter()
+            .filter(|(id, _, _)| !txome.is_some_and(|x| x.gene_id_to_idx.contains_key(id)))
+            .zip(fdefs.len()..)
+            .map(|((id, name, _included), index)| FeatureDef {
+                index,
+                id: id.clone(),
+                name: name.clone(),
+                genome: get_genome_from_feature_id(id, genomes).clone(),
+                sequence: String::default(),
+                pattern: String::default(),
+                read: WhichRead::R2,
+                feature_type: FeatureType::Gene,
+                tags: HashMap::new(),
+            });
+        fdefs.extend(probe_features);
 
-        let mut gene_to_index = HashMap::new();
-        let mut fdefs = Vec::new();
-        let mut fmaps = HashMap::new();
-        let mut cmo_ids = HashMap::new();
-        let mut target_set_indices = target_set.as_ref().map(|x| x.feature_indices().clone());
+        // Construct the map of genes to indices.
+        let gene_to_index: HashMap<Gene, usize> = fdefs
+            .iter()
+            .map(|x| {
+                (
+                    Gene {
+                        id: x.id.clone(),
+                        name: x.name.clone(),
+                    },
+                    x.index,
+                )
+            })
+            .collect();
 
-        if use_feature_types
-            .as_ref()
-            .map_or(true, |x| x.contains(&FeatureType::Gene))
-        {
-            // Create gene expression features
-            fmaps.insert(FeatureType::Gene, HashMap::new());
-
-            // Create gene features
-            for gene in &txome.genes {
-                let genome = get_genome_from_str(&gene.id, &ref_info.genomes, false);
-                let num_fdefs = fdefs.len();
-                fdefs.push(FeatureDef {
-                    index: num_fdefs,
-                    id: gene.id.clone(),
-                    name: gene.name.clone(),
-                    genome,
-                    sequence: String::default(),
-                    pattern: String::default(),
-                    read: WhichRead::R2,
-                    feature_type: FeatureType::Gene,
-                    tags: HashMap::new(),
-                });
-
-                gene_to_index.insert(gene.to_gene(), num_fdefs);
-            }
-
-            // Create non-gene probe features.
-            if let Some(gene_ids_and_included) = gene_ids_and_included {
-                for &(ref gene_id, included) in gene_ids_and_included {
-                    if !txome.gene_id_to_idx.contains_key(gene_id) {
-                        let genome = get_genome_from_str(gene_id, &ref_info.genomes, true);
-                        let num_fdefs = fdefs.len();
-                        fdefs.push(FeatureDef {
-                            index: num_fdefs,
-                            id: gene_id.clone(),
-                            name: gene_id.clone(),
-                            genome,
-                            sequence: String::default(),
-                            pattern: String::default(),
-                            read: WhichRead::R2,
-                            feature_type: FeatureType::Gene,
-                            tags: HashMap::new(),
-                        });
-                        gene_to_index.insert(
-                            Gene {
-                                id: gene_id.clone(),
-                                name: gene_id.clone(),
-                            },
-                            num_fdefs,
-                        );
-                        if let Some(target_set_indices) = &mut target_set_indices {
-                            if included && !is_deprecated_probe(gene_id) {
-                                target_set_indices.insert(num_fdefs as u32);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // Construct the set of on-target feature indices.
+        let target_set = if let Some(target_genes_and_included) = target_genes_and_included {
+            // target_set contains all genes targeted by probes ignoring included when filter_probes is false.
+            let target_set_indices_orig = target_set.map(|x| x.feature_indices).unwrap_or_default();
+            let target_set_indices_probe = target_genes_and_included
+                .iter()
+                .filter(|&&(ref id, _, included)| included && !is_deprecated_probe(id))
+                .cloned()
+                .map(|(id, name, _)| gene_to_index[&Gene { id, name }] as u32);
+            let target_set_indices =
+                chain(target_set_indices_orig, target_set_indices_probe).collect();
+            Some(TargetSet::from_indices(
+                target_set_name.unwrap(),
+                target_set_indices,
+            ))
+        } else {
+            assert!(target_set.is_none());
+            None
+        };
 
         // Validate contents of specificty_controls in feature_config
         let mut seen_this_control_id = HashMap::new();
@@ -648,10 +673,9 @@ impl FeatureReference {
                 };
             }
         }
-        //
 
+        let mut fmaps = HashMap::new();
         let mut all_feature_ids = HashSet::new();
-
         if let Some(csv) = csv_stream {
             let reader = BufReader::new(csv);
             let mut csv_reader = csv::ReaderBuilder::new()
@@ -659,30 +683,27 @@ impl FeatureReference {
                 .from_reader(reader);
 
             let header = csv_reader.headers()?.clone();
-
             validate_headers(&header)?;
 
-            let mut feature_types_seen: HashSet<FeatureType> = HashSet::new();
+            let hashtag_ids = feature_config.and_then(|f| f.hashtag_ids.as_ref());
 
-            let mut last_feature_type: Option<FeatureType> = None;
+            let mut feature_types_seen: HashSet<FeatureBarcodeType> = HashSet::new();
+            let mut last_feature_type: Option<FeatureBarcodeType> = None;
+            let mut cmo_ids = HashMap::new();
             // Create feature barcode (fBC) features
             // TODO - needs a bunch of details brought over from Python code
             // see lib/python/cellranger/rna/feature_ref.py:parse_feature_def_file
             for record in csv_reader.records() {
                 let record = record?;
-
                 let feat_idx = fdefs.len();
                 let mut fdef = FeatureDef::from_string_record(&record, &header, feat_idx)?;
-
                 all_feature_ids.insert(fdef.id.clone());
 
-                if use_feature_types
-                    .as_ref()
-                    .is_some_and(|x| !x.contains(&fdef.feature_type))
-                {
-                    continue;
-                }
-                if fdef.feature_type == FeatureType::Barcode(FeatureBarcodeType::Multiplexing) {
+                let FeatureType::Barcode(feature_barcode_type) = fdef.feature_type else {
+                    unreachable!();
+                };
+
+                if feature_barcode_type == FeatureBarcodeType::Multiplexing {
                     let line = record.position().unwrap().line();
                     match cmo_ids.entry(fdef.id.clone()) {
                         Entry::Occupied(o) => {
@@ -698,7 +719,12 @@ impl FeatureReference {
                         }
                     }
                 }
-                if fdef.feature_type == FeatureType::Barcode(FeatureBarcodeType::Antigen) {
+                if feature_barcode_type == FeatureBarcodeType::Antibody
+                    && hashtag_ids.is_some_and(|x| x.contains(&fdef.id))
+                {
+                    fdef.add_tag(HASHTAG.to_string(), "True".to_string())?;
+                }
+                if feature_barcode_type == FeatureBarcodeType::Antigen {
                     if let Some(feature_config) = feature_config {
                         if let Some(specificity_controls) = &feature_config.specificity_controls {
                             // Add tags corresponding to control id
@@ -707,16 +733,16 @@ impl FeatureReference {
                                 Some(allelle) => {
                                     if feature_config.beam_mode == Some(BeamMode::BeamAB) {
                                         bail!(
-                                        "Error parsing feature reference: The `mhc_allele` column is invalid for BCR Antigen Capture."
-                                    );
+                                            "Error parsing feature reference: The `mhc_allele` column is invalid for BCR Antigen Capture."
+                                        );
                                     }
                                     // Throw an error if feature reference has MHC allele but not multi config csv
                                     if !specificity_controls.has_mhc_allele_column {
                                         bail!(
-                                        "Feature reference CSV contains `{0}` column but `{0}` is not present in the \
+                                            "Feature reference CSV contains `{0}` column but `{0}` is not present in the \
                                     [antigen-specificity] section of the multi config CSV.",
-                                        MHC_ALLELE
-                                    );
+                                            MHC_ALLELE
+                                        );
                                     }
                                     allelle.as_str()
                                 }
@@ -784,11 +810,11 @@ impl FeatureReference {
                 }
                 match last_feature_type {
                     None => {
-                        feature_types_seen.insert(fdef.feature_type);
+                        feature_types_seen.insert(feature_barcode_type);
                     }
                     Some(lft) => {
-                        if fdef.feature_type != lft
-                            && feature_types_seen.contains(&fdef.feature_type)
+                        if feature_barcode_type != lft
+                            && feature_types_seen.contains(&feature_barcode_type)
                         {
                             // If we have switched from the last feature type, but the new feature type is already in the feature types seen,
                             // it means we have had a block of the new feature type before the block of last feature type:
@@ -803,9 +829,9 @@ impl FeatureReference {
                         }
                     }
                 };
-                last_feature_type = Some(fdef.feature_type);
+                last_feature_type = Some(feature_barcode_type);
                 fmaps
-                    .entry(fdef.feature_type)
+                    .entry(feature_barcode_type)
                     .or_insert_with(HashMap::new)
                     .entry(fdef.sequence.clone())
                     .or_insert_with(Vec::new)
@@ -813,6 +839,14 @@ impl FeatureReference {
 
                 fdefs.push(fdef);
             }
+
+            let duplicate_ids: Vec<_> = fdefs.iter().map(|x| &x.id).duplicates().collect();
+            ensure!(
+                duplicate_ids.is_empty(),
+                "{} duplicate feature ID(s) found in feature reference: {}",
+                duplicate_ids.len(),
+                duplicate_ids.into_iter().format(", ")
+            );
         }
 
         // Validate the content of feature-functional-map in feature_config
@@ -859,15 +893,11 @@ impl FeatureReference {
             );
         }
 
-        let updated_target_set = target_set_indices.map(|target_set_indices| {
-            TargetSet::from_indices(target_set.unwrap().name(), target_set_indices)
-        });
-
         Ok(FeatureReference {
             feature_defs: fdefs,
             feature_maps: fmaps,
             gene_to_index,
-            target_set: updated_target_set,
+            target_set,
         })
     }
 
@@ -879,16 +909,20 @@ impl FeatureReference {
         //   1) the cmo-set
         //   2) the feature-ref
         //   3) builtins
-        for mut fdef in fdefs.iter().cloned() {
-            assert!(fdef.feature_type == FeatureType::Barcode(FeatureBarcodeType::Multiplexing));
-            fdef.index = self.feature_defs.len();
+        for fdef in fdefs {
+            use FeatureBarcodeType::Multiplexing;
+            assert_eq!(fdef.feature_type, FeatureType::Barcode(Multiplexing));
+            let index = self.feature_defs.len();
             self.feature_maps
-                .entry(fdef.feature_type)
+                .entry(Multiplexing)
                 .or_default()
                 .entry(fdef.sequence.clone())
                 .or_default()
-                .push(fdef.index);
-            self.feature_defs.push(fdef);
+                .push(index);
+            self.feature_defs.push(FeatureDef {
+                index,
+                ..fdef.clone()
+            });
         }
     }
 
@@ -896,7 +930,7 @@ impl FeatureReference {
     /// * `barcode` - ASCII nucleotide sequence
     pub fn get_feature_by_barcode(
         &self,
-        feature_type: FeatureType,
+        feature_type: FeatureBarcodeType,
         barcode: &str,
     ) -> Option<Vec<&FeatureDef>> {
         Some(
@@ -938,6 +972,15 @@ impl FeatureReference {
         self.feature_defs
             .iter()
             .filter(|x| x.feature_type == FeatureType::Barcode(FeatureBarcodeType::Multiplexing))
+            .map(|x| x.id.clone())
+            .collect()
+    }
+
+    /// Get the set of Antibody feature ids
+    pub fn antibody_ids(&self) -> TxHashSet<String> {
+        self.feature_defs
+            .iter()
+            .filter(|x| x.feature_type == FeatureType::Barcode(FeatureBarcodeType::Antibody))
             .map(|x| x.id.clone())
             .collect()
     }
@@ -999,7 +1042,11 @@ impl FeatureReference {
             write!(
                 w,
                 "{},{},{read},{},{},{}",
-                fdef.id, fdef.name, fdef.pattern, fdef.sequence, fdef.feature_type,
+                fdef.id,
+                fdef.name,
+                fdef.pattern,
+                fdef.sequence,
+                fdef.feature_type.as_str(),
             )?;
             for ctag in &custom_tags {
                 let s = fdef.tags.get(ctag).map_or("", String::as_str);
@@ -1013,31 +1060,7 @@ impl FeatureReference {
     /// Write the feature reference to a TSV file. Creates the `features.tsv.gz` file in the output folder.
     pub fn to_tsv(&self, w: &mut impl Write) -> Result<()> {
         for fd in &self.feature_defs {
-            write!(w, "{}\t{}\t{}", fd.id, fd.name, fd.feature_type)?;
-        }
-
-        Ok(())
-    }
-
-    /// Check that the input antigen features are restricted to 10x whitelist
-    pub fn check_tenx_beam(&self) -> Result<()> {
-        let tenx_beam = load_default_beam_set().unwrap();
-        let tenx_beam: TxHashSet<_> = tenx_beam
-            .iter()
-            .map(|x| (x.read, &x.pattern, &x.sequence))
-            .collect();
-        for fdef in self
-            .feature_defs
-            .iter()
-            .filter(|f| f.feature_type == FeatureType::Barcode(FeatureBarcodeType::Antigen))
-        {
-            if !tenx_beam.contains(&(fdef.read, &fdef.pattern, &fdef.sequence)) {
-                bail!(
-                    "Error parsing feature reference: Feature definition provided for {} \
-                    does not match the 10x whitelist.",
-                    fdef.id
-                );
-            }
+            write!(w, "{}\t{}\t{}", fd.id, fd.name, fd.feature_type.as_str())?;
         }
         Ok(())
     }
@@ -1122,8 +1145,7 @@ impl FeatureReference {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use insta::assert_snapshot;
-    use std::io::Cursor;
+    use std::io::{BufWriter, Seek};
 
     // initialize insta test harness
     #[ctor::ctor]
@@ -1135,22 +1157,59 @@ mod tests {
     }
 
     #[test]
-    fn test_whitelist_check() {
-        let fdf_csv = r#"
-id,name,read,pattern,sequence,feature_type
-ID1,Name1,R1,^(BC),AAAA,Antigen Capture
-"#;
-        let fref = FeatureReference::new(
-            &ReferenceInfo::default(),
-            &Transcriptome::dummy(),
-            Some(Cursor::new(fdf_csv.as_bytes())),
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-        let res = fref.check_tenx_beam();
-        assert_snapshot!(res.unwrap_err());
+    fn test_serialize_feature_type() -> Result<()> {
+        let gex = "\"Gene Expression\"";
+        assert_eq!(serde_json::to_string(&FeatureType::Gene)?, gex);
+        assert_eq!(serde_json::from_str::<FeatureType>(gex)?, FeatureType::Gene);
+
+        let mut f = tempfile::tempfile()?;
+        bincode::serialize_into(BufWriter::new(&f), &FeatureType::Gene)?;
+        f.rewind()?;
+        let gex: FeatureType = bincode::deserialize_from(BufReader::new(f))?;
+        assert_eq!(gex, FeatureType::Gene);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_genome_from_feature_id() -> Result<()> {
+        let x = GenomeName::from("X");
+        let ab = GenomeName::from("A_B");
+        assert_eq!(get_genome_from_feature_id("A_B_C", &[x.clone()]), &x);
+        assert_eq!(
+            get_genome_from_feature_id("A_B_C", &[x.clone(), ab.clone()]),
+            &ab
+        );
+        assert_eq!(
+            get_genome_from_feature_id("DEPRECATED_A_B_C", &[x.clone()]),
+            &x
+        );
+        assert_eq!(
+            get_genome_from_feature_id("DEPRECATED_A_B_C", &[x.clone(), ab.clone()]),
+            &ab
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_get_genome_from_feature_id_genome_not_found() {
+        let x = GenomeName::from("X");
+        let y = GenomeName::from("Y");
+        get_genome_from_feature_id("DEPRECATED_C", &[x.clone(), y.clone()]);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_get_genome_from_deprecated_feature_id_genome_not_found() {
+        let x = GenomeName::from("X");
+        let y = GenomeName::from("Y");
+        get_genome_from_feature_id("DEPRECATED_C", &[x.clone(), y.clone()]);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_get_genome_from_feature_id_empty_genomes() {
+        get_genome_from_feature_id("A_B_C", &[]);
     }
 }

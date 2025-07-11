@@ -438,7 +438,7 @@ def compile_pattern(pattern_str, length: int):
     regex_str = re.sub("N", ".", pattern_str)
 
     # Capture the feature barcode
-    regex_str = re.sub(r"\(BC\)", "(.{%d,%d})" % (length, length), regex_str)
+    regex_str = re.sub(r"\(BC\)", f"(.{{{length},{length}}})", regex_str)
 
     try:
         regex = re.compile(regex_str)
@@ -489,10 +489,7 @@ def parse_feature_def_file(filename, index_offset: int = 0) -> tuple[list[Featur
         # Check that there aren't extra columns, which you
         for key in row:
             if key is None:
-                msg = (
-                    "Your feature reference csv file contains more columns than the header on line %d. Please use a csv file with a header for each column."
-                    % (row_num + 2)
-                )
+                msg = f"Your feature reference csv file contains more columns than the header on line {row_num + 2}. Please use a csv file with a header for each column."
                 msg += "\nYou might have an comma character in a field. Commas are permitted in some fields, but fields containing commas must be enclosed in quotes."
                 raise FeatureDefException(msg)
 
@@ -500,10 +497,7 @@ def parse_feature_def_file(filename, index_offset: int = 0) -> tuple[list[Featur
         # tolerate missing values
         for key in row:
             if row[key] is None:
-                msg = (
-                    "Your feature reference csv file is missing fields on line %d. Ensure that each row has an entry for every header column."
-                    % (row_num + 2)
-                )
+                msg = f"Your feature reference csv file is missing fields on line {row_num + 2}. Ensure that each row has an entry for every header column."
                 msg += "\nYou might have an extra comma character in the CSV header."
                 raise FeatureDefException(msg)
 
@@ -551,7 +545,7 @@ def parse_feature_def_file(filename, index_offset: int = 0) -> tuple[list[Featur
                         "Feature id field cannot contain whitespace: '{}'".format(row["id"])
                     )
                 else:
-                    msg = "Feature id field contains an illegal character at position %d: '%s'" % (
+                    msg = "Feature id field contains an illegal character at position {}: '{}'".format(
                         idx,
                         row["id"],
                     )

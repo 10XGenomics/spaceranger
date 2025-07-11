@@ -1,4 +1,5 @@
 //! Align homopolymer sequences.
+#![deny(missing_docs)]
 
 use std::cmp::max;
 use std::ops::Range;

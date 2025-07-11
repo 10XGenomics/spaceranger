@@ -1,24 +1,23 @@
 @include "sc_rna_analyzer.mro"
+@include "spatial_segmentation.mro"
 @include "_common_cloupe_stages.mro"
 @include "_common_stages.mro"
-@include "_cr_lib_stages.mro"
 @include "_spatial_reporting_stages.mro"
 @include "_spatial_stages.mro"
-
-filetype h5;
-filetype json;
-filetype png;
-filetype tiff;
+@include "_spatial_write_binned_matrices.mro"
 
 # NOTE: Only png images can be displayed by default in browsers such as Chrome.
 # The tiff images are downloaded and not displayed. If we need to use the log
 # UMI image as the cytassist image for manual alignment in Loupe, it needs to be
 # a tiff at 3k resolution. So we produce both png and tiff.
 struct UmiImagesOuts(
-    png  umi_image        "UMI Image (png)",
-    png  log_umi_image    "Log UMI Image (png)",
-    tiff log_umi_image_3k "Log UMI Image 3K (tiff)" "log_umi_image_3k.tiff",
-    tiff umi_image_3k     "UMI Image 3K (tiff)"     "umi_image_3k.tiff",
+    png  umi_image                  "UMI Image (png)",
+    png  log_umi_image              "Log UMI Image (png)",
+    png  uncorrected_read_image     "Uncorrected Read Image (png)",
+    png  log_uncorrected_read_image "Log Uncorrected Read Image (png)",
+    png  frac_corrected_read_image  "Fraction Corrected Read Image (png)",
+    tiff log_umi_image_3k           "Log UMI Image 3K (tiff)"             "log_umi_image_3k.tiff",
+    tiff umi_image_3k               "UMI Image 3K (tiff)"                 "umi_image_3k.tiff",
 )
 
 struct BinnedOutputs(
@@ -107,26 +106,15 @@ stage PROCESS_HD_ALIGNMENT(
     volatile = strict,
 )
 
-stage WRITE_BINNED_MATRICES(
-    in  string            sample_id,
-    in  h5                raw_matrix_h5,
-    in  map<ChemistryDef> chemistry_defs,
-    in  json              filtered_bin_barcodes,
-    out h5                filtered_matrices_h5,
-    out path              filtered_matrices_mex,
-    out path              raw_matrices_mex,
-    src py                "stages/spatial/write_binned_matrices",
-) split (
-) using (
-    volatile = strict,
-)
-
 # Produce a UMI image at the given binning scale
 stage CREATE_TOTAL_UMI_IMAGE(
     in  h5   hd_feature_slice_h5,
     in  int  binning_scale,
     out png  umi_image,
     out png  log_umi_image,
+    out png  uncorrected_read_image,
+    out png  log_uncorrected_read_image,
+    out png  frac_corrected_read_image,
     out tiff log_umi_image_3k,
     out tiff umi_image_3k,
     src py   "stages/spatial/create_total_umi_image",
@@ -152,6 +140,17 @@ stage PICK_SATURATION_PLOT(
     volatile = strict,
 )
 
+stage PICK_INPUTS_FOR_CELLSEG_LOUPE(
+    in  map<csv>  tissue_positions,
+    in  map<json> scalefactors,
+    in  h5        hd_feature_slice,
+    out csv       base_tissue_positions,
+    out json      base_scalefactors,
+    src py        "stages/spatial/pick_inputs_for_cellseg_loupe",
+) using (
+    volatile = strict,
+)
+
 stage CREATE_HD_WEBSUMMARY_IMAGE(
     in  png   tissue_hires_image,
     in  json  scalefactors,
@@ -165,14 +164,26 @@ stage CREATE_HD_WEBSUMMARY_IMAGE(
     volatile = strict,
 )
 
+stage BUILD_HD_END_TO_END_ALIGNMENT_INPUTS(
+    in  h5  hd_feature_slice_h5,
+    out npy primary_bin_mask,
+    out npy primary_bin_total_umis,
+    out npy spot_colrow_to_tissue_image_colrow_transform,
+    src py  "stages/spatial/build_hd_end_to_end_alignment_inputs",
+) using (
+    volatile = strict,
+)
+
 stage BUILD_HD_END_TO_END_ALIGNMENT(
-    in  h5    hd_feature_slice_h5,
+    in  npy   primary_bin_mask,
+    in  npy   primary_bin_total_umis,
+    in  npy   spot_colrow_to_tissue_image_colrow_transform,
     in  jpg   websummary_tissue_image,
     in  float websummary_tissue_image_scale,
     out json  end_to_end_alignment_data,
     src py    "stages/spatial/build_hd_end_to_end_alignment",
 ) using (
-    vmem_gb  = 8,
+    vmem_gb  = 10,
     volatile = strict,
 )
 
@@ -184,7 +195,7 @@ stage BUILD_HD_CLUSTERING_PLOT(
     out json      cluster_plot,
     src py        "stages/spatial/build_hd_clustering_plot",
 ) using (
-    mem_gb   = 10,
+    mem_gb   = 12,
     volatile = strict,
 )
 
@@ -193,6 +204,18 @@ stage PICK_PROBE_BC_MATRIX(
     in  int bin_scale,
     out h5  raw_probe_bc_matrix,
     src py  "stages/spatial/pick_probe_bc_matrix",
+) using (
+    volatile = strict,
+)
+
+stage OUTPUT_BARCODE_MAPPINGS(
+    in  h5                hd_feature_slice,
+    in  map<BinLevelInfo> bin_infos,
+    out parquet           barcode_mappings,
+    src py                "stages/spatial/output_barcode_mappings",
+) using (
+    mem_gb   = 4,
+    volatile = strict,
 )
 
 pipeline _COMPUTE_BINNED_OUTPUTS(
@@ -219,6 +242,8 @@ pipeline _COMPUTE_BINNED_OUTPUTS(
     in  json              metrics_json,
     in  bi.bincode        barcode_index,
     out BinnedOutputs     binned_outputs,
+    out csv               tissue_positions,
+    out json              scalefactors,
     out json              summary,
 )
 {
@@ -284,6 +309,7 @@ pipeline _COMPUTE_BINNED_OUTPUTS(
             cbc_realign_panorama:       null,
             cbc_sigma:                  null,
             chemistry_batch_correction: false,
+            enable_tsne:                false,
             exclude_genes:              null,
             filtered_matrices_h5:       WRITE_BINNED_MATRICES.filtered_matrices_h5,
             force_cells:                null,
@@ -349,6 +375,9 @@ pipeline _COMPUTE_BINNED_OUTPUTS(
         spatial_enrichment           = null,
         spatial_deconvolution_path   = null,
         disable_cloupe               = self.bin_info.disable_cloupe,
+        matrix_type                  = "bin",
+        spatial_cell_segment_mask    = null,
+        spatial_cell_segment_geojson = null,
     )
 
     call CREATE_TOTAL_UMI_IMAGE(
@@ -357,7 +386,7 @@ pipeline _COMPUTE_BINNED_OUTPUTS(
     )
 
     return (
-        binned_outputs = {
+        binned_outputs   = {
             analysis:                      SPATIAL_BINNED_RNA_ANALYZER.common_analyzer.analysis,
             analysis_csv:                  SPATIAL_BINNED_RNA_ANALYZER.common_analyzer.analysis_csv,
             cloupe:                        CLOUPE_PREPROCESS.output_for_cloupe,
@@ -384,46 +413,59 @@ pipeline _COMPUTE_BINNED_OUTPUTS(
             subsampling_metrics:           COMPUTE_SUBSAMPLED_BIN_METRICS.subsampled_metrics,
             umi_images:                    CREATE_TOTAL_UMI_IMAGE,
         },
-        summary        = COMPUTE_BIN_METRICS.summary,
+        summary          = COMPUTE_BIN_METRICS.summary,
+        scalefactors     = BIN_COUNT_MATRIX.binned_scalefactors,
+        tissue_positions = BIN_COUNT_MATRIX.binned_tissue_positions,
     )
 }
 
 pipeline _BIN_HD_DATA(
-    in  string               visium_hd_slide_name,
-    in  json                 hd_layout_data_json,
-    in  csf[]                counts_bc_order,
-    in  map<ChemistryDef>    chemistry_defs,
-    in  string               sample_id,
-    in  string               sample_desc,
-    in  frf.bincode          slfe_feature_reference,
-    in  json                 barcodes_under_tissue,
-    in  file[]               tissue_image_paths,
-    in  int                  dark_images,
-    in  txt                  fiducial_positions_list,
-    in  json                 dzi_info,
-    in  path[]               dzi_tiles_paths,
-    in  json                 scalefactors,
-    in  string[]             image_page_names,
-    in  h5                   filtered_matrix_h5,
-    in  h5                   raw_matrix_h5,
-    in  h5                   molecule_info,
-    in  h5                   barcode_summary_h5,
-    in  json                 tissue_registration_transform,
-    in  json                 fiducial_transform,
-    in  tiff                 cytassist_image,
-    in  bool                 is_pd,
-    in  tiff                 registration_target_image,
-    in  map<BinLevelInfo>    bin_infos,
-    in  UmiRegOutsSubset     umi_registration_outs,
-    in  SpatialFolder        spatial,
-    in  json                 metrics_json,
-    in  h5                   raw_probe_bc_matrix_base_bin,
-    in  bi.bincode           barcode_index,
-    out map<BinnedOutputs>   binned_outputs,
-    out map<json>            bin_level_metrics,
-    out json                 summary,
-    out h5                   hd_feature_slice_h5,
-    out PROCESS_HD_ALIGNMENT alignment_qc_outs,
+    in  string                  visium_hd_slide_name,
+    in  json                    hd_layout_data_json,
+    in  csf[]                   counts_bc_order,
+    in  map<ChemistryDef>       chemistry_defs,
+    in  string                  sample_id,
+    in  string                  sample_desc,
+    in  frf.bincode             slfe_feature_reference,
+    in  json                    barcodes_under_tissue,
+    in  file[]                  tissue_image_paths,
+    in  int                     dark_images,
+    in  txt                     fiducial_positions_list,
+    in  json                    dzi_info,
+    in  path[]                  dzi_tiles_paths,
+    in  json                    scalefactors,
+    in  string[]                image_page_names,
+    in  h5                      filtered_matrix_h5,
+    in  h5                      raw_matrix_h5,
+    in  h5                      molecule_info,
+    in  h5                      barcode_summary_h5,
+    in  json                    tissue_registration_transform,
+    in  json                    fiducial_transform,
+    in  tiff                    cytassist_image,
+    in  bool                    is_pd,
+    in  tiff                    registration_target_image,
+    in  map<BinLevelInfo>       bin_infos,
+    in  UmiRegOutsSubset        umi_registration_outs,
+    in  SpatialFolder           spatial,
+    in  json                    metrics_json,
+    in  json                    tissue_image_shape,
+    in  h5                      raw_probe_bc_matrix_base_bin,
+    in  bi.bincode              barcode_index,
+    in  geojson                 pipeline_generated_segmentations,
+    in  SegmentationInputs      segmentation_inputs,
+    in  bool                    disable_segmentation,
+    in  bool                    no_secondary_analysis,
+    in  int                     max_nucleus_diameter_px,
+    out map<BinnedOutputs>      binned_outputs,
+    out map<json>               bin_level_metrics,
+    out json                    summary,
+    out h5                      hd_feature_slice_h5,
+    out PROCESS_HD_ALIGNMENT    alignment_qc_outs,
+    out bool                    no_segmentation_secondary_analysis,
+    out MinimalSegmentedOutputs minimal_segmented_outs,
+    out json                    nucleus_segmentation_graphclust_diffexp,
+    out json                    segmentation_metrics,
+    out parquet                 barcode_mappings,
 )
 {
     call CREATE_HD_FEATURE_SLICE(
@@ -453,32 +495,88 @@ pipeline _BIN_HD_DATA(
         microscope_image_on_spots = PROCESS_HD_ALIGNMENT.microscope_image_on_spots,
     )
 
+    call PICK_INPUTS_FOR_CELLSEG_LOUPE(
+        hd_feature_slice = UPDATE_HD_FEATURE_SLICE_H5.hd_feature_slice_h5_out,
+        tissue_positions = _COMPUTE_BINNED_OUTPUTS.tissue_positions,
+        scalefactors     = _COMPUTE_BINNED_OUTPUTS.scalefactors,
+    )
+
+    call PROCESS_SEGMENTATIONS(
+        gem_well                = 1,
+        hd_feature_slice        = UPDATE_HD_FEATURE_SLICE_H5.hd_feature_slice_h5_out,
+        counts                  = self.counts_bc_order,
+        pipeline_generated_segmentations = self.pipeline_generated_segmentations,
+        segmentation_inputs     = self.segmentation_inputs,
+        feature_reference       = self.slfe_feature_reference,
+        chemistry_defs          = self.chemistry_defs,
+        sample_id               = self.sample_id,
+        is_pd                   = self.is_pd,
+        disable_segmentation    = self.disable_segmentation,
+        sample_desc             = self.sample_desc,
+        tissue_image_paths      = self.tissue_image_paths,
+        dark_images             = self.dark_images,
+        fiducial_positions_list = self.fiducial_positions_list,
+        dzi_info                = self.dzi_info,
+        dzi_tiles_paths         = self.dzi_tiles_paths,
+        base_scalefactors       = PICK_INPUTS_FOR_CELLSEG_LOUPE.base_scalefactors,
+        tissue_image_shape      = self.tissue_image_shape,
+        visium_hd_slide_name    = self.visium_hd_slide_name,
+        image_page_names        = self.image_page_names,
+        no_secondary_analysis   = self.no_secondary_analysis,
+        base_tissue_positions   = PICK_INPUTS_FOR_CELLSEG_LOUPE.base_tissue_positions,
+        spatial                 = self.spatial,
+    )
+
+    call OUTPUT_BARCODE_MAPPINGS(
+        hd_feature_slice = PROCESS_SEGMENTATIONS.hd_feature_slice_h5_out,
+        bin_infos        = self.bin_infos,
+    )
+
+    call COMPUTE_SEGMENTATION_METRICS(
+        molecule_info                = self.molecule_info,
+        hd_feature_slice             = PROCESS_SEGMENTATIONS.hd_feature_slice_h5_out,
+        filtered_feature_cell_matrix = PROCESS_SEGMENTATIONS.minimal_segmented_outs.filtered_feature_cell_matrix_h5,
+        max_nucleus_diameter_px      = self.max_nucleus_diameter_px,
+    )
+
+    call GET_SEGMENTED_DIFFEXP_JSON(
+        analysis_csv = PROCESS_SEGMENTATIONS.minimal_segmented_outs.analysis_csv,
+    )
+
     call MERGE_BIN_METRICS(
         summaries     = [],
         bin_summaries = _COMPUTE_BINNED_OUTPUTS.summary,
     )
 
     return (
-        binned_outputs      = _COMPUTE_BINNED_OUTPUTS.binned_outputs,
-        summary             = MERGE_BIN_METRICS.summary,
-        hd_feature_slice_h5 = UPDATE_HD_FEATURE_SLICE_H5.hd_feature_slice_h5_out,
-        alignment_qc_outs   = PROCESS_HD_ALIGNMENT,
-        bin_level_metrics   = _COMPUTE_BINNED_OUTPUTS.summary,
+        binned_outputs         = _COMPUTE_BINNED_OUTPUTS.binned_outputs,
+        summary                = MERGE_BIN_METRICS.summary,
+        hd_feature_slice_h5    = PROCESS_SEGMENTATIONS.hd_feature_slice_h5_out,
+        alignment_qc_outs      = PROCESS_HD_ALIGNMENT,
+        bin_level_metrics      = _COMPUTE_BINNED_OUTPUTS.summary,
+        minimal_segmented_outs = PROCESS_SEGMENTATIONS.minimal_segmented_outs,
+        no_segmentation_secondary_analysis = PROCESS_SEGMENTATIONS.no_segmentation_secondary_analysis,
+        barcode_mappings       = OUTPUT_BARCODE_MAPPINGS.barcode_mappings,
+        nucleus_segmentation_graphclust_diffexp = GET_SEGMENTED_DIFFEXP_JSON.diffexp,
+        segmentation_metrics   = COMPUTE_SEGMENTATION_METRICS.segmentation_metrics,
     )
 }
 
 pipeline HD_WEBSUMMARY_BUILDER(
-    in  json      sd_web_summary_json,
-    in  map<json> bin_level_metrics,
-    in  map<path> analysis_h5,
-    in  map<json> saturation_plots,
-    in  h5        hd_feature_slice,
-    in  json      scalefactors,
-    in  png       tissue_hires_image,
-    in  int       dark_images,
-    out html      web_summary,
-    out jpg       websummary_tissue_image,
-    out float     websummary_tissue_image_scale,
+    in  json                    sd_web_summary_json,
+    in  map<json>               bin_level_metrics,
+    in  map<path>               analysis_h5,
+    in  map<json>               saturation_plots,
+    in  h5                      hd_feature_slice,
+    in  json                    scalefactors,
+    in  png                     tissue_hires_image,
+    in  json                    nucleus_segmentation_graphclust_diffexp,
+    in  int                     dark_images,
+    in  json                    segmentation_metrics,
+    in  MinimalSegmentedOutputs minimal_segmented_outs,
+    out html                    web_summary,
+    out jpg                     websummary_tissue_image,
+    out float                   websummary_tissue_image_scale,
 )
 {
     call PICK_SATURATION_PLOT(
@@ -489,9 +587,15 @@ pipeline HD_WEBSUMMARY_BUILDER(
         * = self,
     )
 
-    call BUILD_HD_END_TO_END_ALIGNMENT(
+    call BUILD_HD_END_TO_END_ALIGNMENT_INPUTS(
         hd_feature_slice_h5 = self.hd_feature_slice,
-        *                   = CREATE_HD_WEBSUMMARY_IMAGE,
+    )
+
+    call BUILD_HD_END_TO_END_ALIGNMENT(
+        primary_bin_mask       = BUILD_HD_END_TO_END_ALIGNMENT_INPUTS.primary_bin_mask,
+        primary_bin_total_umis = BUILD_HD_END_TO_END_ALIGNMENT_INPUTS.primary_bin_total_umis,
+        spot_colrow_to_tissue_image_colrow_transform = BUILD_HD_END_TO_END_ALIGNMENT_INPUTS.spot_colrow_to_tissue_image_colrow_transform,
+        *                      = CREATE_HD_WEBSUMMARY_IMAGE,
     )
 
     call BUILD_HD_CLUSTERING_PLOT(
@@ -501,12 +605,34 @@ pipeline HD_WEBSUMMARY_BUILDER(
         analysis_h5                   = self.analysis_h5,
     )
 
+    call SEGMENTATION_ANALYSIS_PLOTS(
+        analysis                     = self.minimal_segmented_outs.analysis,
+        filtered_feature_cell_matrix = self.minimal_segmented_outs.filtered_feature_cell_matrix_h5,
+        hd_feature_slice             = self.hd_feature_slice,
+        cell_segmentations           = self.minimal_segmented_outs.cell_segmentations,
+    )
+
+    call SEGMENTATION_SPATIAL_PLOTS(
+        analysis_csv       = self.minimal_segmented_outs.analysis_csv,
+        hd_feature_slice   = self.hd_feature_slice,
+        cell_segmentations = self.minimal_segmented_outs.cell_segmentations,
+        tissue_hires_image = self.tissue_hires_image,
+        scale_factors_json = self.scalefactors,
+    )
+
     call GENERATE_HD_WEBSUMMARY_CS(
-        sd_web_summary_json       = self.sd_web_summary_json,
-        end_to_end_alignment_data = BUILD_HD_END_TO_END_ALIGNMENT.end_to_end_alignment_data,
-        bin_level_metrics         = self.bin_level_metrics,
-        cluster_plot              = BUILD_HD_CLUSTERING_PLOT.cluster_plot,
-        saturation_plots          = PICK_SATURATION_PLOT.saturation_plots_picked,
+        sd_web_summary_json        = self.sd_web_summary_json,
+        end_to_end_alignment_data  = BUILD_HD_END_TO_END_ALIGNMENT.end_to_end_alignment_data,
+        bin_level_metrics          = self.bin_level_metrics,
+        cluster_plot               = BUILD_HD_CLUSTERING_PLOT.cluster_plot,
+        saturation_plots           = PICK_SATURATION_PLOT.saturation_plots_picked,
+        nucleus_segmentation_graphclust_diffexp = self.nucleus_segmentation_graphclust_diffexp,
+        segmentation_metrics       = self.segmentation_metrics,
+        cell_area_chart            = SEGMENTATION_ANALYSIS_PLOTS.cell_area_chart,
+        features_per_bc_chart      = SEGMENTATION_ANALYSIS_PLOTS.features_per_bc_chart,
+        counts_per_bc_chart        = SEGMENTATION_ANALYSIS_PLOTS.counts_per_bc_chart,
+        segmentation_umap_chart    = SEGMENTATION_ANALYSIS_PLOTS.segmentation_umap_chart,
+        spatial_segmentation_chart = SEGMENTATION_SPATIAL_PLOTS.spatial_segmentation_chart,
     )
 
     return (
@@ -517,72 +643,94 @@ pipeline HD_WEBSUMMARY_BUILDER(
 }
 
 pipeline BIN_HD_DATA(
-    in  string               visium_hd_slide_name,
-    in  json                 hd_layout_data_json,
-    in  csf[]                counts_bc_order,
-    in  map<ChemistryDef>    chemistry_defs,
-    in  string               sample_id,
-    in  string               sample_desc,
-    in  frf.bincode          slfe_feature_reference,
-    in  json                 barcodes_under_tissue,
-    in  bool                 no_secondary_analysis,
-    in  file[]               tissue_image_paths,
-    in  int                  dark_images,
-    in  txt                  fiducial_positions_list,
-    in  json                 dzi_info,
+    in  string                  visium_hd_slide_name,
+    in  json                    hd_layout_data_json,
+    in  csf[]                   counts_bc_order,
+    in  map<ChemistryDef>       chemistry_defs,
+    in  string                  sample_id,
+    in  string                  sample_desc,
+    in  frf.bincode             slfe_feature_reference,
+    in  json                    barcodes_under_tissue,
+    in  bool                    no_secondary_analysis,
+    in  file[]                  tissue_image_paths,
+    in  int                     dark_images,
+    in  txt                     fiducial_positions_list,
+    in  json                    dzi_info,
+    in  bool                    disable_segmentation_in,
+    in  geojson                 pipeline_generated_segmentations,
+    in  SegmentationInputs      segmentation_inputs,
     # NOTE: scales are a multiple of the pitch
-    in  int[]                scales,
-    in  path[]               dzi_tiles_paths,
-    in  json                 scalefactors,
-    in  string[]             image_page_names,
-    in  h5                   filtered_matrix_h5,
-    in  h5                   raw_matrix_h5,
-    in  h5                   barcode_summary_h5,
-    in  h5                   molecule_info,
-    in  json                 tissue_registration_transform,
-    in  json                 fiducial_transform,
-    in  tiff                 cytassist_image,
-    in  tiff                 registration_target_image,
-    in  UmiRegOutsSubset     umi_registration_outs,
-    in  SpatialFolder        spatial,
-    in  int                  custom_bin_size,
-    in  json                 metrics_json,
-    in  h5                   raw_probe_bc_matrix_base_bin,
-    in  bool                 is_pd,
-    in  bi.bincode           barcode_index,
-    out map<BinnedOutputs>   binned_outputs,
-    out bool                 disable_binning,
-    out map<int>             binning_scales,
-    out map<BinLevelInfo>    bin_infos,
-    out json                 summary,
-    out h5                   hd_feature_slice_h5,
-    out PROCESS_HD_ALIGNMENT alignment_qc_outs,
-    out map<json>            bin_level_metrics,
+    in  int[]                   scales,
+    in  path[]                  dzi_tiles_paths,
+    in  json                    scalefactors,
+    in  string[]                image_page_names,
+    in  h5                      filtered_matrix_h5,
+    in  h5                      raw_matrix_h5,
+    in  h5                      barcode_summary_h5,
+    in  h5                      molecule_info,
+    in  json                    tissue_registration_transform,
+    in  json                    fiducial_transform,
+    in  tiff                    cytassist_image,
+    in  tiff                    registration_target_image,
+    in  UmiRegOutsSubset        umi_registration_outs,
+    in  SpatialFolder           spatial,
+    in  int                     custom_bin_size,
+    in  json                    metrics_json,
+    in  json                    tissue_image_shape,
+    in  h5                      raw_probe_bc_matrix_base_bin,
+    in  bool                    is_pd,
+    in  bi.bincode              barcode_index,
+    in  int                     max_nucleus_diameter_px,
+    out map<BinnedOutputs>      binned_outputs,
+    out bool                    disable_binning,
+    out map<int>                binning_scales,
+    out map<BinLevelInfo>       bin_infos,
+    out json                    summary,
+    out h5                      hd_feature_slice_h5,
+    out PROCESS_HD_ALIGNMENT    alignment_qc_outs,
+    out map<json>               bin_level_metrics,
+    out bool                    no_segmentation_secondary_analysis,
+    out MinimalSegmentedOutputs minimal_segmented_outs,
+    out json                    nucleus_segmentation_graphclust_diffexp,
+    out json                    segmentation_metrics,
+    out parquet                 barcode_mappings,
 )
 {
     call SETUP_BINNING(
-        slide_name            = self.visium_hd_slide_name,
-        no_secondary_analysis = self.no_secondary_analysis,
+        slide_name              = self.visium_hd_slide_name,
+        no_secondary_analysis   = self.no_secondary_analysis,
         # NOTE: scales are a multiple of the pitch
-        scales                = self.scales,
-        custom_bin_size       = self.custom_bin_size,
+        scales                  = self.scales,
+        custom_bin_size         = self.custom_bin_size,
+        disable_segmentation_in = self.disable_segmentation_in,
     )
 
     call _BIN_HD_DATA(
-        bin_infos = SETUP_BINNING.bin_infos,
-        *         = self,
+        bin_infos            = SETUP_BINNING.bin_infos,
+        disable_segmentation = SETUP_BINNING.disable_segmentation,
+        *                    = self,
     ) using (
         disabled = SETUP_BINNING.disable_binning,
     )
 
+    call CONSOLIDATE_DISABLE_CELL_SEGMENTATION(
+        disable_downstream_segmentation_processing_in = _BIN_HD_DATA.no_segmentation_secondary_analysis,
+        no_secondary_analysis_in = self.no_secondary_analysis,
+    )
+
     return (
-        binned_outputs      = _BIN_HD_DATA.binned_outputs,
-        disable_binning     = SETUP_BINNING.disable_binning,
-        binning_scales      = SETUP_BINNING.bin_infos.scale,
-        bin_infos           = SETUP_BINNING.bin_infos,
-        summary             = _BIN_HD_DATA.summary,
-        hd_feature_slice_h5 = _BIN_HD_DATA.hd_feature_slice_h5,
-        alignment_qc_outs   = _BIN_HD_DATA.alignment_qc_outs,
-        bin_level_metrics   = _BIN_HD_DATA.bin_level_metrics,
+        binned_outputs         = _BIN_HD_DATA.binned_outputs,
+        disable_binning        = SETUP_BINNING.disable_binning,
+        binning_scales         = SETUP_BINNING.bin_infos.scale,
+        bin_infos              = SETUP_BINNING.bin_infos,
+        summary                = _BIN_HD_DATA.summary,
+        hd_feature_slice_h5    = _BIN_HD_DATA.hd_feature_slice_h5,
+        alignment_qc_outs      = _BIN_HD_DATA.alignment_qc_outs,
+        bin_level_metrics      = _BIN_HD_DATA.bin_level_metrics,
+        minimal_segmented_outs = _BIN_HD_DATA.minimal_segmented_outs,
+        no_segmentation_secondary_analysis = CONSOLIDATE_DISABLE_CELL_SEGMENTATION.no_secondary_analysis,
+        barcode_mappings       = _BIN_HD_DATA.barcode_mappings,
+        nucleus_segmentation_graphclust_diffexp = _BIN_HD_DATA.nucleus_segmentation_graphclust_diffexp,
+        segmentation_metrics   = _BIN_HD_DATA.segmentation_metrics,
     )
 }

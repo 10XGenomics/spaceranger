@@ -50,7 +50,6 @@ def run_preflight_checks(args):
     """Run checks appropriate for a submission host in a cluster environment."""
     # don't parse files or check executables in the local preflight
     full_check = False
-    feature_reference = None
 
     cr_preflight.check_sample_info(args.sample_def, args.reference_path, full_check)
     cr_preflight.check_common_preflights(
@@ -84,7 +83,7 @@ def run_preflight_checks(args):
     cr_preflight.check_targeting_preflights(
         args.target_set,
         args.reference_path,
-        feature_reference,
+        args.feature_reference,
         parse_files=full_check,
         expected_targeting_method=args.targeting_method,
         is_spatial=True,

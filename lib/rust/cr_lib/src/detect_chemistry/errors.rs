@@ -1,3 +1,4 @@
+#![deny(missing_docs)]
 use super::chemistry_filter::DetectChemistryUnit;
 use super::length_filter::{LengthStats, WHICH_LEN_READS};
 use super::mapping_filter::MappingStats;
@@ -72,7 +73,7 @@ impl fmt::Display for DetectChemistryErrors {
                 min_reads,
                 unit,
             } => format!(
-                "There were not enough reads to auto detect the chemistry: {unit}\n\
+                "TXRNGR10001: There were not enough reads to auto detect the chemistry: {unit}\n\
                  Note that you can avoid auto detection by specifying the specific chemistry type \
                  and version.\n\
                  - Minimum number of required reads = {min_reads}\n\
@@ -130,7 +131,7 @@ impl fmt::Display for DetectChemistryErrors {
                         .map(|(k, v)| format!("- {:.1}% for chemistry {k}", 100.0 * v))
                         .format("\n");
                     format!(
-                        "An extremely low rate of correct barcodes was observed for \
+                        "TXRNGR10002: An extremely low rate of correct barcodes was observed for \
                          all the candidate chemistry choices for the input: {unit}. \
                          Please check your input data.\n{frac_matches_str}"
                     )
@@ -151,7 +152,7 @@ impl fmt::Display for DetectChemistryErrors {
                     .format("\n -")
             ),
             NotEnoughMapping { stats, unit, chems } => format!(
-                "Unable to distinguish between [{}] chemistries based on the R2 read \
+                "TXRNGR10003: Unable to distinguish between [{}] chemistries based on the R2 read \
                  mapping for {unit}.\n{stats}\n\n{}\n\nPlease validate the inputs and/or specify \
                  the chemistry via the --chemistry argument.",
                 chems.iter().sorted().format(", "),
@@ -163,7 +164,7 @@ impl fmt::Display for DetectChemistryErrors {
                 chems,
                 max_lengths,
             } => format!(
-                "The read lengths are incompatible with all the chemistries for {unit}.\n\
+                "TXRNGR10004: The read lengths are incompatible with all the chemistries for {unit}.\n\
                  {stats}\n\
                  The minimum read length for different chemistries are:\n{}\n\n\
                  We expect that at least 50% of the reads exceed the minimum length.\n{}",
@@ -198,7 +199,7 @@ impl fmt::Display for DetectChemistryErrors {
                 min_lengths,
                 max_lengths,
             } => format!(
-                "The read lengths are incompatible with all features described in the \
+                "TXRNGR10005: The read lengths are incompatible with all features described in the \
                  feature reference for {unit}.\n{stats}\n\
                  The minimum read length for different feature types are:\n{}\n\n\
                  We expect that at least 50% of the reads exceed the minimum length.\n{}",
@@ -206,11 +207,15 @@ impl fmt::Display for DetectChemistryErrors {
                     .iter()
                     .sorted_by_key(|&(feature_type, _min_lengths)| feature_type)
                     .flat_map(|(feature_type, min_lengths)| {
-                        min_lengths.iter()
+                        min_lengths
+                            .iter()
                             .sorted_by_key(|&(&which_read, _)| which_read as usize)
-                            .map(move |(which_read, length)|
-                                format!("{:26} - {length}", format!("{feature_type}/{which_read}"))
-                            )
+                            .map(move |(which_read, length)| {
+                                format!(
+                                    "{:26} - {length}",
+                                    format!("{}/{which_read}", feature_type.as_str())
+                                )
+                            })
                     })
                     .format("\n"),
                 if max_lengths.is_empty() {
@@ -226,13 +231,15 @@ impl fmt::Display for DetectChemistryErrors {
                 },
             ),
             FeatureTypeNotInReference { feature_type } => format!(
-                "Reads with feature type {feature_type} were observed, but this feature type is not described anywhere in the provided feature reference."
+                "Reads with feature type {} were observed, but this feature type is not described \
+                 anywhere in the provided feature reference.",
+                feature_type.as_str()
             ),
             ProbeBarcodeMixture { mixture, unit } => format!(
                 "We detected multiple probe barcodes in: {}\n\
-                Singleplex Fixed RNA Profiling chemistry is invalid with >1 probe barcode. \
-                If this is a multiplex Fixed RNA Profiling library please include a [samples] section defining the inputs.\n\
-                The following top probe barcodes were observed: {}.\n",
+                 Singleplex Flex chemistry is invalid with >1 probe barcode. If this is a \
+                 multiplex Flex library please include a [samples] section defining the inputs.\n\
+                 The following top probe barcodes were observed: {}.\n",
                 unit,
                 mixture.iter().sorted().format(", ")
             ),

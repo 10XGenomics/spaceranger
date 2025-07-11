@@ -1,4 +1,5 @@
 // Read a molecule info file and compute usable reads per each library it contains
+#![deny(missing_docs)]
 use cr_h5::molecule_info::{MoleculeInfoIterator, MoleculeInfoReader};
 use ndarray::Axis;
 use pyo3::prelude::*;

@@ -1,4 +1,5 @@
 //! Martian stage COMPUTE_BIN_METRICS
+#![allow(missing_docs)]
 
 use barcode::binned::SquareBinIndex;
 use cr_h5::count_matrix::{CountMatrix, CountMatrixFile, RawCount};
@@ -42,6 +43,10 @@ pub struct BinMetrics {
     pub bins_under_tissue_frac: f64,
     pub mean_reads_per_bin: f64,
     pub mean_umis_per_bin: f64,
+    pub umis_per_um_sq_tissue: f64,
+    pub read_per_um_sq_tissue: f64,
+    pub umis_per_mm_sq_tissue: f64,
+    pub read_per_mm_sq_tissue: f64,
     pub median_umis_per_bin: f64,
     pub max_umis_per_bin: f64,
     pub min_umis_per_bin: f64,
@@ -57,10 +62,10 @@ fn mean_reads_under_tissue_per_bin(
     bin_scale: usize,
 ) -> Result<f64, Error> {
     let read_slice = feat_slice.load_total_reads(bin_scale)?;
-    let mut total_reads_under_tissue = 0;
+    let mut total_reads_under_tissue = 0u64;
     for barcode in filt_matrix.barcodes() {
         let barcode = SquareBinIndex::from_bytes(barcode.as_bytes())?;
-        total_reads_under_tissue += read_slice[[barcode.row, barcode.col]];
+        total_reads_under_tissue += read_slice[[barcode.row, barcode.col]] as u64;
     }
     Ok(PercentMetric::from((
         total_reads_under_tissue as i64,
@@ -118,6 +123,9 @@ impl MartianStage for ComputeBinMetrics {
         );
         let feat_slice = FeatureSliceH5::open(&args.hd_feature_slice)?;
         let slide = feat_slice.slide()?;
+        let spot_pitch = slide.spot_pitch_u32();
+        let bin_area_um_sq = (args.bin_scale * spot_pitch as usize).pow(2) as f64;
+        let bin_area_mm_sq = bin_area_um_sq / 1_000_000.;
 
         let mut umis_per_bc = vec![0.0f64; matrix.num_barcodes()];
         let mut genes_per_bc = vec![0.0f64; matrix.num_barcodes()];
@@ -135,6 +143,8 @@ impl MartianStage for ComputeBinMetrics {
         }
         let umis_per_bc = Data::new(umis_per_bc);
         let genes_per_bc = Data::new(genes_per_bc);
+        let mean_reads_under_tissue_per_bin =
+            mean_reads_under_tissue_per_bin(&matrix, &feat_slice, args.bin_scale)?;
         let metrics = BinMetrics {
             bin_scale: args.bin_scale as i64,
             bin_size_um: slide.spot_pitch() as i64 * args.bin_scale as i64,
@@ -148,17 +158,17 @@ impl MartianStage for ComputeBinMetrics {
             mean_reads_per_bin: args.metrics_json.read()?.total_read_pairs as f64
                 / matrix.num_barcodes() as f64,
             mean_umis_per_bin: umis_per_bc.mean().unwrap_or(0.0),
+            umis_per_mm_sq_tissue: umis_per_bc.mean().unwrap_or(0.0) / bin_area_mm_sq,
+            umis_per_um_sq_tissue: umis_per_bc.mean().unwrap_or(0.0) / bin_area_um_sq,
             median_umis_per_bin: umis_per_bc.median(),
             max_umis_per_bin: umis_per_bc.max(),
             min_umis_per_bin: umis_per_bc.min(),
             median_genes_per_bin: genes_per_bc.median(),
             mean_genes_per_bin: genes_per_bc.mean().unwrap_or(0.0),
             total_genes_detected_under_tissue: genes_detected.len() as i64,
-            mean_reads_under_tissue_per_bin: mean_reads_under_tissue_per_bin(
-                &matrix,
-                &feat_slice,
-                args.bin_scale,
-            )?,
+            mean_reads_under_tissue_per_bin,
+            read_per_mm_sq_tissue: mean_reads_under_tissue_per_bin / bin_area_mm_sq,
+            read_per_um_sq_tissue: mean_reads_under_tissue_per_bin / bin_area_um_sq,
         };
         let summary: JsonFile<BinMetrics> = rover.make_path("summary");
         summary.write(&metrics)?;

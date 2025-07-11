@@ -1,6 +1,7 @@
 //! Martian stage MERGE_GEM_WELL_FILES
 //! Take in lists of matrix computer intermediary files for each GEM well
 //! Merge each into a single list for multi-GEM well
+#![allow(missing_docs)]
 
 use crate::types::{BarcodeMetricsShardFile, FeatureReferenceFormat};
 use crate::utils::hard_link_martianfile;

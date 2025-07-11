@@ -1,5 +1,6 @@
 // Stage to quickly get the counts of UMIs and Reads per Barcode for valid
 // cell barcodes for a given feature type (e.g. AB, CMO, GEX), etc.
+#![deny(missing_docs)]
 //use strum_macros::EnumString;
 use cr_h5::molecule_info::{
     BarcodeIdxType, FullUmiCount, LibraryIdxType, MoleculeInfoIterator, MoleculeInfoReader,

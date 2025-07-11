@@ -1,16 +1,17 @@
 //! AsmMetrics stage code
+#![allow(missing_docs)]
 
 use crate::assembly::{BarcodeDataFile, VdjPrimers};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use cr_types::chemistry::ChemistryDef;
 use cr_types::MetricsFile;
-use io_utils::read_to_string_safe;
 use martian::prelude::*;
 use martian_derive::{make_mro, martian_filetype, MartianStruct};
 use martian_filetypes::json_file::JsonFile;
 use martian_filetypes::{FileTypeRead, LazyFileTypeIO};
 use metric::JsonReporter;
 use serde::{Deserialize, Serialize};
+use std::fs::read_to_string;
 use std::path::PathBuf;
 use vdj_ann::refx::{make_vdj_ref_data_core, RefData};
 use vdj_asm_utils::barcode_data::{metrics_json, BarcodeData, BarcodeDataSum};
@@ -24,7 +25,7 @@ pub struct AsmMetricsStageInputs {
     pub vdj_reference_path: Option<PathBuf>,
     pub receptor: Option<VdjReceptor>,
     pub inner_enrichment_primers: Option<PathBuf>,
-    pub total_read_pairs: i64,
+    pub total_read_pairs: Option<i64>,
     pub barcode_full: BarcodeDataFile,
 }
 
@@ -37,7 +38,7 @@ pub struct AsmMetricsStageOutputs {
 // This is our stage struct
 pub struct AsmMetrics;
 
-#[make_mro(mem_gb = 6)]
+#[make_mro(mem_gb = 8)]
 impl MartianMain for AsmMetrics {
     type StageInputs = AsmMetricsStageInputs;
     type StageOutputs = AsmMetricsStageOutputs;
@@ -48,7 +49,9 @@ impl MartianMain for AsmMetrics {
         let is_bcr = args.receptor == Some(VdjReceptor::IG);
         let mut refdata = RefData::new();
         if let Some(ref ref_path) = args.vdj_reference_path {
-            let fasta = read_to_string_safe(format!("{}/fasta/regions.fa", ref_path.display()));
+            let fasta_path = ref_path.join("fasta/regions.fa");
+            let fasta = read_to_string(&fasta_path)
+                .with_context(|| fasta_path.to_string_lossy().to_string())?;
             make_vdj_ref_data_core(&mut refdata, &fasta, "", is_tcr, is_bcr, None);
         };
         let primers = VdjPrimers::new(
@@ -70,7 +73,7 @@ impl MartianMain for AsmMetrics {
             &refdata,
             &primers.inner_primers,
             &primers.outer_primers,
-            args.total_read_pairs.try_into().unwrap(),
+            args.total_read_pairs,
             &mut report,
         );
         let reference_reporter = if let Some(ref_path) = args.vdj_reference_path {

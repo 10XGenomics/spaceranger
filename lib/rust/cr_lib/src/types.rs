@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use crate::probe_barcode_matrix::ProbeCounts;
 use crate::utils::hard_link_martianfile;
 use anyhow::Error;
@@ -6,13 +7,13 @@ use cr_h5::count_matrix::CountMatrixFile;
 use cr_types::reference::feature_reference::FeatureReference;
 use cr_types::rna_read::RnaRead;
 use cr_types::{LibraryType, SampleAssignment};
-use cr_websummary::multi::tables::SequencingMetricsTable;
+use json_report_derive::JsonReport;
 use martian::MartianRover;
 use martian_derive::{martian_filetype, MartianStruct, MartianType};
 use martian_filetypes::bin_file::BinaryFormat;
 use martian_filetypes::json_file::JsonFormat;
 use martian_filetypes::tabular_file::CsvFile;
-use metric::TxHashMap;
+use metric::{PercentMetric, TxHashMap};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tx_annotation::read::ReadAnnotations;
@@ -29,13 +30,13 @@ pub struct AggregateBarcode {
     #[serde(with = "barcode_string")]
     pub(crate) barcode: Barcode,
     pub(crate) library_type: LibraryType,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     umis: u64,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     umi_corrected_reads: u64,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     frac_corrected_reads: f64,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     frac_total_reads: f64,
     pub(crate) frac_sample_reads: f64,
 }
@@ -78,14 +79,28 @@ impl GexMatrices {
     }
 }
 
-impl From<SampleMatrices> for GexMatrices {
-    fn from(value: SampleMatrices) -> Self {
+impl GexMatrices {
+    pub fn from_sample_matrices(value: SampleMatrices, read_level_multiplexing: bool) -> Self {
         GexMatrices {
             filtered_matrix_h5: Some(value.filtered_matrix_h5),
-            raw_matrix_h5: Some(value.raw_matrix_h5),
+            raw_matrix_h5: read_level_multiplexing.then_some(value.raw_matrix_h5),
             filtered_barcodes: Some(value.filtered_barcodes),
         }
     }
+}
+
+/// Sequencing metrics for a specific FASTQ ID.
+#[derive(Clone, Serialize, Deserialize, JsonReport)]
+pub struct SequencingMetrics {
+    pub fastq_id: String,
+    pub number_of_reads: usize,
+    pub unprocessed_reads: usize,
+    pub q30_barcode: PercentMetric,
+    pub q30_gem_barcode: Option<PercentMetric>,
+    pub q30_probe_barcode: Option<PercentMetric>,
+    pub q30_umi: PercentMetric,
+    pub q30_read1: PercentMetric,
+    pub q30_read2: Option<PercentMetric>,
 }
 
 // Shardio file containing BcUmiInfo records, sorted by barcode
@@ -117,8 +132,11 @@ martian_filetype!(BcListFile, "bcl");
 martian_filetype!(_FeatureReferenceFile, "frf");
 pub type FeatureReferenceFormat = BinaryFormat<_FeatureReferenceFile, FeatureReference>;
 
+pub type PerLibrarySequencingMetrics = TxHashMap<LibraryType, Vec<SequencingMetrics>>;
+
 martian_filetype!(_SequencingMetricsFile, "smf");
-pub type SequencingMetricsFormat =
-    JsonFormat<_SequencingMetricsFile, TxHashMap<LibraryType, SequencingMetricsTable>>;
+pub type SequencingMetricsFormat = JsonFormat<_SequencingMetricsFile, PerLibrarySequencingMetrics>;
 
 martian_filetype!(SvgFile, "svg");
+
+martian_filetype! {HtmlFile, "html"}

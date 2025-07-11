@@ -17,7 +17,6 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import PIL
-import skimage.measure as measure
 import skimage.morphology as morphology
 
 import cellranger.constants as cr_constants
@@ -27,7 +26,9 @@ from cellranger.spatial.loupe_util import LoupeParser
 from cellranger.spatial.pipeline_mode import PipelineMode
 
 if TYPE_CHECKING:
-    from typing_extensions import Self
+    from typing import Self
+
+    from cellranger.spatial.slide_design_o3 import VisiumHdSlideWrapper
 
 __MRO__ = """
 stage DETECT_TISSUE(
@@ -43,6 +44,7 @@ stage DETECT_TISSUE(
     out jpg          detected_tissue_mask,
     out jpg          initialisation_debug,
     out png          grabcut_markers,
+    out bool         grabcut_failed,
     src py           "stages/spatial/detect_tissue",
 ) split (
 ) using (
@@ -64,6 +66,7 @@ class SpotDataMemo:
     oligo_dia: float
     oligo_preselected: bool
     tissue_oligos_flag: np.ndarray[bool, np.dtype[np.bool_]]
+    visium_hd_slide: VisiumHdSlideWrapper | None
 
     @classmethod
     def from_loupe_parser(cls, spots_data: LoupeParser) -> Self:
@@ -84,12 +87,13 @@ class SpotDataMemo:
             oligo_dia=oligo_dia,
             oligo_preselected=oligo_preselected,
             tissue_oligos_flag=tissue_oligos_flag,
+            visium_hd_slide=spots_data.hd_slide if spots_data.has_hd_slide() else None,
         )
 
 
 def split(args):
     mem_gb = max(
-        4.0, 1.0 + LoupeParser.estimate_mem_gb_from_json_file(args.registered_spots_data_json)
+        6.0, 1.0 + LoupeParser.estimate_mem_gb_from_json_file(args.registered_spots_data_json)
     )
     return {
         "chunks": [],
@@ -104,7 +108,6 @@ def join(args, outs, _chunk_defs, _chunk_outs):  # pylint: disable=too-many-loca
     pipeline_mode = PipelineMode(**args.pipeline_mode)
     cv2.setNumThreads(martian.get_threads_allocation())
     tissue_seg_img = image_util.cv_read_image_standard(args.tissue_detection_grayscale_image)
-    tissue_detection_metrics = {}
 
     spots_data = LoupeParser(args.registered_spots_data_json)
 
@@ -112,6 +115,7 @@ def join(args, outs, _chunk_defs, _chunk_outs):  # pylint: disable=too-many-loca
         spots_data.set_all_tissue_oligos(True)
     elif args.ignore_loupe_tissue_detection:
         spots_data.set_all_tissue_oligos(False)
+    outs.grabcut_failed = False
 
     spot_data_memo = SpotDataMemo.from_loupe_parser(spots_data)
     bounding_box = tissue_detection.get_bounding_box(
@@ -120,7 +124,7 @@ def join(args, outs, _chunk_defs, _chunk_outs):  # pylint: disable=too-many-loca
 
     # Test if the run is a HD run or an SD run with cytassist requesting new tissue det
     use_cytassist_image_processing = (
-        pipeline_mode.is_visium_hd_with_fiducials() or pipeline_mode.is_cytassist()
+        pipeline_mode.is_hd_with_fiducials() or pipeline_mode.is_cytassist()
     )
 
     if not args.ignore_loupe_tissue_detection and spot_data_memo.oligo_preselected:
@@ -138,7 +142,7 @@ def join(args, outs, _chunk_defs, _chunk_outs):  # pylint: disable=too-many-loca
                     args.tissue_detection_saturation_image, cv2.IMREAD_GRAYSCALE
                 )
 
-            mask, qc_fig, init_qc, gc_markers = tissue_detection.get_mask_v2(
+            mask, qc_fig, init_qc, gc_markers, outs.grabcut_failed = tissue_detection.get_mask_v2(
                 clahe_tissue_seg_img,
                 saturation_channel=tissue_sat_img,
                 bounding_box=bounding_box,
@@ -146,7 +150,7 @@ def join(args, outs, _chunk_defs, _chunk_outs):  # pylint: disable=too-many-loca
                 use_full_fov=True,
             )
         else:
-            mask, qc_fig, init_qc, gc_markers = tissue_detection.get_mask(
+            mask, qc_fig, init_qc, gc_markers, outs.grabcut_failed = tissue_detection.get_mask(
                 tissue_seg_img,
                 bounding_box=bounding_box,
                 plot=True,
@@ -154,17 +158,6 @@ def join(args, outs, _chunk_defs, _chunk_outs):  # pylint: disable=too-many-loca
 
         binary_mask = mask > 0
         cv2.imwrite(outs.detected_tissue_mask, np.where(binary_mask, 255, 0))
-
-        if binary_mask.sum():
-            metrics_computed = measure.regionprops_table(
-                binary_mask.astype(np.uint8), properties=["area", "perimeter"]
-            )
-            tissue_detection_metrics["tissue_mask_area_in_um_squared"] = metrics_computed[
-                "area"
-            ].item() * (image_util.CYT_IMG_PIXEL_SIZE**2)
-            tissue_detection_metrics["tissue_mask_perimeter_in_um"] = (
-                metrics_computed["perimeter"].item() * image_util.CYT_IMG_PIXEL_SIZE
-            )
 
         cv2.imwrite(outs.grabcut_markers, gc_markers)
         if init_qc is not None:
@@ -174,7 +167,7 @@ def join(args, outs, _chunk_defs, _chunk_outs):  # pylint: disable=too-many-loca
             outs.initialisation_debug = None
 
         # Test if the run is an SD run requesting new tissue det
-        if not pipeline_mode.is_visium_hd_with_fiducials() and use_cytassist_image_processing:
+        if not pipeline_mode.is_hd_with_fiducials() and use_cytassist_image_processing:
             mask = morphology.isotropic_dilation(
                 mask,
                 radius=int(np.ceil(spot_data_memo.oligo_dia / 2)),
@@ -201,23 +194,26 @@ def join(args, outs, _chunk_defs, _chunk_outs):  # pylint: disable=too-many-loca
     # may or may not have been modified from what was loaded
     spots_data.save_to_json(outs.registered_selected_spots_json)
 
-    if tissue_detection_metrics:
-        json_path = martian.make_path(outs.tissue_mask_metrics)
-        with open(json_path, "w") as json_out:
-            json.dump(tissue_detection_metrics, json_out)
-    else:
-        outs.tissue_mask_metrics = None
-
     if np.sum(spot_data_memo.tissue_oligos_flag.astype(int)) == 0:
         martian.exit(
             "No tissue is detected on the spots by automatic alignment. Please use manual alignment."
         )
 
-    if pipeline_mode.is_visium_hd():
+    tissue_detection_metrics = {"grabcut_failed": outs.grabcut_failed}
+    if pipeline_mode.is_hd():
         write_qc_figures_hd(
             qc_fig,
             spot_data_memo,
             outs.qc_detected_tissue_image,
+        )
+        if not spot_data_memo.visium_hd_slide:
+            raise ValueError(
+                "Pipeline mode is visium HD, but loupe file does not have visium HD slide."
+            )
+        tissue_detection_metrics[
+            "tissue_mask_area_in_um_squared"
+        ] = spot_data_memo.tissue_oligos_flag.sum() * (
+            spot_data_memo.visium_hd_slide.spot_size() ** 2
         )
     else:
         write_qc_figures(
@@ -228,6 +224,13 @@ def join(args, outs, _chunk_defs, _chunk_outs):  # pylint: disable=too-many-loca
             spots_alpha=alpha_tissue_spots,
             tissue_color=cr_constants.TISSUE_COLOR,
         )
+        tissue_detection_metrics["tissue_mask_area_in_um_squared"] = (
+            spot_data_memo.tissue_oligos_flag.sum() * image_util.SD_SPOT_TISSUE_AREA_UM2
+        )
+
+    json_path = martian.make_path(outs.tissue_mask_metrics)
+    with open(json_path, "w") as json_out:
+        json.dump(tissue_detection_metrics, json_out)
 
 
 def write_qc_figures_hd(

@@ -1,6 +1,9 @@
+#![allow(missing_docs)]
 use crate::feature_reference_io::encode_ascii_xml;
 use anyhow::{Context, Result};
 use cr_types::probe_set::{Probe, ProbeRegion, ProbeType};
+use cr_types::reference::feature_reference::get_genome_from_feature_id;
+use cr_types::GenomeName;
 use hdf5::types::FixedAscii;
 use hdf5::Group;
 use std::boxed::Box;
@@ -63,7 +66,7 @@ pub fn to_h5(probes: &[Probe], filtered_probes: &[bool], group: &mut Group) -> R
     Ok(())
 }
 
-pub fn from_h5(group: &Group) -> Result<Vec<Probe>> {
+pub fn from_h5(group: &Group, genomes: Vec<GenomeName>) -> Result<Vec<Probe>> {
     //region is only optionally present
     let ds = group.dataset(PROBE_REGION);
     let mut regions: Box<dyn Iterator<Item = Option<ProbeRegion>>> = if ds.is_ok() {
@@ -91,14 +94,18 @@ pub fn from_h5(group: &Group) -> Result<Vec<Probe>> {
     let mut ref_sequence_positions = read_str_col(group, PROBE_REF_POS)?;
     let mut cigar_strings = read_str_col(group, PROBE_CIGAR)?;
 
+    let gene_id = gene_ids
+        .next()
+        .expect("Error while loading probeset from h5");
+    let genome = get_genome_from_feature_id(&gene_id, &genomes);
+
     let mut output = Vec::new();
     for probe_id in ids {
         let probe = Probe {
             probe_id,
+            probe_seq: String::new(),
             gene: Gene {
-                id: gene_ids
-                    .next()
-                    .expect("Error while loading probeset from h5"),
+                id: gene_id.clone(),
                 name: gene_names
                     .next()
                     .expect("Error while loading probeset from h5"),
@@ -112,6 +119,7 @@ pub fn from_h5(group: &Group) -> Result<Vec<Probe>> {
                 .map(|num| num.parse::<usize>().ok())
                 .unwrap(),
             cigar_string: cigar_strings.next().unwrap(),
+            genome: genome.clone(),
         };
         output.push(probe);
     }
@@ -169,7 +177,7 @@ fn read_str_col(group: &Group, name: &str) -> Result<Box<dyn Iterator<Item = Str
     if let Ok(ds) = group.dataset(name) {
         Ok(Box::new(
             ds.read_1d::<FixedAscii<PROBE_DATA_LEN>>()?
-                .map(std::string::ToString::to_string)
+                .map(ToString::to_string)
                 .into_iter(),
         ))
     } else {

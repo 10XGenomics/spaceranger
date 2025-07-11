@@ -610,7 +610,7 @@ def get_bcl2fastq_read_type_map(
             # index is I7-only, so this goes first
             if read_name == barcode_read:
                 reads_counted += 1
-                read_map[read_name] = "R%d" % reads_counted
+                read_map[read_name] = f"R{reads_counted}"
             # ignore I2 if ignore_dual_index specified
             elif ignore_dual_index:
                 continue
@@ -618,5 +618,5 @@ def get_bcl2fastq_read_type_map(
                 read_map[read_name] = "I2"
         else:
             reads_counted += 1
-            read_map[read_name] = "R%d" % reads_counted
+            read_map[read_name] = f"R{reads_counted}"
     return read_map

@@ -1,4 +1,5 @@
 //! MakeExactClonotypes stage code
+#![allow(missing_docs)]
 
 use anyhow::Result;
 use martian::prelude::*;
@@ -26,7 +27,6 @@ impl MartianMain for MakeExactClonotypes {
     type StageInputs = MakeExactClonotypesStageInputs;
     type StageOutputs = MakeExactClonotypesStageOutputs;
     fn main(&self, args: Self::StageInputs, rover: MartianRover) -> Result<Self::StageOutputs> {
-        // This returns groupings for all barcodes, including non-cells
         let exact_clonotypes = generate_exact_clonotypes(args.contig_annotations.clone())?;
         let exact_clonotypes_fn: JsonFile<_> = rover.make_path("exact_clonotypes");
         exact_clonotypes_fn.write(&exact_clonotypes)?;

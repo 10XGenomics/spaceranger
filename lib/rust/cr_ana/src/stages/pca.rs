@@ -1,4 +1,5 @@
 //! PCA stage code
+#![allow(missing_docs)]
 
 use crate::io::{csv, h5};
 use crate::pca::run_pca;
@@ -29,7 +30,7 @@ pub struct PcaStageInputs {
     pub num_pca_genes: Option<usize>,
     pub num_principal_comps: Option<usize>,
     pub is_spatial: bool,
-    pub pca_map: Option<HashMap<String, PcaOutputs>>,
+    pub pca_map: Option<HashMap<FeatureType, PcaOutputs>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, MartianStruct)]
@@ -69,7 +70,7 @@ impl MartianStage for PcaStage {
             .filter(|&(feature_type, count)| {
                 count >= 2
                     && !EXCLUDED_FEATURE_TYPES.contains(&feature_type)
-                    && !pca_map.contains_key(&feature_type.to_string())
+                    && !pca_map.contains_key(&feature_type)
             })
             .map(|(feature_type, _)| {
                 (
@@ -89,13 +90,13 @@ impl MartianStage for PcaStage {
         rayon::ThreadPoolBuilder::new()
             .num_threads(rover.get_threads())
             .build_global()?;
-        let retained = Some(chunk_args.feature_type.to_string());
+        let retained = Some(chunk_args.feature_type.as_str());
         let FBM {
             barcodes,
             feature_ids,
             matrix,
             ..
-        } = read_adaptive_csr_matrix(&args.matrix_h5, retained.as_deref(), Some(0))?.0;
+        } = read_adaptive_csr_matrix(&args.matrix_h5, retained, Some(0))?.0;
         let max_features = args.num_pca_genes.unwrap_or_else(|| matrix.rows());
         let num_pcs = args.num_principal_comps.unwrap_or(PCA_COMPONENTS);
         let result = run_pca(
@@ -109,8 +110,7 @@ impl MartianStage for PcaStage {
         )
         .or_else(|_| {
             log::warn!(
-                "PCA with threshold = {} failed, reattempting without threshold",
-                PCA_THRESHOLD
+                "PCA with threshold = {PCA_THRESHOLD} failed, reattempting without threshold"
             );
             run_pca(
                 &matrix,

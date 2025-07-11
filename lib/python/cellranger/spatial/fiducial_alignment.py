@@ -455,18 +455,8 @@ def register_visium_hd_fiducials(
     return trans_mat, metrics, overlap
 
 
-def isolate_perspective_transform(
-    design_fiducials: Iterable[FiducialDict],
-    detect_fiducials: Iterable[FiducialDict],
-    overlap,
-) -> np.ndarray:
-    """Given homography transform, approximately removes rotation and scaling components."""
-    detect_dict = {i["name"]: [i["x"], i["y"]] for i in detect_fiducials}
-    design_dict = {i["name"]: [i["x"], i["y"]] for i in design_fiducials}
-    detect_xy = np.array([detect_dict[key] for key in overlap])
-    design_xy = np.array([design_dict[key] for key in overlap])
-    h_inv, _ = cv2.findHomography(detect_xy, design_xy)
-
+def similarity_transform(detect_xy: np.ndarray, design_xy: np.ndarray):
+    """Convenience wrapper for fit_2d_similarity_transform."""
     # Returns the rcos(theta), rsin(theta), t_x, and t_y components of a similarity transform
     components = fit_2d_similarity_transform(
         np.asarray([xy[0] for xy in detect_xy]),
@@ -483,5 +473,37 @@ def isolate_perspective_transform(
     similarity_mat[1, 0] = components[1]
     similarity_mat[1, 1] = components[0]
     similarity_mat[1, 2] = components[3]
+
+    return similarity_mat
+
+
+def isolate_perspective_transform(
+    design_fiducials: Iterable[FiducialDict],
+    detect_fiducials: Iterable[FiducialDict],
+    overlap,
+) -> np.ndarray:
+    """Given homography transform, approximately removes rotation and scaling components."""
+    detect_dict = {i["name"]: [i["x"], i["y"]] for i in detect_fiducials}
+    design_dict = {i["name"]: [i["x"], i["y"]] for i in design_fiducials}
+    detect_xy = np.array([detect_dict[key] for key in overlap])
+    design_xy = np.array([design_dict[key] for key in overlap])
+    h_inv, _ = cv2.findHomography(detect_xy, design_xy)
+
+    similarity_mat = similarity_transform(detect_xy, design_xy)
+
+    # If registration error is very high, slide fiducial frame is likely printed flipped
+    # relative to the design file. 250 is a safe error beyond which we can assume
+    # registration has failed.
+    if np.percentile(registration_error(detect_xy, design_xy, similarity_mat), 95) > 250:
+        flip_transform = np.array(
+            [
+                [0.0, 1.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ]
+        )
+        detect_xy_flipped = transform_pts_2d(detect_xy, flip_transform)
+        similarity_mat = similarity_transform(detect_xy_flipped, design_xy)
+        similarity_mat = similarity_mat @ flip_transform
 
     return similarity_mat @ h_inv

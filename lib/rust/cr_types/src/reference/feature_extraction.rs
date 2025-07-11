@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use super::feature_reference::FeatureType;
 use crate::constants::ILLUMINA_QUAL_OFFSET;
 use crate::reference::feature_reference::{
@@ -11,7 +12,7 @@ use regex::{Regex, RegexSet};
 use serde::{Deserialize, Serialize};
 use std::cmp::{self, Reverse};
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::str;
 use std::string::String;
 use std::sync::Arc;
@@ -183,7 +184,6 @@ pub struct FeatureData {
 impl FeatureExtractor {
     pub fn new(
         feature_ref: Arc<FeatureReference>,
-        use_feature_types: Option<&HashSet<FeatureType>>,
         feature_dist: Option<Vec<f64>>,
     ) -> Result<FeatureExtractor> {
         let mut patterns: HashMap<(FeatureType, WhichRead, String), FeaturePattern> =
@@ -191,9 +191,7 @@ impl FeatureExtractor {
 
         let mut bare_patterns = HashMap::new();
         for fd in &feature_ref.feature_defs {
-            if fd.feature_type == FeatureType::Gene
-                || use_feature_types.is_some_and(|m| !m.contains(&fd.feature_type))
-            {
+            if fd.feature_type == FeatureType::Gene {
                 continue;
             }
 
@@ -349,7 +347,7 @@ impl FeatureExtractor {
         } else {
             bail!(
                 "Invalid sequence: '{}'. The only allowed characters are A, C, G, T, and N.",
-                std::str::from_utf8(seq)?
+                str::from_utf8(seq)?
             )
         }
     }
@@ -375,7 +373,7 @@ impl FeatureExtractor {
             let seq = read.read.get(which_read, ReadPart::Seq).unwrap();
             let qual = read.read.get(which_read, ReadPart::Qual).unwrap();
 
-            let s = std::str::from_utf8(seq).unwrap();
+            let s = str::from_utf8(seq).unwrap();
 
             // these are guaranteed to always be in ascending order of index
             for pat in regset.matches(s).iter().map(|i| &patterns[i]) {
@@ -481,7 +479,6 @@ pub fn library_type_requires_feature_ref(library_type: &str) -> bool {
 mod tests {
     use super::*;
     use crate::reference::feature_checker::compute_feature_dist;
-    use crate::reference::reference_info::ReferenceInfo;
     use crate::types::{FeatureBarcodeType, GenomeName, LibraryType};
     use arrayvec::ArrayVec;
     use barcode::BarcodeConstruct::GelBeadOnly;
@@ -491,7 +488,6 @@ mod tests {
     use fastq_set::Record;
     use std::fs::File;
     use std::io::{BufReader, Cursor, Write};
-    use transcriptome::Transcriptome;
     use umi::Umi;
 
     // helper function for checking corrections
@@ -506,7 +502,7 @@ mod tests {
             seq: &'a [u8],
             qual: &'a [u8],
         }
-        impl<'a> Record for Rec<'a> {
+        impl Record for Rec<'_> {
             fn seq(&self) -> &[u8] {
                 self.seq
             }
@@ -522,7 +518,7 @@ mod tests {
         }
         let read = RnaRead {
             read: ReadPair::new([Some(Rec { seq, qual }), Some(Rec { seq, qual }), None, None]),
-            barcode: SegmentedBarcode::gel_bead_only(0, b"A", NotChecked),
+            segmented_barcode: SegmentedBarcode::gel_bead_only(0, b"A", NotChecked),
             umi: Umi::new(b"A"),
             bc_range: GelBeadOnly(RpRange::new(WhichRead::R1, 0, None)),
             umi_parts: ArrayVec::new(),
@@ -538,22 +534,8 @@ mod tests {
     fn test_load_feature_ref() -> Result<()> {
         let fdf_path = "test/feature/citeseq.csv";
         let rdr = BufReader::new(File::open(fdf_path).unwrap());
-        let fref = FeatureReference::new(
-            &ReferenceInfo::default(),
-            &Transcriptome::dummy(),
-            Some(rdr),
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-        let _fextr = FeatureExtractor::new(
-            Arc::new(fref),
-            Some(&[FeatureType::Barcode(FeatureBarcodeType::Antibody)].into()),
-            None,
-        )
-        .unwrap();
+        let fref = FeatureReference::new(&[], None, Some(rdr), None, None, None, None).unwrap();
+        let _fextr = FeatureExtractor::new(Arc::new(fref), None).unwrap();
         Ok(())
     }
 
@@ -561,20 +543,8 @@ mod tests {
     fn test_bad_feature_ref() -> Result<()> {
         let fdf_path = "test/feature/CRISPR_lib.v5.500.csv";
         let rdr = BufReader::new(File::open(fdf_path)?);
-        let fref = FeatureReference::new(
-            &ReferenceInfo::default(),
-            &Transcriptome::dummy(),
-            Some(rdr),
-            None,
-            None,
-            None,
-            None,
-        )?;
-        let fextr = FeatureExtractor::new(
-            Arc::new(fref),
-            Some(&[FeatureType::Barcode(FeatureBarcodeType::Crispr)].into()),
-            None,
-        );
+        let fref = FeatureReference::new(&[], None, Some(rdr), None, None, None, None)?;
+        let fextr = FeatureExtractor::new(Arc::new(fref), None);
         match fextr {
             Err(e) => assert_eq!(e.to_string(), REGEX_TOO_BIG_ERR),
             Ok(_) => panic!("Expected Error not observed"),
@@ -637,17 +607,15 @@ mod tests {
 
     #[test]
     fn test_correct_bare_feature() {
-        let fdf_csv = r#"
+        let fdf_csv = r"
 id,name,read,pattern,sequence,feature_type
 ID1,Name1,R1,(BC),ACGT,Antibody Capture
 ID2,Name2,R1,(BC),ACCT,Antibody Capture
 ID3,Name3,R1,(BC),TTTT,Antibody Capture
-"#;
-        let ref_info = ReferenceInfo::default();
-        let txome = Transcriptome::dummy();
+";
         let fref = FeatureReference::new(
-            &ref_info,
-            &txome,
+            &[],
+            None,
             Some(Cursor::new(fdf_csv.as_bytes())),
             None,
             None,
@@ -656,7 +624,7 @@ ID3,Name3,R1,(BC),TTTT,Antibody Capture
         )
         .unwrap();
         let fdist = compute_feature_dist(vec![1i64, 10, 10], &fref).unwrap();
-        let fext = FeatureExtractor::new(Arc::new(fref), None, Some(fdist)).unwrap();
+        let fext = FeatureExtractor::new(Arc::new(fref), Some(fdist)).unwrap();
         let correct_feature_barcode =
             |seq, qual, ftype| correct_feature_barcode(&fext, seq, qual, ftype);
 
@@ -707,7 +675,7 @@ ID3,Name3,R1,(BC),TTTT,Antibody Capture
 
     #[test]
     fn test_load_feature_dist() {
-        let fdf_csv = r#"
+        let fdf_csv = r"
 id,name,read,pattern,sequence,feature_type
 ID1,Name1,R1,^(BC),AA,Antibody Capture
 ID2,Name1,R1,^(BC),AT,Antibody Capture
@@ -715,12 +683,10 @@ ID3,Name1,R1,^(BC),TA,CRISPR Guide Capture
 ID4,Name1,R1,^(BC),TT,Custom
 ID5,Name1,R1,^(BC),TT,Custom
 ID6,Name1,R1,^(BC),TT,Custom
-"#;
-        let ref_info = ReferenceInfo::default();
-        let txome = Transcriptome::dummy();
+";
         let fref = FeatureReference::new(
-            &ref_info,
-            &txome,
+            &[],
+            None,
             Some(Cursor::new(fdf_csv.as_bytes())),
             None,
             None,
@@ -739,7 +705,7 @@ ID6,Name1,R1,^(BC),TT,Custom
         let gi_path = "test/feature/gene_index.tab";
         let _gi_file = File::open(gi_path).unwrap();
 
-        let fdf_csv = r#"
+        let fdf_csv = r"
 id,name,read,pattern,sequence,feature_type
 ID1,N,R1,^(BC),AAAA,Antibody Capture
 ID2,N,R1,^(BC),CCCC,Antibody Capture
@@ -750,13 +716,11 @@ ID6,N,R1,^(BC),AAAT,Custom
 ID7,N,R1,^(BC),AATA,Custom
 ID8,N,R1,^(BC),ATAA,Custom
 ID9,N,R1,^(BC),TAAA,Custom
-"#;
+";
 
-        let ref_info = ReferenceInfo::default();
-        let txome = Transcriptome::dummy();
         let fref = FeatureReference::new(
-            &ref_info,
-            &txome,
+            &[],
+            None,
             Some(Cursor::new(fdf_csv.as_bytes())),
             None,
             None,
@@ -765,7 +729,7 @@ ID9,N,R1,^(BC),TAAA,Custom
         )
         .unwrap();
         let fdist = compute_feature_dist(vec![0i64, 10, 1, 10, 10, 10, 10, 10, 10], &fref).unwrap();
-        let fext = FeatureExtractor::new(Arc::new(fref), None, Some(fdist)).unwrap();
+        let fext = FeatureExtractor::new(Arc::new(fref), Some(fdist)).unwrap();
         let correct_feature_barcode =
             |seq, qual, ftype| correct_feature_barcode(&fext, seq, qual, ftype);
 

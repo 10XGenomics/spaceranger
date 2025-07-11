@@ -2,6 +2,7 @@
 //!
 //! Contains tools for loading barcode whitelists, check barcodes against the whitelist
 //! and correcting sequencing errors in barcodes.
+#![allow(missing_docs)]
 
 use std::fmt;
 use std::iter::{self, FromIterator};
@@ -9,6 +10,7 @@ use std::ops::Deref;
 use std::str::FromStr;
 
 pub mod binned;
+pub mod cell_name;
 pub mod corrector;
 mod io_utils;
 pub mod whitelist;
@@ -17,6 +19,7 @@ pub mod short_string;
 use anyhow::{anyhow, bail, Result};
 use arrayvec::ArrayVec;
 use binned::{SquareBinIndex, SquareBinRowOrColumnIndex};
+use cell_name::CellId;
 pub use corrector::BarcodeCorrector;
 use fastq_set::squality::SQualityGen;
 use fastq_set::sseq::SSeqGen;
@@ -57,6 +60,7 @@ pub type BcSegQual = SQualityGen<MAX_BARCODE_SEGMENT_LENGTH>;
 pub enum BarcodeContent {
     Sequence(BcSeq),
     SpatialIndex(SquareBinIndex),
+    CellName(CellId),
 }
 
 impl fmt::Display for BarcodeContent {
@@ -64,6 +68,7 @@ impl fmt::Display for BarcodeContent {
         match self {
             BarcodeContent::Sequence(seq) => write!(f, "{seq}"),
             BarcodeContent::SpatialIndex(index) => write!(f, "{index}"),
+            BarcodeContent::CellName(cell_id) => write!(f, "{cell_id}"),
         }
     }
 }
@@ -75,6 +80,8 @@ impl FromStr for BarcodeContent {
     fn from_str(content_str: &str) -> Result<BarcodeContent> {
         if content_str.starts_with(binned::SQUARE_BIN_PREFIX) {
             Ok(BarcodeContent::SpatialIndex(content_str.parse()?))
+        } else if content_str.starts_with(cell_name::CELL_ID_PREFIX) {
+            Ok(BarcodeContent::CellName(content_str.parse()?))
         } else {
             Ok(BarcodeContent::Sequence(BcSeq::from_bytes(
                 content_str.as_bytes(),
@@ -95,6 +102,9 @@ impl BarcodeContent {
                 panic!("Cannot get spatial index from sequence barcode")
             }
             BarcodeContent::SpatialIndex(index) => *index,
+            BarcodeContent::CellName(_) => {
+                panic!("Cannot get spatial index from segmented cell barcode")
+            }
         }
     }
     /// The sequence of the barcode, if it has one. Panics for
@@ -105,6 +115,23 @@ impl BarcodeContent {
             BarcodeContent::SpatialIndex(_) => {
                 panic!("Cannot get sequence from spatial barcode")
             }
+            BarcodeContent::CellName(_) => {
+                panic!("Cannot get sequence from segmented cell barcode")
+            }
+        }
+    }
+
+    // The sequence of the barcode, if it has one. Panics for
+    /// spatial index barcodes
+    pub fn cell_id(&self) -> CellId {
+        match self {
+            BarcodeContent::Sequence(_) => {
+                panic!("Cannot get cell ID from sequence barcode")
+            }
+            BarcodeContent::SpatialIndex(_) => {
+                panic!("Cannot get cell ID from spatial barcode")
+            }
+            BarcodeContent::CellName(cell_id) => *cell_id,
         }
     }
 }
@@ -118,9 +145,9 @@ impl BarcodeContent {
 /// by the barcode sequence.
 #[derive(Serialize, Deserialize, Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Debug)]
 pub struct Barcode {
-    gem_group: u16,
-    valid: bool,
-    content: BarcodeContent,
+    pub gem_group: u16,
+    pub valid: bool,
+    pub content: BarcodeContent,
 }
 
 impl Barcode {
@@ -147,6 +174,15 @@ impl Barcode {
         }
     }
 
+    /// Create a barcode with a cell ID. A barcode with a spatial index is a valid barcode
+    pub fn with_cell_id(gem_group: u16, id: u32) -> Self {
+        Barcode {
+            gem_group,
+            content: BarcodeContent::CellName(CellId { id }),
+            valid: true,
+        }
+    }
+
     pub fn with_content(gem_group: u16, content: BarcodeContent, valid: bool) -> Self {
         Barcode {
             gem_group,
@@ -159,7 +195,7 @@ impl Barcode {
     }
     /// The sequence of the barcode, if it has one. Panics for
     /// spatial index barcodes
-    fn sequence(&self) -> &BcSeq {
+    pub fn sequence(&self) -> &BcSeq {
         self.content.sequence()
     }
     /// The sequence of the barcode as byte slice, if it has one. Panics for
@@ -178,6 +214,9 @@ impl Barcode {
                 panic!("Cannot get spatial index from sequence barcode")
             }
             BarcodeContent::SpatialIndex(index) => index,
+            BarcodeContent::CellName(_) => {
+                panic!("Cannot get spatial index from segmented cell barcode")
+            }
         }
     }
 
@@ -280,7 +319,7 @@ pub enum BarcodeSegmentState {
 }
 
 impl BarcodeSegmentState {
-    pub fn is_valid(self) -> bool {
+    pub(crate) fn is_valid(self) -> bool {
         match self {
             BarcodeSegmentState::ValidBeforeCorrection
             | BarcodeSegmentState::ValidAfterCorrection => true,
@@ -288,7 +327,7 @@ impl BarcodeSegmentState {
         }
     }
     /// Change the state given the evidence on whether the sequence is in the whitelist
-    pub fn change(&mut self, is_in_whitelist: bool) {
+    pub(crate) fn change(&mut self, is_in_whitelist: bool) {
         *self = match self {
             BarcodeSegmentState::NotChecked => {
                 if is_in_whitelist {
@@ -438,13 +477,13 @@ impl<G> Segments<G> {
     pub fn zip<K>(self, other: Segments<K>) -> Segments<(G, K)> {
         zip_eq(self, other).collect()
     }
-    pub fn array_vec(self) -> ArrayVec<[G; 4]> {
+    pub fn array_vec(self) -> ArrayVec<G, 4> {
         self.into()
     }
 }
 
-impl<G> From<Segments<G>> for ArrayVec<[G; 4]> {
-    fn from(v: Segments<G>) -> ArrayVec<[G; 4]> {
+impl<G> From<Segments<G>> for ArrayVec<G, 4> {
+    fn from(v: Segments<G>) -> ArrayVec<G, 4> {
         ArrayVec::from_iter(v)
     }
 }
@@ -468,7 +507,7 @@ impl<G> FromIterator<G> for Segments<G> {
 
 impl<G> IntoIterator for Segments<G> {
     type Item = G;
-    type IntoIter = std::iter::Flatten<std::array::IntoIter<Option<G>, 4>>;
+    type IntoIter = iter::Flatten<std::array::IntoIter<Option<G>, 4>>;
 
     fn into_iter(self) -> Self::IntoIter {
         [
@@ -554,8 +593,8 @@ impl<G> BarcodeConstruct<G> {
         self.iter().any(f)
     }
 
-    pub fn array_vec(self) -> ArrayVec<[G; 4]> {
-        let mut xs = ArrayVec::<[G; 4]>::new();
+    pub fn array_vec(self) -> ArrayVec<G, 4> {
+        let mut xs = ArrayVec::<G, 4>::new();
         match self {
             GelBeadOnly(g) => xs.push(g),
             GelBeadAndProbe(x) => xs.extend(x),
@@ -590,6 +629,13 @@ impl<G> BarcodeConstruct<G> {
             GelBeadAndProbe(g) => Some(g.probe),
             Segmented(_) => None,
         }
+    }
+
+    pub fn gel_bead_and_probe(self) -> (G, G) {
+        let GelBeadAndProbe(GelBeadAndProbeConstruct { gel_bead, probe }) = self else {
+            panic!("cannot unpack gel_bead_and_probe");
+        };
+        (gel_bead, probe)
     }
 
     pub fn option_segments(self) -> Option<Segments<G>> {
@@ -632,7 +678,7 @@ impl<G> BarcodeConstruct<G> {
 
 impl<G> IntoIterator for BarcodeConstruct<G> {
     type Item = G;
-    type IntoIter = arrayvec::IntoIter<[G; 4]>;
+    type IntoIter = arrayvec::IntoIter<G, 4>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.array_vec().into_iter()
@@ -760,7 +806,7 @@ impl BarcodeSegment {
         self.state.is_valid()
     }
 
-    pub fn is_valid_after_correction(self) -> bool {
+    fn is_valid_after_correction(self) -> bool {
         matches!(self.state, BarcodeSegmentState::ValidAfterCorrection)
     }
 
@@ -810,7 +856,7 @@ impl SegmentedBarcode {
     ) -> SegmentedBarcode {
         SegmentedBarcode {
             gem_group,
-            segments: BarcodeConstruct::GelBeadOnly(BarcodeSegment::with_sequence(sequence, state)),
+            segments: GelBeadOnly(BarcodeSegment::with_sequence(sequence, state)),
         }
     }
 
@@ -858,7 +904,7 @@ impl SegmentedBarcode {
 }
 
 impl fmt::Display for SegmentedBarcode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", Barcode::from(*self))
     }
 }
@@ -937,7 +983,7 @@ mod tests {
         assert_eq!(
             Barcode::from(SegmentedBarcode {
                 gem_group: 1,
-                segments: BarcodeConstruct::GelBeadOnly(BarcodeSegment::with_sequence(
+                segments: GelBeadOnly(BarcodeSegment::with_sequence(
                     b"ACAGTCATGTCCAAAT",
                     BarcodeSegmentState::NotChecked,
                 )),
@@ -1033,7 +1079,7 @@ mod tests {
     fn test_barcode_from_segmented_barcode() {
         let barcode = Barcode::from(SegmentedBarcode {
             gem_group: 1,
-            segments: BarcodeConstruct::GelBeadOnly(BarcodeSegment::with_sequence(
+            segments: GelBeadOnly(BarcodeSegment::with_sequence(
                 b"ACAGTCATGTCCAAAT",
                 BarcodeSegmentState::Invalid,
             )),
@@ -1065,7 +1111,7 @@ mod tests {
 
         let barcode = Barcode::from(SegmentedBarcode {
             gem_group: 1,
-            segments: BarcodeConstruct::Segmented(Segments {
+            segments: Segmented(Segments {
                 segment1: BarcodeSegment {
                     state: BarcodeSegmentState::ValidBeforeCorrection,
                     content: spatial_segment(b"ACAGTCATGTCCAAAT", 2),
@@ -1084,7 +1130,7 @@ mod tests {
 
         let barcode = Barcode::from(SegmentedBarcode {
             gem_group: 1,
-            segments: BarcodeConstruct::Segmented(Segments {
+            segments: Segmented(Segments {
                 segment1: BarcodeSegment::with_sequence(
                     b"ACAGTCATGTCCAAAT",
                     BarcodeSegmentState::Invalid,

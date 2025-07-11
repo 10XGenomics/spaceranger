@@ -1,0 +1,203 @@
+#!/usr/bin/env bash
+#
+# Copyright (c) 2019 10x Genomics, Inc. All rights reserved.
+#
+# Run SC_RNA_COUNTER_CS with mrp.
+#
+
+# shellcheck source=../rna/_includes
+source "$TENX_SCRIPTDIR/rna/_includes"
+
+# Add pipeline-specific required args
+DOCOPT_PREAMBLE_FASTQS="${DOCOPT_PREAMBLE_FASTQS/\[options\]/--transcriptome=DIR
+        --image=IMG
+        (--slide=SLIDE --area=AREA | --unknown-slide)
+        \[options\]}"
+
+DOCOPT_PREAMBLE_FASTQS="${DOCOPT_PREAMBLE_FASTQS}"'
+    image               Brightfield tissue H&E image in .jpg or .tiff format.
+    transcriptome       Path of folder containing 10x-compatible reference.
+    slide               Visium slide serial number, for example 'V10J25-015'.
+    area                Visium area identifier, for example 'A1'.
+    unknown-slide       Set this if the slide serial number and area identifier
+                            are unknown. WARNING: should only be used as a last
+                            resort. Setting this will cause Space Ranger to use
+                            default spot positions. Not compatible with --slide
+                            and --area, or --slide-file.'
+
+#Path of folder containing 10X-compatible transcriptome.
+DOCOPT_SPEC="$(cat <<EOF
+'$TENX_PRODUCT $TENX_SUBCMD' quantifies spatial gene expression.
+
+$DOCOPT_PREAMBLE_FASTQS
+
+Options:
+# Spatial Gene Expression
+    $DOCOPT_OPTIONS_SAMPLE_INFO
+    --slidefile=GPR     Spot design file for your slide, downloaded from
+                             10x Genomics. NOTE: this is only required if your
+                             machine doesn't have internet access. You must still
+                             pass --slide when using this argument.
+    --loupe-alignment=L Alignment file produced by the manual Loupe alignment
+                             step.
+    --nosecondary       Disable secondary analysis, e.g. clustering. Optional.
+    --r1-length=NUM     Hard trim the input Read 1 to this length before
+                            analysis.
+    --r2-length=NUM     Hard trim the input Read 2 to this length before
+                            analysis.
+    $DOCOPT_OPTIONS_FASTQS
+
+# Martian Runtime
+    $DOCOPT_OPTIONS_MRP_CLUSTER
+EOF
+)"
+
+function implement_process_options {
+    process_options_fastqs
+    process_options_sample_info
+
+    # --transcriptome
+    if [ -n "$transcriptome" ]; then
+        reference_path=\"$(abspath "$transcriptome")\"
+    else
+        reference_path=\"\"
+    fi
+
+    if [ -n "$loupe_alignment" ] && [ -z "$image" ]; then
+    error "When passing --loupe-alignment, you must also specify --image"
+    fi
+
+    if [ -n "$image" ]; then
+        image=\"$(abspath "$image")\"
+    else
+        error "A valid .tif or .jpg file must be passed to --image"
+    fi
+
+    if [ "$unknown_slide" == "false" ]; then
+        if [ -z "$slide" ]; then
+            error "You must provide the --slide argument OR pass the --unknown-slide flag"
+        fi
+
+        if [ -z "$area" ]; then
+            error "You must provide the --area argument OR pass the --unknown-slide flag"
+        fi
+    fi
+
+    if [ "$unknown_slide" == "true" ]; then
+        if [ -n "$slide" ]; then
+        error "The --slide argument cannot be used with the --unknown-slide flag"
+        fi
+
+        if [ -n "$area" ]; then
+        error "The --area argument cannot be used with the --unknown-slide flag"
+        fi
+
+        if [ -n "$slidefile" ]; then
+        error "The --slidefile argument cannot be used with the --unknown-slide flag"
+        fi
+    fi
+
+    area_re='^[ABCD]1$'
+    if [ -n "$area" ] && [[ ! "$area" =~ $area_re ]]; then
+	error "Invalid --area argument. Expecting A1, B1, C1, or D1"
+    fi
+
+    # normalize slide identifier to uppercase
+    if [ -n "$slide" ]; then
+    slide="$(printf "%s" "$slide" | tr "[:lower:]" "[:upper:]")"
+    fi
+
+    slide_re='^V1[0-9][JFMAYULTSBND][0-3][0-9]-[0-9][0-9][0-9]$'
+    if [ -n "$slide" ] && [[ ! "$slide" =~ $slide_re ]]; then
+	error "Invalid --slide argument. Expecting a slide identifier similar to V10J25-015"
+    fi
+
+    [ -z "$slide" -a -z "$area" ] || [ -n "$slide" -a -n "$area" ] || \
+        error "--area and --slide must be specified together or not at all"
+
+    if [ $unknown_slide == "true" ]; then
+        slide_area=null
+    else
+        slide_area="\"${slide}\-${area}\""
+    fi
+
+    if [ -n "$loupe_alignment" ]; then
+	loupe_alignment=\"$(abspath "$loupe_alignment")\"
+    else
+        loupe_alignment=null
+    fi
+
+    if [ -n "$slidefile" ]; then
+	slidefile=\"$(abspath "$slidefile")\"
+    else
+        slidefile=null
+    fi
+
+    # regex for validating a numeric argument
+    int_re='^[0-9]+$'
+
+    # --r1-length
+    if [ -z "$r1_length" ]; then
+        r1_length=null
+    else
+	if ! [[ "$r1_length" =~ $int_re ]] ; then
+	   error "--r1-length must be a positive number"
+	fi
+    fi
+
+    # --r2-length
+    if [ -z "$r2_length" ]; then
+        r2_length=null
+    else
+	if ! [[ "$r2_length" =~ $int_re ]] ; then
+	   error "--r2-length must be a positive number"
+	fi
+    fi
+}
+
+function implement_generate_sample_defs {
+    sample_def=""
+
+    if [ ! -z "$fastqs" ]; then
+        for fastq in $fastqs; do
+            sample_def="$sample_def
+            {
+                \"fastq_mode\": $fastq_mode,
+                \"gem_group\": null,
+                \"lanes\": $lanes,
+                \"read_path\": \"$fastq\",
+                \"sample_indices\": $indices,
+                \"sample_names\": $sample_names
+            },"
+        done
+        sample_def="${sample_def%\,}"
+        sample_def=$(echo -e "[ $sample_def\n    ]")
+    fi
+
+    if [ -z "$sample_def" ]; then
+        error "You must provide the --fastqs argument to specify the location of the input data"
+    fi
+}
+
+function implement_generate_mro {
+    cat <<EOF > "$mro"
+@include "rna/spatial_rna_counter_cs.mro"
+
+call SPATIAL_RNA_COUNTER_CS(
+    sample_id = $sample_id,
+    sample_def = $sample_def,
+    sample_desc = $sample_desc,
+    reference_path = $reference_path,
+    no_secondary_analysis = $nosecondary,
+    r1_length = $r1_length,
+    r2_length = $r2_length,
+    tissue_image_paths = [ $image ],
+    dark_images = false,
+    slide_serial_capture_area = $slide_area,
+    loupe_alignment_file = $loupe_alignment,
+    gpr_file = $slidefile,
+)
+EOF
+}
+
+source "$TENX_SCRIPTDIR/tenkit/common/_subcmd_mrp"

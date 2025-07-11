@@ -1,4 +1,5 @@
 //! PCA analysis code
+#![deny(missing_docs)]
 
 use crate::types::PcaResult;
 use anyhow::Result;
@@ -73,7 +74,11 @@ fn compute_normalized_dispersion(
     let mut quantiles = mean
         .mapv(n64)
         .quantiles_mut(&qs, &Linear)
-        .map(ndarray::ArrayBase::into_raw_vec)
+        .map(|xs| {
+            let (xs, offset) = xs.into_raw_vec_and_offset();
+            assert_eq!(offset, Some(0));
+            xs
+        })
         .unwrap_or_default();
     quantiles.dedup();
     if quantiles.len() <= 1 {

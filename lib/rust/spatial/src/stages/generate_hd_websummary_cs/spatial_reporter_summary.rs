@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use super::summary_tab::{CommandLineCard, GenomicDnaCard, GenomicDnaTemplate};
 use anyhow::Result;
 use cr_websummary::WsSample;
@@ -91,6 +92,9 @@ impl SdWebSummaryJson {
                 blended_image
             })
     }
+    pub fn diagnostics(&self) -> Value {
+        self.summary.diagnostics.clone().unwrap_or_default()
+    }
 }
 
 #[derive(Deserialize)]
@@ -101,6 +105,7 @@ struct SpatialReporterSummaryContent {
     #[serde(rename = "alarms", default)]
     alerts: Alerts,
     sample: WsSample,
+    diagnostics: Option<Value>,
 }
 
 #[derive(Deserialize, Default)]

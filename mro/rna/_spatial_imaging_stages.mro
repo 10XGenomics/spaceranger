@@ -18,10 +18,45 @@ struct PipelineMode(
     string slide,
 )
 
+struct HdLayoutOffset(
+    float x_offset,
+    float y_offset,
+)
+
+struct UmiRegistrationInputs(
+    bool           disable,
+    HdLayoutOffset offset,
+)
+
 stage GET_CYTASSIST_RUN_METADATA(
     in  file[] cytassist_image_paths,
     out json   cytassist_run_metrics,
     src py     "stages/spatial/get_cytassist_run_metadata",
+) using (
+    volatile = strict,
+)
+
+stage DISABLE_IMAGING_STAGES(
+    in  bool                  is_visium_hd,
+    in  bool                  skip_segmentation,
+    in  bool                  segmentation_from_user,
+    in  int                   dark_images,
+    in  file[]                tissue_image_paths,
+    in  UmiRegistrationInputs umi_registration_inputs_in,
+    out bool                  disable_imaging_stages,
+    out bool                  disable_segmentation,
+    out UmiRegistrationInputs umi_registration_inputs,
+    src py                    "stages/spatial/disable_imaging_stages",
+) using (
+    mem_gb   = 2,
+    vmem_gb  = 32,
+    volatile = strict,
+)
+
+stage FIX_CYTASSIST_IMAGE_COMPATIBILITY(
+    in  file[] cytassist_image_paths_in,
+    out file[] cytassist_image_paths,
+    src py     "stages/spatial/fix_cytassist_image_compatibility",
 ) using (
     volatile = strict,
 )
@@ -95,13 +130,14 @@ stage GPR_READER(
 )
 
 stage HD_LAYOUT_READER(
-    in  string slide_serial_capture_area,
-    in  vlf    hd_layout_file,
-    in  string visium_hd_slide_name,
-    in  json   loupe_hd_slide_layout_json,
-    in  bool   is_pd,
-    out json   hd_layout_data_json,
-    src py     "stages/spatial/hd_layout_reader",
+    in  string       slide_serial_capture_area,
+    in  vlf          hd_layout_file,
+    in  string       visium_hd_slide_name,
+    in  json         loupe_hd_slide_layout_json,
+    in  bool         is_pd,
+    in  PipelineMode pipeline_mode,
+    out json         hd_layout_data_json,
+    src py           "stages/spatial/hd_layout_reader",
 ) using (
     volatile = strict,
 )
@@ -144,6 +180,7 @@ stage DETECT_TISSUE(
     out jpg          detected_tissue_mask,
     out jpg          initialisation_debug,
     out png          grabcut_markers,
+    out bool         grabcut_failed,
     src py           "stages/spatial/detect_tissue",
 ) split (
 ) using (
@@ -257,6 +294,7 @@ stage SUMMARIZE_REGISTRATION(
     in  json      fm_tissue_registration_metrics,
     in  json      sitk_tissue_registration_metrics,
     in  json      final_transform_json,
+    in  path      loupe_alignment_file,
     out json      tissue_registration_metrics,
     out tiff      resampled_cyta_img,
     out jpg       qc_registered_tissue_image,
@@ -265,32 +303,100 @@ stage SUMMARIZE_REGISTRATION(
     src py        "stages/spatial/summarize_registration",
 ) using (
     mem_gb   = 8,
+    vmem_gb  = 16,
+    volatile = strict,
+)
+
+stage OUTPUT_FINAL_ALIGNMENT(
+    in  string slide_serial_capture_area,
+    in  file[] cytassist_image_paths,
+    in  file[] tissue_image_paths,
+    in  json   registered_spots_data_json,
+    in  json   final_transform_json,
+    in  json   transform_matrix,
+    in  json   registered_selected_spots_json,
+    in  json   scalefactors_json,
+    out json   fiducial_bounding_box_on_tissue_image,
+    src py     "stages/spatial/output_final_alignment",
+) using (
+    volatile = strict,
+)
+
+stage COLLECT_IMAGING_METRICS(
+    in  file[] tissue_image_paths,
+    in  jpg    detected_tissue_mask,
+    in  bool   segmentation_from_user,
+    in  json[] summaries,
+    out json   imaging_metrics,
+    out json   tissue_image_shape,
+    src py     "stages/spatial/collect_imaging_metrics",
+) using (
+    mem_gb   = 8,
+    vmem_gb  = 64,
+    volatile = strict,
+)
+
+stage END_TO_END_REGISTRATION(
+    in  png            tissue_detection_image,
+    in  tiff           registration_target_image,
+    in  json           tissue_transform_json,
+    in  h5             raw_feature_bc_matrix_h5,
+    in  json           registered_spots_data_json,
+    in  json           fiducial_transform,
+    in  HdLayoutOffset custom_layout_offset,
+    out json           summary,
+    out json           e2e_hd_layout_data_json,
+    out json           e2e_registered_spots_data_json,
+    out jpg            qc_phase_corr_map,
+    src py             "stages/spatial/end_to_end_registration",
+) split (
+) using (
+    volatile = strict,
+)
+
+stage PICK_REGISTERED_SPOT_DATA(
+    in  json align_fiducials_registered_spots_data_json,
+    in  json e2e_registered_spots_data_json,
+    in  json raw_hd_layout_data_json,
+    in  json e2e_hd_layout_data_json,
+    out json registered_spots_data_json,
+    out json hd_layout_data_json,
+    src py   "stages/spatial/pick_registered_spot_data",
+) using (
     volatile = strict,
 )
 
 pipeline REGISTER_TISSUE(
-    in  png       tissue_detection_image,
-    in  tiff      registration_target_image,
-    in  json      loupe_tissue_registration_json,
-    in  json      crop_info_json,
-    in  json      registered_spots_data_json,
-    in  float[][] fid_perp_tmat,
-    in  bool      is_visium_hd,
-    in  float     tissue_image_pixel_size,
-    in  bool      is_pd,
-    in  bool      skip_feature_matching_init,
-    out json      tissue_registration_metrics,
-    out jpg       feature_matching_registered_tissue_image,
-    out jpg       matched_features_debug,
-    out json      tissue_transform_json,
-    out tiff      resampled_cyta_img,
-    out jpg       qc_registered_tissue_image,
-    out jpg       qc_resampled_cyta_img,
-    out jpg       qc_regist_target_img,
-    out jpg       max_mutual_info_init_debug,
-    out jpg       cytassist_tissue_detection_debug,
-    out jpg       target_tissue_detection_debug,
-    out string    itk_error_string,
+    in  png                   tissue_detection_image,
+    in  tiff                  registration_target_image,
+    in  json                  loupe_tissue_registration_json,
+    in  json                  crop_info_json,
+    in  json                  registered_spots_data_json,
+    in  float[][]             fid_perp_tmat,
+    in  bool                  is_visium_hd,
+    in  float                 tissue_image_pixel_size,
+    in  bool                  is_pd,
+    in  bool                  skip_feature_matching_init,
+    in  path                  loupe_alignment_file,
+    in  h5                    raw_feature_bc_matrix_h5,
+    in  UmiRegistrationInputs umi_registration_inputs,
+    in  json                  fiducial_transform,
+    out json                  tissue_registration_metrics,
+    out jpg                   feature_matching_registered_tissue_image,
+    out jpg                   matched_features_debug,
+    out json                  tissue_transform_json,
+    out tiff                  resampled_cyta_img,
+    out jpg                   qc_registered_tissue_image,
+    out jpg                   qc_resampled_cyta_img,
+    out jpg                   qc_regist_target_img,
+    out jpg                   max_mutual_info_init_debug,
+    out jpg                   cytassist_tissue_detection_debug,
+    out jpg                   target_tissue_detection_debug,
+    out jpg                   e2e_qc_phase_corr_map,
+    out string                itk_error_string,
+    out json                  e2e_registered_spots_data_json,
+    out json                  e2e_hd_layout_data_json,
+    out json                  summary,
 )
 {
     call SEED_REGISTRATION(
@@ -327,6 +433,19 @@ pipeline REGISTER_TISSUE(
         fm_tissue_registration_metrics = SEED_REGISTRATION.feature_matching_metrics,
         sitk_tissue_registration_metrics = REGISTER_FROM_INIT.sitk_registration_metrics,
         final_transform_json      = REGISTER_FROM_INIT.final_transform_json,
+        loupe_alignment_file      = self.loupe_alignment_file,
+    )
+
+    call END_TO_END_REGISTRATION(
+        custom_layout_offset       = self.umi_registration_inputs.offset,
+        tissue_detection_image     = self.tissue_detection_image,
+        registration_target_image  = self.registration_target_image,
+        tissue_transform_json      = REGISTER_FROM_INIT.final_transform_json,
+        raw_feature_bc_matrix_h5   = self.raw_feature_bc_matrix_h5,
+        registered_spots_data_json = self.registered_spots_data_json,
+        fiducial_transform         = self.fiducial_transform,
+    ) using (
+        disabled = self.umi_registration_inputs.disable,
     )
 
     return (
@@ -342,5 +461,9 @@ pipeline REGISTER_TISSUE(
         qc_resampled_cyta_img         = SUMMARIZE_REGISTRATION.qc_resampled_cyta_img,
         qc_regist_target_img          = SUMMARIZE_REGISTRATION.qc_regist_target_img,
         itk_error_string              = REGISTER_FROM_INIT.itk_error_string,
+        e2e_registered_spots_data_json = END_TO_END_REGISTRATION.e2e_registered_spots_data_json,
+        e2e_hd_layout_data_json       = END_TO_END_REGISTRATION.e2e_hd_layout_data_json,
+        e2e_qc_phase_corr_map         = END_TO_END_REGISTRATION.qc_phase_corr_map,
+        summary                       = END_TO_END_REGISTRATION.summary,
     )
 }

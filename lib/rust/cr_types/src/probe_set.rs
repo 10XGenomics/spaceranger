@@ -1,4 +1,9 @@
-use crate::reference::probe_set_reference::TargetSetFile;
+#![allow(missing_docs)]
+
+use crate::reference::probe_set_reference::{
+    TargetSetFile, PROBE_SET_FILE_FORMAT, PROBE_SET_HEADER,
+};
+use crate::reference::reference_info::{ReferenceInfo, MULTI_GENOME_SEPARATOR};
 use crate::rna_read::HIGH_CONF_MAPQ;
 use crate::types::GenomeName;
 use anyhow::{anyhow, bail, ensure, Context, Result};
@@ -16,10 +21,11 @@ use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Write};
 use std::iter::zip;
 use std::ops::Deref;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::str::FromStr;
 use std::{fmt, iter};
 use strum_macros::{AsRefStr, Display, EnumString};
+use tempfile::NamedTempFile;
 use transcriptome::Gene;
 
 /// One read half maps to a probe and the other half does not.
@@ -77,16 +83,17 @@ where
     })
 }
 
-/// List of gene/probe ID prefixes that are excluded from the filtered_feature_bc_matrix.
-/// Ensure that the corresponding Python and Rust constants are identical.
-const EXCLUDED_PROBE_ID_PREFIXES: [&str; 6] =
-    ["DEPRECATED", "Hum-", "IGNORE", "NC-", "VAR_", "VDJ_"];
+/// Deprecated probes are excluded from the filtered_feature_bc_matrix.h5.
+const DEPRECATED_PROBE_ID_PREFIX: &str = "DEPRECATED_";
 
 /// Return true if this probe ID is excluded based on its probe ID.
 pub fn is_deprecated_probe(probe_id: &str) -> bool {
-    EXCLUDED_PROBE_ID_PREFIXES
-        .iter()
-        .any(|z| probe_id.starts_with(z))
+    probe_id.starts_with(DEPRECATED_PROBE_ID_PREFIX)
+}
+
+/// Strip deprecated prefix from the probe or gene ID.
+pub(crate) fn strip_deprecated_prefix(id: &str) -> &str {
+    id.strip_prefix(DEPRECATED_PROBE_ID_PREFIX).unwrap_or(id)
 }
 
 // This was added in to help look for gDNA
@@ -151,6 +158,9 @@ pub struct Probe {
     /// The probe ID.
     pub probe_id: String,
 
+    /// The probe sequencd.
+    pub probe_seq: String,
+
     /// The probe gene ID and name.
     pub gene: Gene,
 
@@ -171,12 +181,27 @@ pub struct Probe {
 
     // CIGAR string describing expected alignment
     pub cigar_string: String,
+
+    // Reference genome name
+    pub genome: GenomeName,
 }
 
 impl Probe {
     /// Return whether this probe ID is excluded based on its probe ID or `included` is false.
     pub fn is_excluded_probe(&self) -> bool {
         !self.included || is_deprecated_probe(&self.probe_id)
+    }
+
+    /// Return a record for csv.Writer::write_record.
+    pub fn as_record(&self) -> [&str; 6] {
+        [
+            &self.gene.id,
+            &self.probe_seq,
+            &self.probe_id,
+            if self.included { "TRUE" } else { "FALSE" },
+            self.region.as_ref().map_or("", ProbeRegion::as_str),
+            &self.gene.name,
+        ]
     }
 }
 
@@ -285,7 +310,7 @@ impl Deref for ProbeSetReferenceMetadata {
 
 impl ProbeSetReferenceMetadata {
     /// Read probe set reference metadata from a file.
-    pub fn load_from(path: &Path) -> Result<Self> {
+    pub fn load_from(path: &TargetSetFile) -> Result<Self> {
         Ok(Self(read_csv_comment_metadata(path)?))
     }
 
@@ -294,42 +319,32 @@ impl ProbeSetReferenceMetadata {
         self.0.contains_key("probe_set_file_format")
     }
 
-    fn probe_set_file_format(&self) -> Option<&String> {
-        self.get("probe_set_file_format")
+    /// Return the reference_genome as seen in the metadata.
+    pub fn reference_genome(&self) -> &str {
+        &self["reference_genome"]
     }
 
-    fn reference_genome(&self) -> Option<&String> {
-        self.get("reference_genome")
+    /// Return the reference_genome split by MULTI_GENOME_SEPARATOR collected into a Vec.
+    pub fn reference_genomes(&self) -> Vec<GenomeName> {
+        self["reference_genome"]
+            .split(MULTI_GENOME_SEPARATOR)
+            .map(GenomeName::from)
+            .collect()
     }
 
-    fn reference_version(&self) -> Option<&String> {
-        self.get("reference_version")
+    /// Return the reference_version as seen in the metadata.
+    pub fn reference_version(&self) -> &str {
+        &self["reference_version"]
     }
 
-    fn panel_name(&self) -> Option<&String> {
-        self.get("panel_name")
+    /// Return the panel_name as seen in the metadata.
+    pub fn panel_name(&self) -> &str {
+        &self["panel_name"]
     }
 
-    fn set_panel_name(&mut self, panel_name: &str) {
-        self.0
-            .insert("panel_name".to_string(), panel_name.to_string());
-    }
-
-    fn check_merge_compatibility(&self, other: &Self) -> Result<()> {
-        ensure!(
-            self.probe_set_file_format() == other.probe_set_file_format(),
-            "Probe set merging error: file formats do not match."
-        );
-        ensure!(
-            self.reference_genome() == other.reference_genome(),
-            "Probe set merging error: reference genomes do not match."
-        );
-        ensure!(
-            self.reference_version() == other.reference_version(),
-            "Probe set merging error: reference versions do not match."
-        );
-
-        Ok(())
+    /// Return the panel_type as seen in the metadata.
+    pub fn panel_type(&self) -> &str {
+        &self["panel_type"]
     }
 
     fn write_to<W: Write>(&self, mut writer: W) -> Result<()> {
@@ -356,8 +371,8 @@ pub struct ProbeSetReference {
     /// The minimum alignment score threshold.
     transcriptome_min_score: usize,
 
-    /// The reference genome name.
-    pub genome: GenomeName,
+    /// The reference genome names
+    pub genomes: Vec<GenomeName>,
 
     /// The length of a probe's left-hand side half.
     /// All LHS probe half sequences must have the same length.
@@ -440,7 +455,7 @@ impl ProbeSetReference {
     pub fn align_probe_read(&self, seq: &[u8]) -> MappedProbe {
         if seq.len() < min(self.lhs_length, self.rhs_length) {
             // Read sequence is shorter than half the probe sequence.
-            return MappedProbe::new(None, None, &self.genome);
+            return MappedProbe::new(None, None);
         }
 
         // intial alignment of the lhs probe half
@@ -467,7 +482,7 @@ impl ProbeSetReference {
         .unwrap_or((&[], 0, self.lhs_length));
 
         let mut mapped_probe = match (lhs_probes, rhs_probes) {
-            ([], []) => MappedProbe::new(None, None, &self.genome),
+            ([], []) => MappedProbe::new(None, None),
             ([..], []) => {
                 // return first encountered kmer with RHS (if any)
                 let mut read_kmers = get_rhs_read_kmers(
@@ -496,7 +511,6 @@ impl ProbeSetReference {
                                 LHS_START + self.lhs_length,
                             )),
                             None,
-                            &self.genome,
                         )
                     })
             }
@@ -514,7 +528,6 @@ impl ProbeSetReference {
                     rhs_start,
                     rhs_start + self.rhs_length,
                 )),
-                &self.genome,
             ),
             ([..], [..]) => {
                 // Confident matches are the intersection of lhs_probes and rhs_probes.
@@ -534,7 +547,6 @@ impl ProbeSetReference {
                             rhs_start,
                             rhs_start + self.rhs_length,
                         )),
-                        &self.genome,
                     )
                 } else {
                     MappedProbe::new(
@@ -550,7 +562,6 @@ impl ProbeSetReference {
                             rhs_start,
                             rhs_start + self.rhs_length,
                         )),
-                        &self.genome,
                     )
                 }
             }
@@ -669,7 +680,7 @@ impl ProbeSetReference {
             lhs_read_seq,
             |x| &x.lhs,
         );
-        MappedProbe::new(opt_lhs, Some(rhs), &self.genome)
+        MappedProbe::new(opt_lhs, Some(rhs))
     }
 
     /// Rescue an unaligned RHS sequence.
@@ -690,7 +701,7 @@ impl ProbeSetReference {
             rhs_read_seq,
             |x| &x.rhs,
         );
-        MappedProbe::new(Some(lhs), opt_rhs, &self.genome)
+        MappedProbe::new(Some(lhs), opt_rhs)
     }
 
     /// Construct a probe set refrence from a probe set CSV file.
@@ -698,11 +709,17 @@ impl ProbeSetReference {
     /// CSV header row must be gene_id,probe_seq,probe_id,included,region.
     pub fn from_path(
         target_set: &TargetSetFile,
-        transcriptome_reference_path: &Path,
+        transcriptome_reference_path: Option<&Path>,
         transcriptome_min_score: usize,
     ) -> Result<Self> {
         let metadata = ProbeSetReferenceMetadata::load_from(target_set)?;
         assert!(metadata.is_probe_set_metadata());
+
+        let genomes = if let Some(transcriptome_reference_path) = transcriptome_reference_path {
+            ReferenceInfo::from_reference_path(transcriptome_reference_path)?.genomes
+        } else {
+            ReferenceInfo::from_probe_set_csv(target_set)?.genomes
+        };
 
         // Read the probe set CSV file.
         let mut reader = csv::ReaderBuilder::new()
@@ -789,11 +806,10 @@ impl ProbeSetReference {
             probes.sort();
         }
 
-        let genome = metadata.0["reference_genome"].as_str().into();
         Ok(Self {
             metadata,
             transcriptome_min_score,
-            genome,
+            genomes,
             lhs_length,
             rhs_length,
             probe_to_seq,
@@ -917,9 +933,9 @@ impl MappedProbeHalf {
 
 const MAPPED_GAP_ALIGNMENT_MATCH_SCORE: i32 = 1;
 const MAPPED_GAP_ALIGNMENT_MISMATCH_SCORE: i32 = -1;
-const MAPPED_GAP_ALIGNMENT_GAP_OPEN_SCORE: i32 = -5;
+const MAPPED_GAP_ALIGNMENT_GAP_OPEN_SCORE: i32 = -1;
 const MAPPED_GAP_ALIGNMENT_GAP_EXTEND_SCORE: i32 = -1;
-const MAPPED_GAP_ALIGNMENT_CLIP_SCORE: i32 = -1;
+const MAPPED_GAP_ALIGNMENT_CLIP_SCORE: i32 = -3;
 
 /// The gap part of the probe mapping result
 /// Mapped gap is only created for reads that LHS and RHS map to the same probe
@@ -953,11 +969,11 @@ impl MappedGap {
         .yclip(MAPPED_GAP_ALIGNMENT_CLIP_SCORE);
 
         let mut aligner = Aligner::with_capacity_and_scoring(
-            self.expected_gap_seq.len(),
             self.gap_seq.len(),
+            self.expected_gap_seq.len(),
             scoring,
         );
-        aligner.custom(self.expected_gap_seq.as_bytes(), self.gap_seq.as_bytes())
+        aligner.custom(self.gap_seq.as_bytes(), self.expected_gap_seq.as_bytes())
     }
     pub fn get_max_gap_error(&self) -> u32 {
         std::cmp::max(
@@ -966,12 +982,12 @@ impl MappedGap {
         )
     }
     pub fn gap_within_max_error(&self) -> bool {
-        return bounded_levenshtein(
+        bounded_levenshtein(
             self.expected_gap_seq.as_bytes(),
             self.gap_seq.as_bytes(),
             self.get_max_gap_error(),
         )
-        .is_some();
+        .is_some()
     }
     pub fn get_gap_levenshtein_distance(&self) -> u32 {
         levenshtein(self.expected_gap_seq.as_bytes(), self.gap_seq.as_bytes())
@@ -1003,39 +1019,31 @@ impl MappedGapAlignmentInfo {
     }
 
     pub fn ends_with_insertion(&self) -> bool {
-        if self.alignment_operations.is_empty() {
-            return false;
-        }
-        self.alignment_operations
-            .last()
-            .map_or(false, |op| matches!(op, AlignmentOperation::Yclip(_)))
+        matches!(
+            self.alignment_operations.last(),
+            Some(&AlignmentOperation::Xclip(_) | &AlignmentOperation::Ins)
+        )
     }
 
     pub fn starts_with_insertion(&self) -> bool {
-        if self.alignment_operations.is_empty() {
-            return false;
-        }
-        self.alignment_operations
-            .first()
-            .map_or(false, |op| matches!(op, AlignmentOperation::Yclip(_)))
+        matches!(
+            self.alignment_operations.first(),
+            Some(&AlignmentOperation::Xclip(_) | &AlignmentOperation::Ins)
+        )
     }
 
     pub fn ends_with_deletion(&self) -> bool {
-        if self.alignment_operations.clone().is_empty() {
-            return false;
-        }
-        self.alignment_operations
-            .last()
-            .map_or(false, |op| matches!(op, AlignmentOperation::Xclip(_)))
+        matches!(
+            self.alignment_operations.last(),
+            Some(&AlignmentOperation::Yclip(_) | &AlignmentOperation::Del)
+        )
     }
 
     pub fn starts_with_deletion(&self) -> bool {
-        if self.alignment_operations.is_empty() {
-            return false;
-        }
-        self.alignment_operations
-            .first()
-            .map_or(false, |op| matches!(op, AlignmentOperation::Xclip(_)))
+        matches!(
+            self.alignment_operations.first(),
+            Some(&AlignmentOperation::Yclip(_) | &AlignmentOperation::Del)
+        )
     }
 
     /// Number of insertions in gap compared to expected gap (including soft clips before or after)
@@ -1043,7 +1051,7 @@ impl MappedGapAlignmentInfo {
         self.alignment_operations
             .iter()
             .map(|op| match op {
-                AlignmentOperation::Yclip(l) => *l,
+                AlignmentOperation::Xclip(l) => *l,
                 AlignmentOperation::Ins => 1,
                 _ => 0,
             })
@@ -1055,7 +1063,7 @@ impl MappedGapAlignmentInfo {
         self.alignment_operations
             .iter()
             .map(|op| match op {
-                AlignmentOperation::Xclip(l) => *l,
+                AlignmentOperation::Yclip(l) => *l,
                 AlignmentOperation::Del => 1,
                 _ => 0,
             })
@@ -1072,9 +1080,6 @@ pub struct MappedProbe {
     /// The result of mapping the right sequence.
     rhs: Option<MappedProbeHalf>,
 
-    /// The name of the genome.
-    genome: Option<GenomeName>,
-
     /// The read maps confidently to a probe but multimapped with STAR.
     is_rescued: bool,
 
@@ -1086,16 +1091,10 @@ pub struct MappedProbe {
 
 impl MappedProbe {
     /// Create a new mapping result.
-    pub fn new(
-        lhs: Option<MappedProbeHalf>,
-        rhs: Option<MappedProbeHalf>,
-        genome: &GenomeName,
-    ) -> Self {
-        let genome = (lhs.is_some() || rhs.is_some()).then(|| genome.clone());
+    pub fn new(lhs: Option<MappedProbeHalf>, rhs: Option<MappedProbeHalf>) -> Self {
         MappedProbe {
             lhs,
             rhs,
-            genome,
             is_rescued: false,
             gap: None,
         }
@@ -1131,9 +1130,15 @@ impl MappedProbe {
         self.gap.clone()
     }
 
-    /// Return the reference genome name.
-    pub fn genome(&self) -> Option<&GenomeName> {
-        self.genome.as_ref()
+    /// Return an iterator over the genomes.
+    /// Return one genome when both probes map to the same genome.
+    /// Return two genomes when the two probes map to different genomes.
+    /// Return one genome when one probe maps and the other does not.
+    /// Return no genomes when no probes map.
+    pub fn genomes(&self) -> impl Iterator<Item = &GenomeName> {
+        let lhs = self.lhs_probe().map(|x| &x.genome);
+        let rhs = self.rhs_probe().map(|x| &x.genome);
+        chain(lhs, if lhs == rhs { None } else { rhs })
     }
 
     /// Return whether either left or right sequences mapped to a probe.
@@ -1154,7 +1159,7 @@ impl MappedProbe {
             && self
                 .gap
                 .as_ref()
-                .map_or(true, MappedGap::gap_within_max_error)
+                .is_none_or(MappedGap::gap_within_max_error)
     }
 
     /// Return the confidently mapped gene.
@@ -1177,6 +1182,17 @@ impl MappedProbe {
         chain(lhs, if lhs == rhs { None } else { rhs })
     }
 
+    /// Return an iterator over the mapped (genome, gene)'s.
+    /// Return one (genome, gene) when both probes map to the same (genome, gene).
+    /// Return two (genome, gene)'s when the two probes map to different (genome, gene)'s.
+    /// Return one (genome, gene) when one probe maps and the other does not.
+    /// Return no (genome, gene)'s when no probes map.
+    pub fn mapped_genes(&self) -> impl Iterator<Item = (&GenomeName, &Gene)> {
+        let lhs = self.lhs_probe().map(|x| (&x.genome, &x.gene));
+        let rhs = self.rhs_probe().map(|x| (&x.genome, &x.gene));
+        chain(lhs, if lhs == rhs { None } else { rhs })
+    }
+
     /// Return an iterator over the mapped probes.
     /// Return one probe when both halves of the read map to the same probe.
     /// Return two probes when the two halves of the read map to different probes or either probe does not map.
@@ -1187,6 +1203,7 @@ impl MappedProbe {
             /// A static reference to an unmapped probe.
             static ref PROBE_NA: Probe = Probe {
                 probe_id: "NA".to_string(),
+                probe_seq: String::new(),
                 gene: Gene {
                     id: String::new(),
                     name: String::new(),
@@ -1197,6 +1214,7 @@ impl MappedProbe {
                 ref_sequence_name: String::new(),
                 ref_sequence_pos: None,
                 cigar_string: String::new(),
+                genome: GenomeName::default(),
             };
         }
 
@@ -1293,58 +1311,146 @@ impl GapInfo {
     }
 }
 
-fn read_probe_set_headers(csv_file: &Path) -> Result<Vec<String>> {
-    Ok(csv::ReaderBuilder::new()
-        .comment(Some(b'#'))
-        .from_path(csv_file)
-        .with_context(|| csv_file.display().to_string())?
-        .headers()
-        .unwrap()
+/// Merge probe set CSVs, and return its combined probe set name.
+///
+/// Remove duplicate probes from the resulting merged set, allowing the input
+/// probe sets to contain some overlapping probes.
+pub fn merge_probe_set_csvs<W: Write>(
+    probe_sets: &[TargetSetFile],
+    mut writer: W,
+    transcriptome_reference_path: Option<&Path>,
+) -> Result<String> {
+    assert!(probe_sets.len() >= 2);
+    let metadatas: Vec<_> = probe_sets
         .iter()
-        .map(std::borrow::ToOwned::to_owned)
-        .collect())
-}
+        .map(ProbeSetReferenceMetadata::load_from)
+        .try_collect()?;
 
-pub fn merge_probe_set_csvs<W: Write>(probe_sets: &[PathBuf], mut writer: W) -> Result<String> {
-    assert!(probe_sets.len() > 1);
-    let mut metadata = ProbeSetReferenceMetadata::load_from(&probe_sets[0])?;
-    let headers = read_probe_set_headers(&probe_sets[0])?;
-    let mut panel_names = vec![metadata.panel_name().cloned().unwrap_or_default()];
+    let panel_name = metadatas
+        .iter()
+        .map(ProbeSetReferenceMetadata::panel_name)
+        .join("|");
+    let panel_type = metadatas
+        .iter()
+        .map(ProbeSetReferenceMetadata::panel_type)
+        .unique()
+        .join("|");
 
-    for probe_set in probe_sets.iter().skip(1) {
-        let other_metadata = ProbeSetReferenceMetadata::load_from(probe_set)?;
-        metadata.check_merge_compatibility(&other_metadata)?;
-        panel_names.push(other_metadata.panel_name().cloned().unwrap_or_default());
+    for (genome, versions) in &metadatas
+        .iter()
+        .map(|x| (x.reference_genome(), x.reference_version()))
+        .into_group_map()
+    {
         ensure!(
-            headers == read_probe_set_headers(probe_set)?,
-            "Probe set headers do not match"
+            versions.iter().unique().count() == 1,
+            "All reference_version of reference_genome {genome} must be identical: {}",
+            versions.join(", ")
         );
     }
-    let combined_panel_name = panel_names.into_iter().join("|");
-    metadata.set_panel_name(&combined_panel_name);
 
-    metadata.write_to(&mut writer)?;
+    #[expect(unstable_name_collisions)]
+    let (reference_genome, reference_version): (String, String) = metadatas
+        .iter()
+        .map(|x| (x.reference_genome(), x.reference_version()))
+        .unique()
+        .intersperse((MULTI_GENOME_SEPARATOR, MULTI_GENOME_SEPARATOR))
+        .collect();
 
-    let mut csv_writer = csv::WriterBuilder::new().from_writer(writer);
-    csv_writer.write_record(headers.iter())?;
-    for probe_set in probe_sets {
-        let mut reader = csv::ReaderBuilder::new()
-            .comment(Some(b'#'))
-            .from_path(probe_set)
-            .with_context(|| probe_set.display().to_string())?;
-        for record in reader.records() {
-            let record = record?;
-            csv_writer.write_record(record.iter())?;
+    let combined_metadata = ProbeSetReferenceMetadata(HashMap::from([
+        (
+            "probe_set_file_format".to_string(),
+            PROBE_SET_FILE_FORMAT.to_string(),
+        ),
+        ("reference_genome".to_string(), reference_genome),
+        ("reference_version".to_string(), reference_version),
+        ("panel_name".to_string(), panel_name),
+        ("panel_type".to_string(), panel_type),
+    ]));
+
+    let unique_genome_count = metadatas
+        .iter()
+        .map(ProbeSetReferenceMetadata::reference_genome)
+        .unique()
+        .count();
+    let max_genome_len = metadatas
+        .iter()
+        .map(|x| x.reference_genome().len())
+        .max()
+        .unwrap();
+
+    fn infix_genome_to_gene_id_or_gene_name(s: &str, padded_genome: &str) -> String {
+        if let Some(depr_gid) = s.strip_prefix(DEPRECATED_PROBE_ID_PREFIX) {
+            format!("{DEPRECATED_PROBE_ID_PREFIX}{padded_genome}_{depr_gid}")
+        } else {
+            format!("{padded_genome}_{s}")
         }
     }
 
-    Ok(combined_panel_name)
+    // Write the combined probe set CSV to a temp file first transcriptome_reference_path = None.
+    // The temp file will have the genome prefixed gene_id, gene_name, and probe_id.
+    // Now that the temp file has the correct gene_id, we parse it with transcriptome_reference_path
+    // which allows us to extract the gene_name from the transcriptome reference for the probes.
+
+    let mut tmp_file = NamedTempFile::with_suffix(".csv")?;
+    let tmp_file_path = tmp_file.path().to_owned();
+    combined_metadata.write_to(&mut tmp_file)?;
+    let mut tmp_csv_writer = csv::WriterBuilder::new().from_writer(tmp_file);
+    tmp_csv_writer.write_record(PROBE_SET_HEADER)?;
+
+    for (probe_set, metadata) in zip_eq(probe_sets, metadatas) {
+        let reference_genome = metadata.reference_genome();
+        let padded_genome = format!("{reference_genome:_<max_genome_len$}");
+        for probe in probe_set.read(None)? {
+            // Add the genome name to the gene_id, gene_name, and probe_id.
+            tmp_csv_writer.write_record(
+                if unique_genome_count >= 2 {
+                    Probe {
+                        gene: Gene {
+                            id: infix_genome_to_gene_id_or_gene_name(
+                                &probe.gene.id,
+                                &padded_genome,
+                            ),
+                            name: infix_genome_to_gene_id_or_gene_name(
+                                &probe.gene.name,
+                                &padded_genome,
+                            ),
+                        },
+                        probe_id: infix_genome_to_gene_id_or_gene_name(
+                            &probe.probe_id,
+                            &padded_genome,
+                        ),
+                        ..probe
+                    }
+                } else {
+                    probe
+                }
+                .as_record(),
+            )?;
+        }
+    }
+    tmp_csv_writer.flush()?;
+
+    // Write the combined probe set CSV to the final file.
+    combined_metadata.write_to(&mut writer)?;
+    let mut csv_writer = csv::Writer::from_writer(writer);
+    csv_writer.write_record(PROBE_SET_HEADER)?;
+    let temp_probe_set_file = TargetSetFile::from(tmp_file_path);
+
+    // Filter out duplicate probes in case our inputs had some of the same probes.
+    for probe in temp_probe_set_file
+        .read(transcriptome_reference_path)?
+        .into_iter()
+        .unique()
+    {
+        csv_writer.write_record(probe.as_record())?;
+    }
+    csv_writer.flush()?;
+    Ok(combined_metadata.panel_name().to_string())
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use test_refdata::{refdata_available, refdata_path};
 
     #[test]
     fn test_intersect_sorted_lists() {
@@ -1384,16 +1490,11 @@ mod test {
 
     #[test]
     fn test_from_path() -> Result<()> {
-        if !refdata_available() {
-            return Ok(());
-        }
-        let reference = refdata_path("GRCh38-2020-A/");
-
         ProbeSetReference::from_path(
             &TargetSetFile::from(
                 "../cr_lib/test/target_panels/Immunology_targeting_templated_ligation.csv",
             ),
-            &reference,
+            None,
             0,
         )?;
         Ok(())
@@ -1401,14 +1502,9 @@ mod test {
 
     #[test]
     fn test_file_format_3() -> Result<()> {
-        if !refdata_available() {
-            return Ok(());
-        }
-        let reference = refdata_path("GRCh38-2020-A/");
-
         let probe_set = ProbeSetReference::from_path(
             &TargetSetFile::from("../cr_lib/test/target_panels/mock_probe_set_file_format_3.csv"),
-            &reference,
+            None,
             0,
         )?;
 
@@ -1446,48 +1542,12 @@ mod test {
     #[test]
     fn test_mapped_gap_alignment_info() -> Result<()> {
         // Alignment:
-        //    A      AAAAA
-        //    |
-        //    AACTGCT
+        // gap:    TGGCTTACACTTTCAACTTG
+        //         |||||\|||||\||||||
+        // exp: AACTGGCTAACACTCTCAACT
         // Alignment Ops:
-        // [Match, Yclip(6), Xclip(5)]
-        //
-        let expected_gap_seq = "AAAAAA".to_string();
-        let gap_seq = "ACTGCTG".to_string();
-        let mg = MappedGap {
-            gap_seq: gap_seq.clone(),
-            expected_gap_seq: expected_gap_seq.clone(),
-        };
-        assert_eq!(mg.get_max_gap_error(), 2);
-        assert!(!mg.gap_within_max_error());
-        // println!(
-        //     "Alignment:\n{}",
-        //     mg.get_alignment()
-        //         .pretty(expected_gap_seq.as_bytes(), gap_seq.as_bytes(), 15)
-        // );
-        // println!("Alignment Ops:\n{:?}", mg.get_alignment().operations);
-        assert_eq!(mg.get_gap_levenshtein_distance(), 6);
-        let mgi = MappedGapAlignmentInfo {
-            gap_seq: gap_seq.clone(),
-            expected_gap_seq: expected_gap_seq.clone(),
-            alignment_operations: mg.get_alignment().operations.clone(),
-        };
-        assert_eq!(mgi.get_num_matches(), 1);
-        assert_eq!(mgi.get_num_mismatches(), 0);
-        assert_eq!(mgi.get_num_insertions(), 6);
-        assert_eq!(mgi.get_num_deletions(), 5);
-        assert!(mgi.ends_with_deletion());
-        assert!(!mgi.ends_with_insertion());
-        assert!(!mgi.starts_with_deletion());
-        assert!(!mgi.starts_with_insertion());
-
-        // Alignment:
-        //  AACTGGCTAACACTCTCAACT
-        //     |||||\|||||\||||||
-        //     TGGCTTACACTTTCAACTTG
-        // Alignment Ops:
-        // [Xclip(3), Match, Match, Match, Match, Match, Subst, Match, Match,
-        //   Match, Match, Match, Subst, Match, Match, Match, Match, Match, Match, Yclip(2)]
+        // [Yclip(3), Match, Match, Match, Match, Match, Subst, Match, Match,
+        //   Match, Match, Match, Subst, Match, Match, Match, Match, Match, Match, Xclip(2)]
         //
         let expected_gap_seq = "AACTGGCTAACACTCTCAACT".to_string();
         let gap_seq = "TGGCTTACACTTTCAACTGT".to_string();
@@ -1495,14 +1555,15 @@ mod test {
             gap_seq: gap_seq.clone(),
             expected_gap_seq: expected_gap_seq.clone(),
         };
+        println!(
+            "Alignment: \n{}",
+            mg.get_alignment()
+                .pretty(b"TGGCTTACACTTTCAACTGT", b"AACTGGCTAACACTCTCAACT", 80),
+        );
+        println!("Alignment ops: \n{:?}", mg.get_alignment().operations);
+
         assert_eq!(mg.get_max_gap_error(), 6);
         assert!(!mg.gap_within_max_error());
-        // println!(
-        //     "Alignment:\n{}",
-        //     mg.get_alignment()
-        //         .pretty(expected_gap_seq.as_bytes(), gap_seq.as_bytes(), 25)
-        // );
-        // println!("Alignment Ops:\n{:?}", mg.get_alignment().operations);
         assert_eq!(mg.get_gap_levenshtein_distance(), 7);
         let mgi = MappedGapAlignmentInfo {
             gap_seq: gap_seq.clone(),
@@ -1518,19 +1579,226 @@ mod test {
         assert!(mgi.starts_with_deletion());
         assert!(!mgi.starts_with_insertion());
 
+        // Alignment:
+        // gap: CATTTTCTT---CCG
+        //      |||||||||xxx|||
+        // exp: CATTTTCTTCCACCG
+
+        // Alignment ops:
+        // [Match, Match, Match, Match, Match, Match, Match, Match, Match, Del, Del, Del, Match, Match, Match]
+        let expected_gap_seq = "CATTTTCTTCCACCG".to_string();
+        let gap_seq = "CATTTTCTTCCG".to_string();
+        let mg = MappedGap {
+            gap_seq: gap_seq.clone(),
+            expected_gap_seq: expected_gap_seq.clone(),
+        };
+        println!(
+            "Alignment: \n{}",
+            mg.get_alignment()
+                .pretty(b"CATTTTCTTCCG", b"CATTTTCTTCCACCG", 80),
+        );
+        println!("Alignment ops: \n{:?}", mg.get_alignment().operations);
+
+        assert_eq!(mg.get_max_gap_error(), 4);
+        assert!(mg.gap_within_max_error());
+        assert_eq!(mg.get_gap_levenshtein_distance(), 3);
+        let mgi = MappedGapAlignmentInfo {
+            gap_seq: gap_seq.clone(),
+            expected_gap_seq: expected_gap_seq.clone(),
+            alignment_operations: mg.get_alignment().operations.clone(),
+        };
+        assert_eq!(mgi.get_num_matches(), 12);
+        assert_eq!(mgi.get_num_mismatches(), 0);
+        assert_eq!(mgi.get_num_insertions(), 0);
+        assert_eq!(mgi.get_num_deletions(), 3);
+        assert!(!mgi.ends_with_deletion());
+        assert!(!mgi.ends_with_insertion());
+        assert!(!mgi.starts_with_deletion());
+        assert!(!mgi.starts_with_insertion());
+
+        // Alignment:
+        // gap: TAGTTTCCCCTTCA-
+        //      ||||||||\|||||x
+        // exp: TAGTTTCCACTTCAT
+
+        // Alignment ops:
+        // [Match, Match, Match, Match, Match, Match, Match, Match, Subst, Match, Match, Match, Match, Match, Del]
+        let expected_gap_seq = "TAGTTTCCACTTCAT".to_string();
+        let gap_seq = "TAGTTTCCCCTTCA".to_string();
+        let mg = MappedGap {
+            gap_seq: gap_seq.clone(),
+            expected_gap_seq: expected_gap_seq.clone(),
+        };
+        println!(
+            "Alignment: \n{}",
+            mg.get_alignment()
+                .pretty(b"TAGTTTCCCCTTCA", b"TAGTTTCCACTTCAT", 80),
+        );
+        println!("Alignment ops: \n{:?}", mg.get_alignment().operations);
+
+        let mgi = MappedGapAlignmentInfo {
+            gap_seq: gap_seq.clone(),
+            expected_gap_seq: expected_gap_seq.clone(),
+            alignment_operations: mg.get_alignment().operations.clone(),
+        };
+        assert_eq!(mgi.get_num_matches(), 13);
+        assert_eq!(mgi.get_num_mismatches(), 1);
+        assert_eq!(mgi.get_num_insertions(), 0);
+        assert_eq!(mgi.get_num_deletions(), 1);
+        assert!(mgi.ends_with_deletion());
+        assert!(!mgi.ends_with_insertion());
+        assert!(!mgi.starts_with_deletion());
+        assert!(!mgi.starts_with_insertion());
+
+        // Alignment:
+        // gap: CTTCCTTC-CTT
+        //      ||||||||x|||
+        // exp: CTTCCTTCGCTTCTT
+
+        // Alignment ops:
+        // [Match, Match, Match, Match, Match, Match, Match, Match, Del, Match,
+        //    Match, Match, Yclip(3)]
+        let expected_gap_seq = "CTTCCTTCGCTTTTT".to_string();
+        let gap_seq = "CTTCCTTCCTT".to_string();
+        let mg = MappedGap {
+            gap_seq: gap_seq.clone(),
+            expected_gap_seq: expected_gap_seq.clone(),
+        };
+        println!(
+            "Alignment: \n{}",
+            mg.get_alignment()
+                .pretty(b"CTTCCTTCCTT", b"CTTCCTTCGCTTTTT", 80),
+        );
+        println!("Alignment ops: \n{:?}", mg.get_alignment().operations);
+
+        let mgi = MappedGapAlignmentInfo {
+            gap_seq: gap_seq.clone(),
+            expected_gap_seq: expected_gap_seq.clone(),
+            alignment_operations: mg.get_alignment().operations.clone(),
+        };
+        assert_eq!(mgi.get_num_matches(), 11);
+        assert_eq!(mgi.get_num_mismatches(), 0);
+        assert_eq!(mgi.get_num_insertions(), 0);
+        assert_eq!(mgi.get_num_deletions(), 4);
+        assert!(mgi.ends_with_deletion());
+        assert!(!mgi.ends_with_insertion());
+        assert!(!mgi.starts_with_deletion());
+        assert!(!mgi.starts_with_insertion());
+
+        // Alignment:
+        // gap: ACTGCTCAG---TCA
+        //      |||||||||xxx\||
+        // exp: ACTGCTCAGACCACA
+
+        // Alignment ops:
+        // [Match, Match, Match, Match, Match, Match, Match, Match, Match, Del,
+        //    Del, Del, Subst, Match, Match]
+        let expected_gap_seq = "ACTGCTCAGACCACA".to_string();
+        let gap_seq = "ACTGCTCAGTCA".to_string();
+        let mg = MappedGap {
+            gap_seq: gap_seq.clone(),
+            expected_gap_seq: expected_gap_seq.clone(),
+        };
+        println!(
+            "Alignment: \n{}",
+            mg.get_alignment()
+                .pretty(b"ACTGCTCAGTCA", b"ACTGCTCAGACCACA", 80),
+        );
+        println!("Alignment ops: \n{:?}", mg.get_alignment().operations);
+
+        let mgi = MappedGapAlignmentInfo {
+            gap_seq: gap_seq.clone(),
+            expected_gap_seq: expected_gap_seq.clone(),
+            alignment_operations: mg.get_alignment().operations.clone(),
+        };
+        assert_eq!(mgi.get_num_matches(), 11);
+        assert_eq!(mgi.get_num_mismatches(), 1);
+        assert_eq!(mgi.get_num_insertions(), 0);
+        assert_eq!(mgi.get_num_deletions(), 3);
+        assert!(!mgi.ends_with_deletion());
+        assert!(!mgi.ends_with_insertion());
+        assert!(!mgi.starts_with_deletion());
+        assert!(!mgi.starts_with_insertion());
+
+        // Alignment:
+        // gap: TCATATCTGCCTCAAA
+        //      ||\||\||||\|+|||
+        // exp: TCTTAGCTGCAT-AAA
+
+        // Alignment ops:
+        // [Match, Match, Subst, Match, Match, Subst, Match, Match, Match, Match,
+        //   Subst, Match, Ins, Match, Match, Match]
+        let expected_gap_seq = "TCTTAGCTGCATAAA".to_string();
+        let gap_seq = "TCATATCTGCCTCAAA".to_string();
+        let mg = MappedGap {
+            gap_seq: gap_seq.clone(),
+            expected_gap_seq: expected_gap_seq.clone(),
+        };
+        println!(
+            "Alignment: \n{}",
+            mg.get_alignment()
+                .pretty(b"TCATATCTGCCTCAAA", b"TCTTAGCTGCATAAA", 80),
+        );
+        println!("Alignment ops: \n{:?}", mg.get_alignment().operations);
+
+        let mgi = MappedGapAlignmentInfo {
+            gap_seq: gap_seq.clone(),
+            expected_gap_seq: expected_gap_seq.clone(),
+            alignment_operations: mg.get_alignment().operations.clone(),
+        };
+        assert_eq!(mgi.get_num_matches(), 12);
+        assert_eq!(mgi.get_num_mismatches(), 3);
+        assert_eq!(mgi.get_num_insertions(), 1);
+        assert_eq!(mgi.get_num_deletions(), 0);
+        assert!(!mgi.ends_with_deletion());
+        assert!(!mgi.ends_with_insertion());
+        assert!(!mgi.starts_with_deletion());
+        assert!(!mgi.starts_with_insertion());
+
+        // Alignment:
+        // gap: ATTCTCTTGAGACGTT
+        //      \||||||||\|\||+|
+        // exp: CTTCTCTTGGGCCG-T
+
+        // Alignment ops:
+        // [Subst, Match, Match, Match, Match, Match, Match, Match, Match, Subst,
+        //   Match, Subst, Match, Match, Ins, Match]
+        let expected_gap_seq = "CTTCTCTTGGGCCGT".to_string();
+        let gap_seq = "ATTCTCTTGAGACGTT".to_string();
+        let mg = MappedGap {
+            gap_seq: gap_seq.clone(),
+            expected_gap_seq: expected_gap_seq.clone(),
+        };
+        println!(
+            "Alignment: \n{}",
+            mg.get_alignment()
+                .pretty(b"ATTCTCTTGAGACGTT", b"CTTCTCTTGGGCCGT", 80),
+        );
+        println!("Alignment ops: \n{:?}", mg.get_alignment().operations);
+
+        let mgi = MappedGapAlignmentInfo {
+            gap_seq: gap_seq.clone(),
+            expected_gap_seq: expected_gap_seq.clone(),
+            alignment_operations: mg.get_alignment().operations.clone(),
+        };
+        assert_eq!(mgi.get_num_matches(), 12);
+        assert_eq!(mgi.get_num_mismatches(), 3);
+        assert_eq!(mgi.get_num_insertions(), 1);
+        assert_eq!(mgi.get_num_deletions(), 0);
+        assert!(!mgi.ends_with_deletion());
+        assert!(!mgi.ends_with_insertion());
+        assert!(!mgi.starts_with_deletion());
+        assert!(!mgi.starts_with_insertion());
+
+        // assert!(false);
         Ok(())
     }
 
     #[test]
     fn test_gap_alignment() -> Result<()> {
-        if !refdata_available() {
-            return Ok(());
-        }
-        let reference = refdata_path("GRCh38-2020-A/");
-
         let probe_set = ProbeSetReference::from_path(
             &TargetSetFile::from("../cr_lib/test/target_panels/mock_probe_set_file_format_3.csv"),
-            &reference,
+            None,
             0,
         )?;
 
@@ -1574,9 +1842,11 @@ mod test {
         );
         assert!(mapped_probe.gap.clone().unwrap().gap_within_max_error());
 
-        // expected_gap: GCCGTGGCCG
-        //               |||||||||
-        //          gap: GCCGTGGCC
+        // gap: GCCGTGGCC-
+        //      |||||||||x
+        // exp: GCCGTGGCCG
+        // Alignment ops:
+        //  [Match, Match, Match, Match, Match, Match, Match, Match, Match, Del]
         let read_with_del_end_of_gap = lhs_seq.to_string()
             + &expected_gap_seq[0..expected_gap_seq.len() - 1]
             + rhs_seq
@@ -1596,8 +1866,8 @@ mod test {
         println!(
             "Alignment: \n{}",
             mapped_probe.gap.clone().unwrap().get_alignment().pretty(
-                b"GCCGTGGCCG",
                 b"GCCGTGGCC",
+                b"GCCGTGGCCG",
                 80
             ),
         );
@@ -1625,9 +1895,11 @@ mod test {
         assert!(!mgi.starts_with_deletion());
         assert!(!mgi.starts_with_insertion());
 
-        // expected_gap: GCCGTGGCCA
-        //                 \||\|||
-        //          gap:    TTGACCAAC
+        // gap:     TTGACCATT
+        //          \||\|||
+        // exp:  GCCGTGGCCA
+        // Alignment ops:
+        //  [Yclip(3), Subst, Match, Match, Subst, Match, Match, Match, Xclip(2)]
         let read_with_complex_alignment =
             lhs_seq.to_string() + "TTGACCAAC" + rhs_seq + "AAACTGGCTGACTGAC";
         let mapped_probe = probe_set.align_probe_read(read_with_complex_alignment.as_bytes());
@@ -1642,6 +1914,18 @@ mod test {
             "TTGACCAAC".to_string()
         );
         assert!(!mapped_probe.gap.clone().unwrap().gap_within_max_error());
+        println!(
+            "Alignment: \n{}",
+            mapped_probe.gap.clone().unwrap().get_alignment().pretty(
+                b"TTGACCAAC",
+                b"GCCGTGGCCA",
+                80
+            ),
+        );
+        println!(
+            "Alignment ops: \n{:?}",
+            mapped_probe.gap.clone().unwrap().get_alignment().operations
+        );
 
         let mgi = MappedGapAlignmentInfo {
             gap_seq: mapped_probe.gap.clone().unwrap().gap_seq,
@@ -1664,20 +1948,168 @@ mod test {
         assert!(mgi.starts_with_deletion());
         assert!(!mgi.starts_with_insertion());
 
-        // println!(
-        //     "Alignment:\n{}",
-        //     mapped_probe.gap.clone().unwrap().get_alignment().pretty(
-        //         mapped_probe
-        //             .gap
-        //             .clone()
-        //             .unwrap()
-        //             .expected_gap_seq
-        //             .as_bytes(),
-        //         mapped_probe.gap.clone().unwrap().gap_seq.as_bytes(),
-        //         80
-        //     )
-        // );
+        // gap: GCCGTGG-CA
+        //      |||||||x||
+        // exp: GCCGTGGCCA
+        // Alignment ops:
+        //  [Match, Match, Match, Match, Match, Match, Match, Del, Match, Match]
+        let read_with_complex_alignment =
+            lhs_seq.to_string() + "GCCGTGGCA" + rhs_seq + "AAACTGGCTGACTGAC";
+        let mapped_probe = probe_set.align_probe_read(read_with_complex_alignment.as_bytes());
+        assert_eq!(mapped_probe.lhs_probe(), mapped_probe.rhs_probe());
+        assert_eq!(mapped_probe.probes().next().unwrap(), gapfill_probe);
+        assert_eq!(
+            mapped_probe.gap.clone().unwrap().expected_gap_seq,
+            expected_gap_seq.to_string()
+        );
+        assert_eq!(
+            mapped_probe.gap.clone().unwrap().gap_seq,
+            "GCCGTGGCA".to_string()
+        );
+        assert!(mapped_probe.gap.clone().unwrap().gap_within_max_error());
+        println!(
+            "Alignment: \n{}",
+            mapped_probe.gap.clone().unwrap().get_alignment().pretty(
+                b"GCCGTGGCA",
+                b"GCCGTGGCCA",
+                80
+            ),
+        );
+        println!(
+            "Alignment ops: \n{:?}",
+            mapped_probe.gap.clone().unwrap().get_alignment().operations
+        );
 
+        let mgi = MappedGapAlignmentInfo {
+            gap_seq: mapped_probe.gap.clone().unwrap().gap_seq,
+            expected_gap_seq: mapped_probe.gap.clone().unwrap().expected_gap_seq,
+            alignment_operations: mapped_probe
+                .gap
+                .clone()
+                .unwrap()
+                .get_alignment()
+                .operations
+                .clone(),
+        };
+
+        assert_eq!(mgi.get_num_matches(), 9);
+        assert_eq!(mgi.get_num_mismatches(), 0);
+        assert_eq!(mgi.get_num_insertions(), 0);
+        assert_eq!(mgi.get_num_deletions(), 1);
+        assert!(!mgi.ends_with_deletion());
+        assert!(!mgi.ends_with_insertion());
+        assert!(!mgi.starts_with_deletion());
+        assert!(!mgi.starts_with_insertion());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_probe_set_merge_one_genome() -> Result<()> {
+        let mut writer = Vec::new();
+        merge_probe_set_csvs(
+            &[
+                TargetSetFile::from("test/probe_set_merge/GRCh38-fmt3-refv24_a.csv"),
+                TargetSetFile::from("test/probe_set_merge/GRCh38-fmt3-refv24_b.csv"),
+            ],
+            &mut writer,
+            Some(Path::new("test/reference/GRCh38_ref_tiny")),
+        )?;
+        insta::assert_snapshot!(String::from_utf8(writer)?);
+        Ok(())
+    }
+
+    #[test]
+    fn test_probe_set_preserve_genome_input_order() -> Result<()> {
+        let mut writer = Vec::new();
+        merge_probe_set_csvs(
+            &[
+                TargetSetFile::from("test/probe_set_merge/mm10-fmt3-refv20_a.csv"),
+                TargetSetFile::from("test/probe_set_merge/GRCh38-fmt3-refv24_a.csv"),
+                TargetSetFile::from("test/probe_set_merge/GRCh38-fmt3-refv24_b.csv"),
+                TargetSetFile::from("test/probe_set_merge/mm10-fmt3-refv20_b.csv"),
+            ],
+            &mut writer,
+            Some(Path::new("test/reference/GRCh38-and-mm10_ref_tiny")),
+        )?;
+        insta::assert_snapshot!(String::from_utf8(writer)?);
+        Ok(())
+    }
+
+    #[test]
+    fn test_probe_set_merge_two_genomes_same_version() -> Result<()> {
+        let mut writer = Vec::new();
+        merge_probe_set_csvs(
+            &[
+                TargetSetFile::from("test/probe_set_merge/GRCh38-fmt3-refv20_a.csv"),
+                TargetSetFile::from("test/probe_set_merge/mm10-fmt3-refv20_a.csv"),
+            ],
+            &mut writer,
+            Some(Path::new("test/reference/GRCh38-and-mm10_ref_tiny")),
+        )?;
+        insta::assert_snapshot!(String::from_utf8(writer)?);
+        Ok(())
+    }
+
+    #[test]
+    fn test_probe_set_preserve_record_input_order() -> Result<()> {
+        let mut writer = Vec::new();
+        merge_probe_set_csvs(
+            &[
+                TargetSetFile::from("test/probe_set_merge/GRCh38-fmt3-refv24_a.csv"),
+                TargetSetFile::from("test/probe_set_merge/mm10-fmt3-refv20_a.csv"),
+                TargetSetFile::from("test/probe_set_merge/GRCh38-fmt3-refv24_b.csv"),
+            ],
+            &mut writer,
+            Some(Path::new("test/reference/GRCh38-and-mm10_ref_tiny")),
+        )?;
+        insta::assert_snapshot!(String::from_utf8(writer)?);
+        Ok(())
+    }
+
+    #[test]
+    fn test_probe_set_merge_two_genomes_same_version_format2() -> Result<()> {
+        let mut writer = Vec::new();
+        merge_probe_set_csvs(
+            &[
+                TargetSetFile::from("test/probe_set_merge/GRCh38-fmt2-refv20_a.csv"),
+                TargetSetFile::from("test/probe_set_merge/mm10-fmt2-refv20_a.csv"),
+            ],
+            &mut writer,
+            Some(Path::new("test/reference/GRCh38-and-mm10_ref_tiny")),
+        )?;
+        insta::assert_snapshot!(String::from_utf8(writer)?);
+        Ok(())
+    }
+
+    #[test]
+    fn test_probe_set_merge_two_genomes_different_version() -> Result<()> {
+        let mut writer = Vec::new();
+        merge_probe_set_csvs(
+            &[
+                TargetSetFile::from("test/probe_set_merge/GRCh38-fmt3-refv24_a.csv"),
+                TargetSetFile::from("test/probe_set_merge/GRCh38-fmt3-refv24_b.csv"),
+                TargetSetFile::from("test/probe_set_merge/mm10-fmt3-refv20_a.csv"),
+            ],
+            &mut writer,
+            Some(Path::new("test/reference/GRCh38-and-mm10_ref_tiny")),
+        )?;
+        insta::assert_snapshot!(String::from_utf8(writer)?);
+        Ok(())
+    }
+
+    #[test]
+    fn test_probe_set_merge_diff_format() -> Result<()> {
+        let mut writer = Vec::new();
+        merge_probe_set_csvs(
+            &[
+                TargetSetFile::from("test/probe_set_merge/GRCh38-fmt2-refv20_a.csv"),
+                TargetSetFile::from("test/probe_set_merge/GRCh38-fmt3-refv20_a.csv"),
+            ],
+            &mut writer,
+            Some(Path::new("test/reference/GRCh38_ref_tiny")),
+        )?;
+        insta::assert_snapshot!(String::from_utf8(writer)?);
         Ok(())
     }
 
@@ -1686,38 +2118,61 @@ mod test {
         let mut writer = Vec::new();
         merge_probe_set_csvs(
             &[
-                PathBuf::from("test/probe_set_merge/set1.csv"),
-                PathBuf::from("test/probe_set_merge/set2.csv"),
+                TargetSetFile::from("test/probe_set_merge/set1.csv"),
+                TargetSetFile::from("test/probe_set_merge/set2.csv"),
             ],
             &mut writer,
+            None,
         )?;
         insta::assert_snapshot!(String::from_utf8(writer)?);
         Ok(())
     }
 
     #[test]
-    fn test_probe_set_merge_error_wrong_format() {
+    fn test_probe_set_merge_different_headers() -> Result<()> {
+        let mut writer = Vec::new();
+        merge_probe_set_csvs(
+            &[
+                TargetSetFile::from("test/probe_set_merge/set1.csv"),
+                TargetSetFile::from("test/probe_set_merge/additional_column.csv"),
+            ],
+            &mut writer,
+            Some(Path::new("test/reference/GRCh38_ref_tiny")),
+        )?;
+        insta::assert_snapshot!(String::from_utf8(writer)?);
+        Ok(())
+    }
+
+    #[test]
+    fn test_probe_set_merge_error_same_genome_different_version() {
         let mut writer = Vec::new();
         assert!(merge_probe_set_csvs(
             &[
-                PathBuf::from("test/probe_set_merge/set1.csv"),
-                PathBuf::from("test/probe_set_merge/format2.csv"),
+                TargetSetFile::from("test/probe_set_merge/GRCh38-fmt3-refv20_a.csv"),
+                TargetSetFile::from("test/probe_set_merge/GRCh38-fmt3-refv24_a.csv"),
+                TargetSetFile::from("test/probe_set_merge/GRCh38-fmt3-refv24_b.csv"),
             ],
             &mut writer,
+            None,
         )
         .is_err());
     }
 
     #[test]
-    fn test_probe_set_merge_error_wrong_columns() {
+    fn test_probe_set_merge_deduplicate() -> Result<()> {
         let mut writer = Vec::new();
-        assert!(merge_probe_set_csvs(
+        merge_probe_set_csvs(
             &[
-                PathBuf::from("test/probe_set_merge/set1.csv"),
-                PathBuf::from("test/probe_set_merge/additional_column.csv"),
+                TargetSetFile::from("test/probe_set_merge/set1.csv"),
+                TargetSetFile::from("test/probe_set_merge/set1.csv"),
             ],
             &mut writer,
-        )
-        .is_err());
+            None,
+        )?;
+        // Merging the same file with itself should result in the original file
+        // due to probe deduplication, assuming that the original file was valid
+        // and contained no duplicate probes itself.
+        insta::assert_snapshot!(String::from_utf8(writer)?);
+        Ok(())
     }
 }

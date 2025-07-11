@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use itertools::Itertools;
 use ndarray::Array2;
 use serde::Deserialize;

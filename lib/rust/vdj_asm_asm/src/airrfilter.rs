@@ -1,4 +1,5 @@
 //! AirrFilter stage code
+#![allow(missing_docs)]
 
 use anyhow::Result;
 use bio::io::fasta::Reader;

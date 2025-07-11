@@ -213,9 +213,47 @@ def make_gene_umi_violin_plots(
     return violin_plot_data
 
 
+def make_cell_types_df(
+    h5_path: str,
+    cell_types: str,
+    barcode_lower_bound: int,
+    group_by_name: str,
+):
+    """Makes a plot with distributions from UMIs cell types.
+
+    Args:
+        h5_path (str): path to filtered_feature_bc_matrix.h5
+        cell_types (str): path to cell_types.csv
+        barcode_lower_bound(int): minimum number of barcodes per cell type for plot
+        group_by_name (string): name of the column that data should be grouped by
+
+    Returns:
+        tupel: [cell_types (DataFrame), cell_levels(int)]
+    """
+    mat = cr_matrix.CountMatrix.load_h5_file(h5_path)
+    mat = mat.select_features_by_type("Gene Expression")
+    counts = mat.get_counts_per_bc()
+    bcs = cr_matrix.CountMatrix.load_bcs_from_h5_file_handle(h5_path)
+    bcs = [b.decode("utf-8") for b in bcs]
+    counts_per_bcs = pl.DataFrame({"barcode": bcs, "umi_counts": counts})
+    cell_types = pl.read_csv(cell_types)
+    cell_types = cell_types.join(counts_per_bcs, on="barcode")
+    cell_types = cell_types.select([group_by_name, "umi_counts"])
+    cell_types = cell_types.join(
+        cell_types.group_by(group_by_name)
+        .agg(pl.count().alias("count"))
+        .filter(pl.col("count") >= barcode_lower_bound),
+        on=group_by_name,
+        how="inner",
+    )
+    cell_types = cell_types.with_columns(pl.col("umi_counts") + 1)
+    cell_levels = cell_types[group_by_name].n_unique()
+    return cell_types, cell_levels
+
+
 def make_cell_types_violin_plot(
     h5_path: str,
-    cas_cell_types: str,
+    cell_types: str,
     barcode_lower_bound: int,
     final_plot_width: int,
     group_by_name: str = "coarse_cell_type",
@@ -225,7 +263,7 @@ def make_cell_types_violin_plot(
 
     Args:
         h5_path (str): path to filtered_feature_bc_matrix.h5
-        cas_cell_types (str): path to cas_cell_types.csv
+        cell_types (str): path to cell_types.csv
         barcode_lower_bound(int): minimum number of barcodes per cell type for plot
         final_plot_width (int): plot width that should be displayed in the WS
         group_by_name (string): name of the column that data should be grouped by
@@ -234,24 +272,11 @@ def make_cell_types_violin_plot(
     Returns:
         Dict: violin plot data and help for plotting in the websummary
     """
-    mat = cr_matrix.CountMatrix.load_h5_file(h5_path)
-    mat = mat.select_features_by_type("Gene Expression")
-    counts = mat.get_counts_per_bc()
-    bcs = cr_matrix.CountMatrix.load_bcs_from_h5_file_handle(h5_path)
-    bcs = [b.decode("utf-8") for b in bcs]
-    counts_per_bcs = pl.DataFrame({"barcode": bcs, "umi_counts": counts})
-    cell_types = pl.read_csv(cas_cell_types)
-    cell_types = cell_types.join(counts_per_bcs, on="barcode")
-    cell_types = cell_types.select(["coarse_cell_type", "umi_counts"])
-    cell_types = cell_types.join(
-        cell_types.group_by("coarse_cell_type")
-        .agg(pl.count().alias("count"))
-        .filter(pl.col("count") >= barcode_lower_bound),
-        on="coarse_cell_type",
-        how="inner",
+    cell_types, cell_levels = make_cell_types_df(
+        h5_path, cell_types, barcode_lower_bound, group_by_name
     )
     cell_types = cell_types.with_columns(pl.col("umi_counts") + 1)
-    cell_levels = cell_types["coarse_cell_type"].n_unique()
+    cell_levels = cell_types[f"{group_by_name}"].n_unique()
 
     # Make the box plot
     boxplot = _make_boxplot(counts="umi_counts")
@@ -279,3 +304,73 @@ def make_cell_types_violin_plot(
     else:
         violin_box_plot = alt_utils.chart_to_json(violin_box_plot)
         return violin_box_plot
+
+
+def make_cell_types_boxplot(
+    h5_path: str,
+    cell_types: str,
+    barcode_lower_bound: int,
+    final_plot_width: int,
+    group_by_name: str = "coarse_cell_type",
+    return_plot: bool = False,
+):
+    """Makes a plot with distributions from UMIs cell types.
+
+    Args:
+        h5_path (str): path to filtered_feature_bc_matrix.h5
+        cell_types (str): path to cell_types.csv
+        barcode_lower_bound(int): minimum number of barcodes per cell type for plot
+        final_plot_width (int): plot width that should be displayed in the WS
+        group_by_name (string): name of the column that data should be grouped by
+        return_plot (bool): should the plot be returned (for notebooks) instead of the json for the WS
+
+    Returns:
+        Dict: violin plot data and help for plotting in the websummary
+    """
+    cell_types, cell_levels = make_cell_types_df(
+        h5_path, cell_types, barcode_lower_bound, group_by_name
+    )
+
+    box_width = final_plot_width / (cell_levels + 1)
+    box_plot = alt.Chart(cell_types).mark_boxplot(size=box_width).encode(
+        alt.X(
+            f"{group_by_name}:N",
+            axis=alt.Axis(labelAngle=-45, labelFontSize=15, title=None),
+        ),
+        alt.Y("umi_counts:Q", title="1+UMI").scale(type="log"),
+        alt.Color(f"{group_by_name}:N").legend(None),
+        tooltip=[
+            alt.Tooltip("umi_counts:Q", title="UMI", format=",.2f"),
+        ],
+    ) + alt.Chart(cell_types).transform_aggregate(
+        min="min(umi_counts)",
+        max="max(umi_counts)",
+        mean="mean(umi_counts)",
+        median="median(umi_counts)",
+        q1="q1(umi_counts)",
+        q3="q3(umi_counts)",
+        count="max(count)",
+        groupby=[f"{group_by_name}"],
+    ).mark_bar(
+        opacity=0
+    ).encode(
+        x=f"{group_by_name}:N",
+        y="q1:Q",
+        y2="q3:Q",
+        tooltip=[
+            alt.Tooltip("min:Q", title="Minimum UMI", format=".2f"),
+            alt.Tooltip("q1:Q", title="Lower Quartile", format=".2f"),
+            alt.Tooltip("mean:Q", title="Mean UMI", format=".2f"),
+            alt.Tooltip("median:Q", title="Median UMI", format=".2f"),
+            alt.Tooltip("q3:Q", title="Upper Quartile", format=".2f"),
+            alt.Tooltip("max:Q", title="Maximum UMI", format=".2f"),
+            alt.Tooltip("count:Q", title="# Barcodes"),
+        ],
+    ).properties(
+        width=final_plot_width
+    )
+    if return_plot:
+        return box_plot
+    else:
+        box_plot = alt_utils.chart_to_json(box_plot)
+        return box_plot

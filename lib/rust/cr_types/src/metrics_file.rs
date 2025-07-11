@@ -1,6 +1,7 @@
 //! Martian filetype for representing metrics JSON files.
 //! Use this type for any metrics JSON file whose contents is not represented
 //! by a static type.
+#![allow(missing_docs)]
 use anyhow::{Context, Result};
 use martian::MartianRover;
 use martian_derive::martian_filetype;

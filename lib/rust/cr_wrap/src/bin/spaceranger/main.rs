@@ -1,15 +1,21 @@
-use anyhow::{bail, Result};
+//! spaceranger
+#![deny(missing_docs)]
+
+use anyhow::{bail, ensure, Result};
 use clap::{self, ArgGroup, Parser};
 use cr_types::chemistry::ChemistryName;
 use cr_types::sample_def::SampleDef;
 use cr_types::types::AlignerParam;
 use cr_types::{FeatureBarcodeType, LibraryType, TargetingMethod};
 use cr_wrap::create_bam_arg::CreateBam;
+use cr_wrap::env::Initialize;
 use cr_wrap::fastqs::{get_target_set_name, FastqArgs};
 use cr_wrap::mrp_args::MrpArgs;
 use cr_wrap::shared_cmd::{self, HiddenCmd, RnaSharedCmd, SharedCmd};
+use cr_wrap::telemetry::CollectTelemetry;
 use cr_wrap::utils::{validate_id, AllArgs, CliPath};
-use cr_wrap::{check_deprecated_os, env, execute, make_mro, mkfastq, set_env_vars};
+use cr_wrap::{env, execute, make_mro, mkfastq};
+use segmentations::{SegmentationInputs, UserProvidedSegmentation};
 use serde::Serialize;
 use slide_id::{
     AreaId, SlideId, SlideInformation, SlideInformationFromDifferentSources, SlideRevision,
@@ -19,9 +25,12 @@ use std::fmt::Debug;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::str::FromStr;
+use umi_registration::{UmiRegistrationArgs, UmiRegistrationInputs};
 
 mod cytassist;
+mod segmentations;
 mod slide_id;
+mod umi_registration;
 
 const MAX_IMAGE_SCALE: f64 = 10.0;
 
@@ -47,6 +56,21 @@ struct SpaceRanger {
     env_json: Option<PathBuf>,
 }
 
+impl Initialize for SpaceRanger {
+    fn override_env_json(&self) -> Option<&std::path::Path> {
+        self.env_json.as_deref()
+    }
+}
+
+impl CollectTelemetry for SpaceRanger {
+    fn should_collect_telemetry(&self) -> bool {
+        !matches!(
+            self.subcmd,
+            SubCommand::Shared(SharedCmd::Telemetry(_)) | SubCommand::Hidden(HiddenCmd::OsCheck(_))
+        )
+    }
+}
+
 #[derive(Parser, Debug)]
 #[allow(clippy::large_enum_variant)]
 enum SubCommand {
@@ -57,6 +81,10 @@ enum SubCommand {
     /// Aggregate data from multiple 'spaceranger count' runs. Visium HD not supported in this release.
     #[clap(name = "aggr")]
     Aggr(Aggr),
+
+    /// Segment nuclei from a microscope image.
+    #[clap(name = "segment")]
+    Segment(Segment),
 
     /// Run Illumina demultiplexer on sample sheets that contain 10x-specific
     /// sample index sets.
@@ -146,10 +174,10 @@ struct Count {
     override_id: bool,
 
     /// Path of folder containing 10x-compatible reference.
-    #[clap(long, value_name = "PATH")]
-    transcriptome: CliPath,
+    #[clap(long, value_name = "PATH", required_unless_present_any = ["feature_ref", "probe_set"])]
+    transcriptome: Option<CliPath>,
 
-    /// CSV file specifying the probe set used, if any.
+    /// Path of probe set CSV. Must not be set for Visium HD 3’ Spatial Gene Expression.
     #[clap(long, value_name = "CSV")]
     probe_set: Option<CliPath>,
 
@@ -242,7 +270,9 @@ struct Count {
     #[clap(long, value_name = "NUM")]
     r1_length: Option<usize>,
 
-    /// Hard trim the input Read 2 to this length before analysis.
+    /// Hard trim the input Read 2 to this length before analysis. Read 2
+    /// length is trimmed to 50 bp by default when a probe set reference CSV
+    /// is passed using --probe-set
     #[clap(long, value_name = "NUM")]
     r2_length: Option<usize>,
 
@@ -269,6 +299,44 @@ struct Count {
     #[clap(long, requires = "feature_ref", conflicts_with = "libraries")]
     no_libraries: bool,
 
+    /// Boolean: true (default) | false: whether to perform automated nucleus
+    /// segmentation when a brightfield (H&E) image is provided.
+    #[clap(
+        long,
+        conflicts_with = "custom_segmentation_file",
+        value_name = "true|false",
+        num_args = 1
+    )]
+    nucleus_segmentation: Option<bool>,
+
+    /// User-provided segmentation file. This can be a TIFF image
+    /// (16- or 32-bit grayscale), an NPY file (NumPy matrix of dtype uint32),
+    /// a GeoJSON, or a CSV file. The TIFF, NPY, and GeoJSON coordinates must
+    /// match the user's microscope image. Specifying this option disables the
+    /// built-in cell segmentation method. If this option is set, you must also
+    /// provide a value for —nucleus-expansion-distance-micron. Set this to zero
+    /// if providing a cell mask. See the online documentation for file format details.
+    #[clap(
+        long,
+        conflicts_with = "max_nucleus_diameter_px",
+        conflicts_with = "nucleus_segmentation",
+        value_name = "TIF|TIFF|BTF|NPY|CSV|GEOJSON"
+    )]
+    custom_segmentation_file: Option<UserProvidedSegmentation>,
+
+    /// Expected maximum nucleus diameter (in pixels of the tissue image).
+    /// This is an advanced parameter that likely only needs to be adjusted if your
+    /// expected diameter is exceptionally large (greater than 40 microns).
+    /// Default is 256 pixels.  Maximum is 1024 pixels. This option cannot be set
+    /// if a custom segmentation file is provided. See the online documentation for more details.
+    #[clap(long, conflicts_with = "custom_segmentation_file", value_name = "NUM")]
+    max_nucleus_diameter_px: Option<u32>,
+
+    /// The maximum distance (in microns) of a barcode center from a segmented
+    /// nucleus at which Space Ranger will assign a barcode to a nucleus.
+    #[clap(long, value_name = "NUM")]
+    nucleus_expansion_distance_micron: Option<u32>,
+
     /// Do not execute the pipeline.
     /// Generate an pipeline invocation (.mro) file and stop.
     #[clap(long)]
@@ -293,6 +361,9 @@ struct Count {
     /// are allowed.
     #[clap(long, value_name = "NUM")]
     custom_bin_size: Option<CustomBinSize>,
+
+    #[clap(flatten)]
+    umi_registration_args: UmiRegistrationArgs,
 }
 
 const GPR_EXTENSION: &str = "gpr";
@@ -441,7 +512,9 @@ impl Count {
         if c.image_scale.is_some()
             && !(c.image.is_some() || c.darkimage.is_some() || c.colorizedimage.is_some())
         {
-            bail!("--image-scale requires a microscope image to scale. Please provide a microscope image using --image, --darkimage, or --colorizedimage.")
+            bail!(
+                "--image-scale requires a microscope image to scale. Please provide a microscope image using --image, --darkimage, or --colorizedimage."
+            )
         }
 
         if let Some(image_scale) = c.image_scale {
@@ -489,29 +562,25 @@ impl Count {
 
         let slide_revision = consolidated_slide_serial_capture_area.revision()?;
 
-        if c.custom_bin_size.is_some() && slide_revision != SlideRevision::H1 {
-            bail!("--custom-bin-size should only be used for a Visium HD run. The slide version you have provided is {:?} (inferred from {}).", 
-            &slide_revision, &consolidated_slide_serial_capture_area.slide_id_str());
+        if c.custom_bin_size.is_some() && !slide_revision.is_visium_hd() {
+            bail!(
+                "--custom-bin-size should only be used for a Visium HD run. The slide version you have provided is {:?} (inferred from {}).",
+                &slide_revision,
+                &consolidated_slide_serial_capture_area.slide_id_str()
+            );
         }
 
-        let chemistry = slide_revision.chemistry();
+        let chemistry = slide_revision.chemistry(c.probe_set.is_some());
         if !chemistry.is_cytassist_compatible() && c.cytaimage.is_some() {
             bail!(
-                "The chemistry indicated by {}: {chemistry}, is incompatible with '--cytaimage <IMG>' input.", 
+                "The chemistry indicated by {}: {chemistry}, is incompatible with '--cytaimage <IMG>' input.",
                 &consolidated_slide_serial_capture_area.slide_id_str()
             );
         }
 
         if chemistry.is_cytassist_compatible() && c.cytaimage.is_none() {
             bail!(
-                "The chemistry indicated by {}: {chemistry}, needs a '--cytaimage <IMG>' input, but none was provided.", 
-                &consolidated_slide_serial_capture_area.slide_id_str()
-            );
-        }
-
-        if chemistry.is_spatial_hd_rtl() && c.probe_set.is_none() {
-            bail!(
-                "The chemistry indicated by {}: {chemistry}, requires '--probe-set <PATH>' input.",
+                "The chemistry indicated by {}: {chemistry}, needs a '--cytaimage <IMG>' input, but none was provided.",
                 &consolidated_slide_serial_capture_area.slide_id_str()
             );
         }
@@ -531,6 +600,7 @@ impl Count {
             );
         }
 
+        let has_brightfield_image = c.image.is_some();
         let (tissue_image_paths, dark_images) = if c.darkimage.is_some() {
             (c.darkimage.unwrap(), DARK_IMAGES_CHANNELS)
         } else if c.colorizedimage.is_some() {
@@ -560,6 +630,65 @@ impl Count {
         } else {
             c.r2_length
         };
+
+        let umi_registration = c.umi_registration_args.validate(
+            &tissue_image_paths,
+            dark_images,
+            c.unknown_slide.is_some(),
+            slide_revision.is_visium_hd(),
+        )?;
+
+        if !slide_revision.is_visium_hd() {
+            ensure!(
+                c.nucleus_segmentation.is_none()
+                    && c.custom_segmentation_file.is_none()
+                    && c.max_nucleus_diameter_px.is_none()
+                    && c.nucleus_expansion_distance_micron.is_none(),
+                "Nucleus segmentation is only supported for Visium HD slides."
+            );
+        }
+
+        if c.custom_segmentation_file.is_some() {
+            ensure!(
+                c.nucleus_expansion_distance_micron.is_some(),
+                "--nucleus-expansion-distance-micron must be specified when specifying --custom-segmentation-file."
+            );
+        }
+
+        if let Some(false) = c.nucleus_segmentation {
+            ensure!(c.nucleus_expansion_distance_micron.is_none(), "--nucleus-expansion-distance can not be specified when --nucleus-segmentation=false.");
+            ensure!(
+                c.max_nucleus_diameter_px.is_none(),
+                "--max-nucleus-diameter-px can not be specified when --nucleus-segmentation=false."
+            );
+        } else if let Some(true) = c.nucleus_segmentation {
+            ensure!(
+                has_brightfield_image,
+                "Requesting automated nucleus segmentation using --nucleus-segmentation=true requires a brightfield tissue image (--image)."
+            );
+        }
+
+        if let Some(nucleus_expansion_distance_micron) = c.nucleus_expansion_distance_micron {
+            ensure!(
+                has_brightfield_image || c.custom_segmentation_file.is_some(),
+                "--nucleus-expansion-distance-micron requires either a brightfield tissue image (--image) or --custom-segmentation-file."
+            );
+            ensure!(
+                nucleus_expansion_distance_micron <= 6700,
+                format!("--nucleus-expansion-distance-micron must be less than or equal to 6700. Provided value: {nucleus_expansion_distance_micron}.")
+            );
+        }
+
+        if let Some(max_nucleus_diameter_px) = c.max_nucleus_diameter_px {
+            ensure!(
+                has_brightfield_image,
+                "--max-nucleus-diameter-px requires a brightfield tissue image (--image)."
+            );
+            ensure!(
+                (1..=1024).contains(&max_nucleus_diameter_px),
+                format!("--max-nucleus-diameter-px must be between 1 and 1024. Provided value: {max_nucleus_diameter_px}.")
+            );
+        }
 
         Ok(CountCsMro {
             sample_id: c.id,
@@ -594,6 +723,15 @@ impl Count {
             hd_layout_file: c.slidefile.as_ref().and_then(SlideFile::vlf_file),
             v1_pattern_fix,
             custom_bin_size: c.custom_bin_size.map(|x| x.0),
+            skip_segmentation: !slide_revision.is_visium_hd()
+                || c.nucleus_segmentation == Some(false)
+                || (!has_brightfield_image && c.custom_segmentation_file.is_none()),
+            segmentation_inputs: SegmentationInputs::from_cli_inputs(
+                c.custom_segmentation_file,
+                c.max_nucleus_diameter_px,
+                c.nucleus_expansion_distance_micron,
+            ),
+            umi_registration,
         })
     }
 }
@@ -653,7 +791,7 @@ struct CountCsMro {
     target_set: Option<CliPath>,
     target_set_name: Option<String>,
     sample_desc: String,
-    reference_path: CliPath,
+    reference_path: Option<CliPath>,
     no_bam: bool,
     no_secondary_analysis: bool,
     filter_probes: bool,
@@ -680,6 +818,9 @@ struct CountCsMro {
     hd_layout_file: Option<CliPath>,
     v1_pattern_fix: Option<V1PatternFixArgs>,
     custom_bin_size: Option<u32>,
+    skip_segmentation: bool,
+    segmentation_inputs: SegmentationInputs,
+    umi_registration: UmiRegistrationInputs,
 }
 
 /// Aggregates the feature-barcode count data
@@ -724,6 +865,40 @@ struct Aggr {
     mrp: MrpArgs,
 }
 
+/// Segment a microscope image using the algorithm used in `spaceranger count`
+#[derive(Parser, Debug, Clone, Serialize)]
+struct Segment {
+    /// A unique run id and output folder name [a-zA-Z0-9_-]+.
+    #[clap(long = "id", value_name = "ID", value_parser = validate_id, required = true )]
+    sample_id: String,
+
+    /// Sample description embedded in output files.
+    #[clap(long = "description", default_value = "", value_name = "TEXT")]
+    sample_desc: String,
+
+    /// The H&E tissue image to run nucleus segmentation on. Fluorescent images not supported.
+    #[clap(long, value_name = "TIF|TIFF|BTF|JPG|JPEG", required = true)]
+    tissue_image: CliPath,
+
+    /// Expected maximum nucleus diameter (in pixels of the tissue image).
+    /// This is an advanced parameter that likely only needs to be adjusted if your
+    /// expected diameter is exceptionally large (greater than 40 microns).
+    /// Default is 256 pixels.  Maximum is 1024 pixels. This option cannot be set
+    /// if a custom segmentation file is provided. See the online documentation for more details.
+    #[clap(long, value_name = "NUM")]
+    max_nucleus_diameter_px: Option<u32>,
+
+    /// Do not execute the pipeline.
+    /// Generate an pipeline invocation (.mro) file and stop.
+    #[serde(skip)]
+    #[clap(long)]
+    dry: bool,
+
+    #[serde(skip)]
+    #[clap(flatten)]
+    mrp: MrpArgs,
+}
+
 #[derive(Parser, Debug, Clone)]
 struct Testrun {
     /// A unique run id and output folder name [a-zA-Z0-9_-]+.
@@ -753,7 +928,7 @@ impl Testrun {
         let files_path = pkg_env.build_path.join("external");
         let inputs_path = files_path.join("spaceranger_tiny_inputs");
         let fastqs = vec![CliPath::from(inputs_path.join("fastqs"))];
-        let reference_path = CliPath::from(files_path.join("spaceranger_tiny_ref/"));
+        let reference_path = Some(CliPath::from(files_path.join("spaceranger_tiny_ref/")));
         let tissue_image_paths = vec![CliPath::from(inputs_path.join("image/tinyimage.jpg"))];
         let cytassist_image_paths = Vec::new();
 
@@ -809,24 +984,16 @@ impl Testrun {
             hd_layout_file: None,
             v1_pattern_fix: None,
             custom_bin_size: None,
+            skip_segmentation: true,
+            segmentation_inputs: SegmentationInputs::default(),
+            umi_registration: UmiRegistrationInputs::default(),
         })
     }
 }
 
 fn inner_main() -> Result<ExitCode> {
-    set_env_vars();
+    let (opts, pkg_env, mut telemetry) = SpaceRanger::initialize()?;
 
-    // parse the cmd-line
-    let opts = SpaceRanger::parse();
-
-    // setup the environment
-    let pkg_env = env::setup_env(opts.env_json, CMD, sr_version())?;
-
-    // check deprecated os bits using a subprocess
-    check_deprecated_os()?;
-
-    // You can handle information about subcommands by requesting their matches by name
-    // (as below), requesting just the name used, or both at the same time
     match opts.subcmd {
         SubCommand::Count(c) => {
             // Make sure an image is passed (clap seems to be missing this check)
@@ -877,7 +1044,7 @@ If you want to proceed with a feature reference, but no protein expression data:
                 &mro_args,
                 "rna/spatial_rna_counter_cs.mro",
             )?;
-            execute(&c.id, &mro, &c.mrp, c.dry)
+            execute(&c.id, &mro, &c.mrp, c.dry, &mut telemetry)
         }
 
         SubCommand::Aggr(mut aggr) => {
@@ -891,7 +1058,29 @@ If you want to proceed with a feature reference, but no protein expression data:
                 &aggr,
                 "rna/spatial_rna_aggregator_cs.mro",
             )?;
-            execute(&aggr.sample_id, &mro, &aggr.mrp, aggr.dry)
+            execute(&aggr.sample_id, &mro, &aggr.mrp, aggr.dry, &mut telemetry)
+        }
+
+        SubCommand::Segment(segment) => {
+            if let Some(max_nucleus_diameter_px) = segment.max_nucleus_diameter_px {
+                ensure!(
+                    (1..=1024).contains(&max_nucleus_diameter_px),
+                    format!("--max-nucleus-diameter-px must be between 1 and 1024. Provided value: {max_nucleus_diameter_px}")
+                );
+            }
+
+            let mro = make_mro(
+                "SPATIAL_SEGMENT_NUCLEI_CS",
+                &segment,
+                "rna/spatial_segment_nuclei_cs.mro",
+            )?;
+            execute(
+                &segment.sample_id,
+                &mro,
+                &segment.mrp,
+                segment.dry,
+                &mut telemetry,
+            )
         }
 
         SubCommand::Mkfastq(m) => mkfastq::run_mkfastq(&m, "_spaceranger_internal"),
@@ -902,9 +1091,9 @@ If you want to proceed with a feature reference, but no protein expression data:
                 &mro_args,
                 "rna/spatial_rna_counter_cs.mro",
             )?;
-            execute(&t.id, &mro, &t.mrp, t.dry)
+            execute(&t.id, &mro, &t.mrp, t.dry, &mut telemetry)
         }
-        SubCommand::RnaShared(args) => shared_cmd::run_rna_shared(&pkg_env, args),
+        SubCommand::RnaShared(args) => shared_cmd::run_rna_shared(&pkg_env, args, &mut telemetry),
         SubCommand::Shared(args) => shared_cmd::run_shared(&pkg_env, args),
         SubCommand::Hidden(args) => shared_cmd::run_hidden(args),
     }

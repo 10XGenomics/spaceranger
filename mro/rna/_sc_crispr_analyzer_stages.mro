@@ -31,7 +31,6 @@ stage MEASURE_PERTURBATIONS(
     in  h5   filtered_feature_counts_matrix,
     in  csv  feature_reference,
     in  bool by_feature,
-    in  bool ignore_multiples,
     out csv  perturbation_efficiencies,
     out path perturbation_effects_path,
     src py   "stages/feature/measure_perturbations",

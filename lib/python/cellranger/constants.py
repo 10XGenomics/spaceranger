@@ -201,8 +201,8 @@ TISSUE_BBOX_COLOR = (29, 67, 122)
 
 # the color for the ring traced around fiducial spots on the QC image
 FIDUCIAL_SPOT_COLOR = "#1D437A"
-FILTER_LIST = [
+FILTER_LIST = (
     "None",
     "Non-Targeting",
     "Ignore",
-]  # List of targets that are considered filter-able ie
+)  # Tuple of targets that are considered filter-able ie

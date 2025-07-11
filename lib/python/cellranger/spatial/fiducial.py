@@ -7,7 +7,6 @@ These functions are
 invoked by the ALIGN_FIDUCIALS and ALIGN_FIDUCIALS_TEST_WRAPPER stage code.
 """
 
-
 from __future__ import annotations
 
 import functools
@@ -44,7 +43,13 @@ def fiducial_registration(
     detect_fid_dict: dict,
     reorientation_mode: str,
     img_shape: tuple[int, int],
-) -> tuple[LoupeParser, dict, float, np.ndarray, np.ndarray[tuple[int, int], np.dtype[np.float64]]]:
+) -> tuple[
+    LoupeParser,
+    dict,
+    float,
+    np.ndarray,
+    np.ndarray[tuple[int, int], np.dtype[np.float64]],
+]:
     """Fiducial registration part of the pipeline.
 
     Args:
@@ -72,7 +77,9 @@ def fiducial_registration(
             reorientation_mode="rotation+mirror",
             init_hmat=None,
         ),
-        PipelineMode(Product.VISIUM_HD_NOCYT_PD, SlideType.VISIUM_HD): register_visium_hd_fiducials,
+        PipelineMode(
+            Product.VISIUM_HD_NOCYT_PD, SlideType.VISIUM_HD
+        ): register_visium_hd_fiducials,
         PipelineMode(Product.CYT, SlideType.VISIUM_HD): register_visium_hd_fiducials,
     }
 
@@ -87,7 +94,9 @@ def fiducial_registration(
     spots_data.transform(transform_mat)
 
     # check whether oligos are rotated out of the frame by too much
-    out_frac = outside_fraction(spots_data.get_oligos_imgxy(), img_shape[1] - 1, img_shape[0] - 1)
+    out_frac = outside_fraction(
+        spots_data.get_oligos_imgxy(), img_shape[1] - 1, img_shape[0] - 1
+    )
 
     msg = reg_metrics.get(metrics_names.SUSPECT_ALIGNMENT, None)
     if msg is not None:
@@ -122,7 +131,9 @@ def fiducial_detection(
             minsize=10,
             roi_mask=roi_mask,
         ),
-        PipelineMode(Product.VISIUM_HD_NOCYT_PD, SlideType.VISIUM_HD): functools.partial(
+        PipelineMode(
+            Product.VISIUM_HD_NOCYT_PD, SlideType.VISIUM_HD
+        ): functools.partial(
             detect_visium_hd_fiducials,
             slide=visium_hd_slide,
         ),
@@ -161,7 +172,13 @@ def write_qc_fig(img: np.ndarray, spots_data: LoupeParser, save_path: str) -> No
     fid_dia = spots_data.get_fiducials_diameter()
     embiggen = 1.2  # add 20% to spot size to be able to visualize underlying fiducial
     for x, y in spots_data.get_fiducials_imgxy():
-        cv2.circle(qc_img, (int(x), int(y)), int(fid_dia / 2.0 * embiggen + 0.5), (0, 0, 255), 2)
+        cv2.circle(
+            qc_img,
+            (int(x), int(y)),
+            int(fid_dia / 2.0 * embiggen + 0.5),
+            (0, 0, 255),
+            2,
+        )
     cv2.imwrite(save_path, qc_img)
 
 
@@ -186,7 +203,10 @@ def write_reg_err_fig(
     overlap = sorted(list(set(detect.keys()).intersection(set(design.keys()))))
     detect_xy = np.array([detect[i] for i in overlap])
     transform_xy = np.array(
-        [np.matmul(trans_mat, np.array([design[i][0], design[i][1], 1])) for i in overlap]
+        [
+            np.matmul(trans_mat, np.array([design[i][0], design[i][1], 1]))
+            for i in overlap
+        ]
     )
     transform_xy = np.array([i[:2] / i[2] for i in transform_xy])
     diff = transform_xy - detect_xy

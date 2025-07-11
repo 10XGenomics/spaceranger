@@ -1,0 +1,1379 @@
+# yaml-language-server: $schema=../lib/go/telemetry/config/telemetry_schema.json
+---
+config_version: 1
+product: spaceranger
+version: "4.0.1"
+
+groups:
+  os_stats:
+    when: command
+  hardware_stats:
+    when: command
+
+  count_success:
+    when: success
+    subcommands:
+      - count
+    globs:
+      lib_metrics: "SPATIAL_*/SPATIAL_RNA_COUNTER/SPATIAL_POST_MATRIX_COMPUTATION/SPATIAL_REPORTER/fork0/files/metrics_summary_json.json"
+  aggr_success:
+    when: success
+    subcommands:
+      - aggr
+  reanalyze_success:
+    when: success
+    subcommands:
+      - reanalyze
+  mkfastq_success:
+    when: success
+    subcommands:
+      - mkfastq
+  mkref_success:
+    when: success
+    subcommands:
+      - mkref
+
+  count_failure:
+    when: failure
+    subcommands:
+      - count
+  aggr_failure:
+    when: failure
+    subcommands:
+      - aggr
+  reanalyze_failure:
+    when: failure
+    subcommands:
+      - reanalyze
+  mkfastq_failure:
+    when: failure
+    subcommands:
+      - mkfastq
+  mkref_failure:
+    when: failure
+    subcommands:
+      - mkref
+
+presets:
+  filesystem:
+    match:
+      - key: wsl
+        exp: >-
+          \b(?:(?:9p)|(?:lxfs))\b
+      - key: local
+        exp: >-
+          \b(?:(?:ext[34])|(?:(?:btr|x|z)fs))\b
+      - exp: "\\bnfs"
+      - exp: "lustre"
+      # Usually means docker
+      - exp: "overlay"
+      - exp: squashfs
+      - exp: panfs
+      - exp: gpfs
+      - exp: beegfs
+      - exp: cifs
+      - exp: ceph
+      - exp: "fat\\b"
+      - exp: "\\bfuse"
+  # Copied from lib/rust/cr_types/src/chemistry/chemistry_defs.json
+  chemistry:
+    match:
+      - key: auto
+        exp: "(?i)^auto$"
+      - key: custom
+        exp: "(?i)^custom$"
+      - key: spatial3pv1
+        exp: "(?i)^spatial3pv1$"
+      - key: spatial3pv2
+        exp: "(?i)^spatial3pv2$"
+      - key: spatial3pv3
+        exp: "(?i)^spatial3pv3$"
+      - key: spatial3pv4
+        exp: "(?i)^spatial3pv4$"
+      - key: spatial3pv5
+        exp: "(?i)^spatial3pv5$"
+      - key: spatial-hd-v1
+        exp: "(?i)^spatial-hd-v1$"
+      - key: unknown
+        exp: ".*"
+  image_type:
+    match:
+      - key: jpg
+        exp: "(?i)^jpg$"
+      - key: jpeg
+        exp: "(?i)^jpeg$"
+      - key: tif
+        exp: "(?i)^tif$"
+      - key: tiff
+        exp: "(?i)^tiff$"
+      - key: png
+        exp: "(?i)^png$"
+      - key: btf
+        exp: "(?i)^btf$"
+      - key: unknown
+        exp: ".*"
+  image_mode:
+    match:
+      - key: rgb
+        exp: "(?i)^rgb$"
+      - key: rgba
+        exp: "(?i)^rgba$"
+      - key: l
+        exp: "(?i)^l$"
+      - key: CMYK
+        exp: "(?i)^CMYK$"
+      - key: HSV
+        exp: "(?i)^HSV$"
+      - key: HSL
+        exp: "(?i)^HSL$"
+      - key: YCbCr
+        exp: "(?i)^YCbCr$"
+      - key: LAB
+        exp: "(?i)^LAB$"
+      - key: XYZ
+        exp: "(?i)^XYZ$"
+      - key: P
+        exp: "(?i)^P$"
+      - key: YUV
+        exp: "(?i)^YUV$"
+      - key: gray
+        exp: "(?i)^gray$"
+      - key: grey
+        exp: "(?i)^grey$"
+      - key: unknown
+        exp: ".*"
+  image_manufacturer:
+    match:
+      - key: leica
+        exp: "(?i).*leica.*"
+      - key: zeiss
+        exp: "(?i).*zeiss.*"
+      - key: hamamatsu
+        exp: "(?i).*hamamatsu.*"
+      - key: ventana
+        exp: "(?i).*ventana.*"
+      - key: olympus
+        exp: "(?i).*olympus.*"
+      - key: nikon
+        exp: "(?i).*nikon.*"
+      - key: fisher
+        exp: "(?i).*fisher.*"
+      - key: hitachi
+        exp: "(?i).*hitachi.*"
+      - key: keyence
+        exp: "(?i).*keyence.*"
+      - key: bruker
+        exp: "(?i).*bruker.*"
+      - key: unknown
+        exp: ".*"
+  unknown_slide_id:
+    match:
+      - key: visium-1
+        exp: "(?i)^visium-1$"
+      - key: visium-2
+        exp: "(?i)^visium-2$"
+      - key: visium-2-large
+        exp: "(?i)^visium-2-large$"
+      - key: visium-hd
+        exp: "(?i)^visium-hd$"
+      - key: unknown
+        exp: ".*"
+metrics:
+  # OS stats
+
+  - name: event_count
+    groups:
+      - os_stats
+      - hardware_stats
+      - count_success
+      - count_failure
+      - aggr_success
+      - aggr_failure
+      - reanalyze_success
+      - reanalyze_failure
+      - mkfastq_success
+      - mkfastq_failure
+      - mkref_success
+      - mkref_failure
+    recent_count: os_stats
+    values:
+      exponential:
+        multiple: 2
+        min: 3
+        max: 768
+
+  - name: glibc
+    groups: os_stats
+    special: glibc
+    values:
+      semver_thresholds:
+        - "2.12"
+        - "2.17"
+        - "2.28"
+        - "2.34"
+
+  - name: kernel
+    groups: os_stats
+    special: kernel
+    values:
+      semver_thresholds:
+        - "3.10" # centos/rhel 7
+        - "4.4" # Ubunut 16
+        - "4.15" # Ubuntu 18
+        - "4.18" # rhel 8
+        - "5.4" # Ubuntu 20
+        - "5.14" # rhel 9
+        - "5.15" # Ubuntu 22
+
+  - name: distro
+    groups: os_stats
+    special: distro
+
+  - name: container
+    groups: os_stats
+    special: container
+
+  - name: cgroup_memory_soft_limit
+    groups: os_stats
+    file_content:
+      cgroup: "memory"
+      path:
+        - memory.soft_limit_in_bytes
+        - memory.memsw.soft_limit_in_bytes
+        - memory.high
+      line: "[0-9]+"
+    values:
+      exponential:
+        multiple: 2
+        min: 1073741824
+
+  - name: cgroup_memory_hard_limit
+    groups: os_stats
+    file_content:
+      cgroup: "memory"
+      path:
+        - memory.limit_in_bytes
+        - memory.memsw.limit_in_bytes
+        - memory.max
+      line: "[0-9]+"
+    values:
+      exponential:
+        multiple: 2
+        min: 1073741824
+
+  - name: bin_filesystem
+    filesystem:
+      which: bins
+      property: type
+    groups: os_stats
+    preset: filesystem
+
+  - name: pipestance_filesystem
+    filesystem:
+      which: pipestance
+      property: type
+    groups:
+      - count_success
+      - count_failure
+      - aggr_success
+      - aggr_failure
+      - reanalyze_success
+      - reanalyze_failure
+      - mkfastq_success
+      - mkfastq_failure
+      - mkref_success
+      - mkref_failure
+    preset: filesystem
+
+  - name: process_ulimit
+    groups: os_stats
+    rlimit:
+      resource: nproc
+    values:
+      thresholds:
+        - 1024
+        - 2048
+        - 65536
+        - 131072
+
+  - name: vmem_ulimit
+    groups: os_stats
+    rlimit:
+      resource: as
+    values:
+      thresholds:
+        - 1024
+        - 2048
+        - 65536
+        - 131072
+
+  - name: transparent_huge_pages
+    groups: os_stats
+    file_content:
+      path: /sys/kernel/mm/transparent_hugepage/enabled
+      line: >-
+        \[(\w+)\]
+    values:
+      match:
+        - exp: always
+        - exp: madvise
+        - exp: never
+
+  # Hardware stats: CPU info
+  - name: cpu_mfg
+    file_content:
+      path: /proc/cpuinfo
+      line: >-
+        vendor_id\s*:\s*(\S*)
+    groups:
+      - hardware_stats
+    values:
+      match:
+        - exp: "(?i:Intel)"
+        - exp: "(?i:AMD)"
+
+  - name: avx
+    file_content:
+      path: /proc/cpuinfo
+      line: >-
+        flags\s*:\s*(.*)
+    groups: hardware_stats
+    values:
+      match:
+        - exp: "\\bavx512"
+        - exp: "\\bavx2\\b"
+        - exp: "\\bavx\\b"
+
+  - name: processor_count
+    # technically this is vCPU count - 1, because they're numbered from 0.
+    groups:
+      - hardware_stats
+      - count_success
+      - count_failure
+      - aggr_success
+      - aggr_failure
+      - reanalyze_success
+      - reanalyze_failure
+      - mkfastq_success
+      - mkfastq_failure
+      - mkref_success
+      - mkref_failure
+    file_content:
+      path: /proc/cpuinfo
+      last_line: >-
+        processor\s*:\s*(\d+)
+    values:
+      thresholds:
+        - 7
+        - 15
+        - 23
+        - 31
+        - 47
+        - 65
+        - 95
+        - 127
+
+  - name: socket_count
+    # technically this is socket count - 1, because they're numbered from 0.
+    groups: hardware_stats
+    file_content:
+      path: /proc/cpuinfo
+      last_line: >-
+        physical id\s*:\s*(\d+)
+    values:
+      thresholds:
+        - 0
+        - 1
+        - 3
+  - name: cores_per_socket
+    groups: hardware_stats
+    file_content:
+      path: /proc/cpuinfo
+      line: >-
+        cpu cores\s*:\s*(\d+)
+    values:
+      thresholds:
+        - 4
+        - 8
+        - 12
+        - 16
+        - 24
+        - 32
+
+  # Hardware stats: memory
+  - name: memory
+    groups:
+      - hardware_stats
+      - count_success
+      - count_failure
+      - aggr_success
+      - aggr_failure
+      - reanalyze_success
+      - reanalyze_failure
+      - mkfastq_success
+      - mkfastq_failure
+      - mkref_success
+      - mkref_failure
+    file_content:
+      path: /proc/meminfo
+      line: >-
+        ^MemTotal:\s*([0-9]+)
+    values:
+      exponential:
+        multiple: 2
+        min: 8388608
+
+  # Failure information
+  - name: failed_stage
+    groups:
+      - count_failure
+      - aggr_failure
+      - reanalyze_failure
+      - mkfastq_failure
+      - mkref_failure
+    special: failed_stage
+  - name: error
+    groups:
+      - count_failure
+      - aggr_failure
+      - reanalyze_failure
+      - mkfastq_failure
+      - mkref_failure
+    file_content:
+      path: _errors
+      stage_relative: true
+      # match the first line that starts with a non-whitespace character
+      line: >-
+        ^\S.+
+    values:
+      match:
+        - exp: >-
+            ^\S+Error:
+          key: python exception
+        - exp: "not queued or running"
+          key: cluster failure
+
+  - name: subcommand
+    groups:
+      - count_success
+      - count_failure
+      - aggr_success
+      - aggr_failure
+      - reanalyze_success
+      - reanalyze_failure
+      - mkfastq_success
+      - mkfastq_failure
+      - mkref_success
+      - mkref_failure
+    special: subcommand
+
+  # count CLI args
+  - name: filter_probes
+    groups:
+      - count_success
+      - count_failure
+    flag: --filter-probes
+    values:
+      boolean: true
+
+  - name: create_bam
+    groups:
+      - count_success
+      - count_failure
+    flag: --create-bam
+    values:
+      boolean: true
+
+  - name: no_bam
+    groups:
+      - count_success
+      - count_failure
+    flag: --no-bam
+    values:
+      boolean: true
+
+  - name: unknown_slide
+    groups:
+      - count_success
+      - count_failure
+    flag: --unknown-slide
+    preset: unknown_slide_id
+
+  - name: reorient_images
+    groups:
+      - count_success
+      - count_failure
+    flag: --reorient-images
+    values:
+      boolean: true
+
+  - name: image_scale
+    groups:
+      - count_success
+      - count_failure
+    flag: ---image-scale
+    values:
+      float: true
+
+  - name: nosecondary
+    groups:
+      - count_success
+      - count_failure
+    flag: --nosecondary
+    values:
+      boolean: true
+
+  - name: r1_length
+    groups:
+      - count_success
+      - count_failure
+    flag: --r1-length
+    values:
+      float: true
+
+  - name: r2_length
+    groups:
+      - count_success
+      - count_failure
+    flag: --r2-length
+    values:
+      float: true
+
+  - name: include_introns
+    groups:
+      - count_success
+      - count_failure
+    flag: --include-introns
+    values:
+      boolean: true
+
+  - name: chemistry
+    groups:
+      - count_success
+      - count_failure
+    flag: --chemistry
+    preset: chemistry
+
+  # shared mkref args
+
+  - name: memgb
+    groups:
+      - mkref_success
+      - mkref_failure
+    flag: --memgb
+    values:
+      float: true
+
+  - name: nthreads
+    groups:
+      - mkref_success
+      - mkref_failure
+    flag: --nthreads
+    values:
+      float: true
+
+  # aggr CLI args
+
+  - name: normalize
+    groups:
+      - aggr_success
+      - aggr_failure
+    flag: --normalize
+    values:
+      match:
+        - key: mapped
+          exp: ^mapped$
+        - key: none
+          exp: ^none$
+
+  - name: nosecondary
+    groups:
+      - aggr_success
+      - aggr_failure
+    flag: --normalize
+    values:
+      boolean: true
+
+  - name: enable-tsne
+    groups:
+      - aggr_success
+      - aggr_failure
+    flag: --enable-tsne
+    values:
+      boolean: true
+
+
+  # collect for all pipelines on success
+  - name: runtime
+    groups:
+      - count_success
+      - count_failure
+      - aggr_success
+      - aggr_failure
+      - reanalyze_success
+      - reanalyze_failure
+      - mkfastq_success
+      - mkfastq_failure
+      - mkref_success
+      - mkref_failure
+    special: runtime
+    values:
+      float: true
+
+  - name: core_hours
+    groups:
+      - count_success
+      - aggr_success
+      - reanalyze_success
+      - mkfastq_success
+      - mkref_success
+    file_content:
+      path: _perf
+      json_path:
+        - forks
+        - fork_stats
+        - core_hours
+    values:
+      float: true
+
+  - name: utime
+    groups:
+      - count_success
+      - aggr_success
+      - reanalyze_success
+      - mkfastq_success
+      - mkref_success
+    file_content:
+      path: _perf
+      json_path:
+        - forks
+        - fork_stats
+        - usertime
+    values:
+      float: true
+
+  - name: disk_hwm
+    groups:
+      - count_success
+      - aggr_success
+      - reanalyze_success
+      - mkfastq_success
+      - mkref_success
+    file_content:
+      path: _perf
+      json_path:
+        - maxbytes
+    values:
+      exponential:
+        multiple: 2
+        min: 1
+
+  - name: jobmode
+    groups:
+      - count_success
+      - count_failure
+      - aggr_success
+      - aggr_failure
+      - reanalyze_success
+      - reanalyze_failure
+      - mkfastq_success
+      - mkfastq_failure
+      - mkref_success
+      - mkref_failure
+    mro_flag: --jobmode
+    values:
+      match:
+        - exp: local
+        - exp: lsf
+        - exp: pbspro
+        - exp: sge
+        - exp: slurm
+        - exp: torque
+
+  # result of chemistry detection at the per-library level
+  - name: GEX_chemistry
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path:
+        - chemistry_defs
+        - Gene Expression
+        - name
+    preset: chemistry
+  - name: ANTIBODY_chemistry
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path:
+        - chemistry_defs
+        - Antibody Capture
+        - name
+    preset: chemistry
+  - name: Custom_chemistry
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path:
+        - chemistry_defs
+        - Custom
+        - name
+    preset: chemistry
+
+  # pipeline metrics
+  - name: chemistry_name
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: chemistry_name
+    preset: chemistry
+  - name: ANTIBODY_bc_bases_with_q30_frac
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: ANTIBODY_bc_bases_with_q30_frac
+    values:
+      float: true
+  - name: ANTIBODY_bc_bases_with_q30_in_gel_bead_frac
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: ANTIBODY_bc_bases_with_q30_in_gel_bead_frac
+    values:
+      float: true
+  - name: ANTIBODY_bc_bases_with_q30_in_probe_frac
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: ANTIBODY_bc_bases_with_q30_in_probe_frac
+    values:
+      float: true
+  - name: ANTIBODY_feature_reads_in_cells
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: ANTIBODY_feature_reads_in_cells
+    values:
+      float: true
+  - name: ANTIBODY_filtered_bcs_transcriptome_union
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: ANTIBODY_filtered_bcs_transcriptome_union
+    values:
+      float: true
+  - name: ANTIBODY_frac_feature_reads_usable
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: ANTIBODY_frac_feature_reads_usable
+    values:
+      float: true
+  - name: ANTIBODY_good_bc_frac
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: ANTIBODY_good_bc_frac
+    values:
+      float: true
+  - name: ANTIBODY_good_bc_in_gel_bead_frac
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: ANTIBODY_good_bc_in_gel_bead_frac
+    values:
+      float: true
+  - name: ANTIBODY_good_bc_in_probe_frac
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: ANTIBODY_good_bc_in_probe_frac
+    values:
+      float: true
+  - name: ANTIBODY_good_umi_frac
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: ANTIBODY_good_umi_frac
+    values:
+      float: true
+  - name: ANTIBODY_multi_cdna_pcr_dupe_reads_frac
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: ANTIBODY_multi_cdna_pcr_dupe_reads_frac
+    values:
+      float: true
+  - name: ANTIBODY_read_bases_with_q30_frac
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: ANTIBODY_read_bases_with_q30_frac
+    values:
+      float: true
+  - name: ANTIBODY_reads_lost_to_aggregate_GEMs
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: ANTIBODY_reads_lost_to_aggregate_GEMs
+    values:
+      float: true
+  - name: ANTIBODY_reads_per_cell
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: ANTIBODY_reads_per_cell
+    values:
+      float: true
+  - name: ANTIBODY_recognized_feature_bc_frac
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: ANTIBODY_recognized_feature_bc_frac
+    values:
+      float: true
+  - name: ANTIBODY_total_read_pairs
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: ANTIBODY_total_read_pairs
+    values:
+      float: true
+  - name: ANTIBODY_umi_bases_with_q30_frac
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: ANTIBODY_umi_bases_with_q30_frac
+    values:
+      float: true
+  - name: ANTIBODY_unprocessed_read_pairs
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: ANTIBODY_unprocessed_read_pairs
+    values:
+      float: true
+  - name: Custom_bc_bases_with_q30_in_gel_bead_frac
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: Custom_bc_bases_with_q30_in_gel_bead_frac
+    values:
+      float: true
+  - name: Custom_bc_bases_with_q30_in_probe_frac
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: Custom_bc_bases_with_q30_in_probe_frac
+    values:
+      float: true
+  - name: Custom_feature_reads_in_cells
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: Custom_feature_reads_in_cells
+    values:
+      float: true
+  - name: Custom_good_bc_frac
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: Custom_good_bc_frac
+    values:
+      float: true
+  - name: Custom_good_umi_frac
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: Custom_good_umi_frac
+    values:
+      float: true
+  - name: Custom_multi_cdna_pcr_dupe_reads_frac
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: Custom_multi_cdna_pcr_dupe_reads_frac
+    values:
+      float: true
+  - name: Custom_read_bases_with_q30_frac
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: Custom_read_bases_with_q30_frac
+    values:
+      float: true
+  - name: Custom_reads_per_cell
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: Custom_reads_per_cell
+    values:
+      float: true
+  - name: Custom_total_read_pairs
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: Custom_total_read_pairs
+    values:
+      float: true
+  - name: Custom_umi_bases_with_q30_frac
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: Custom_umi_bases_with_q30_frac
+    values:
+      float: true
+  - name: Custom_unprocessed_read_pairs
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: Custom_unprocessed_read_pairs
+    values:
+      float: true
+  - name: bc_bases_with_q30_frac
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: bc_bases_with_q30_frac
+    values:
+      float: true
+  - name: bc_bases_with_q30_in_gel_bead_frac
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: bc_bases_with_q30_in_gel_bead_frac
+    values:
+      float: true
+  - name: bc_bases_with_q30_in_probe_frac
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: bc_bases_with_q30_in_probe_frac
+    values:
+      float: true
+  - name: filtered_bcs_transcriptome_union
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: filtered_bcs_transcriptome_union
+    values:
+      float: true
+  - name: good_bc_frac
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: good_bc_frac
+    values:
+      float: true
+  - name: good_umi_frac
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: good_umi_frac
+    values:
+      float: true
+  - name: multi_cdna_pcr_dupe_reads_frac
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: multi_cdna_pcr_dupe_reads_frac
+    values:
+      float: true
+  - name: read_bases_with_q30_frac
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: read_bases_with_q30_frac
+    values:
+      float: true
+  - name: reads_per_cell
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: reads_per_cell
+    values:
+      float: true
+  - name: total_cell_associated_partitions
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: total_cell_associated_partitions
+    values:
+      float: true
+  - name: total_read_pairs
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: total_read_pairs
+    values:
+      float: true
+  - name: umi_bases_with_q30_frac
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: umi_bases_with_q30_frac
+    values:
+      float: true
+  - name: unprocessed_read_pairs
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: unprocessed_read_pairs
+    values:
+      float: true
+  - name: tissue_image_format
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: tissue_image_format
+    preset: image_type
+  - name: tissue_image_width
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: tissue_image_width
+    values:
+      float: true
+  - name: tissue_image_height
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: tissue_image_height
+    values:
+      float: true
+  - name: tissue_image_color_mode
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: tissue_image_color_mode
+    preset: image_mode
+  - name: tissue_image_depth
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: tissue_image_depth
+    values:
+      float: true
+  - name: tissue_image_num_pages
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: tissue_image_num_pages
+    values:
+      float: true
+  - name: tissue_image_dpi
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: tissue_image_dpi
+    values:
+      float: true
+  - name: tissue_image_objective_magnification
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: tissue_image_objective_magnification
+    values:
+      float: true
+  - name: tissue_image_manufacturer
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: tissue_image_manufacturer
+    preset: image_manufacturer
+  - name: square_002um.bins_under_tissue
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path:
+        - square_002um
+        - bins_under_tissue
+    values:
+      float: true
+  - name: square_002um.mean_umis_per_bin
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path:
+        - square_002um
+        - mean_umis_per_bin
+    values:
+      float: true
+  - name: square_002um.mean_genes_per_bin
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path:
+        - square_002um
+        - mean_genes_per_bin
+    values:
+      float: true
+  - name: square_002um.mean_reads_per_bin
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path:
+        - square_002um
+        - mean_reads_per_bin
+    values:
+      float: true
+  - name: sequencing_saturation
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: multi_cdna_pcr_dupe_reads_frac
+    values:
+      float: true
+  - name: targeted_sequencing_saturation
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: multi_cdna_pcr_dupe_reads_frac_on_target
+    values:
+      float: true
+  - name: uses_loupe_alignment
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: uses_loupe_alignment
+    values:
+      boolean: true
+  - name: segmentation_from_user
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path: segmentation_from_user
+    values:
+      boolean: true
+  - name: hd_layout_offset.x_offset
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path:
+        - hd_layout_offset
+        - x_offset
+    values:
+      float: true
+  - name: hd_layout_offset.y_offset
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path:
+        - hd_layout_offset
+        - y_offset
+    values:
+      float: true
+  - name: hd_layout_offset.is_custom_offset
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path:
+        - hd_layout_offset
+        - is_custom_offset
+    values:
+      boolean: true
+  - name: hd_layout_offset.is_predicted_offset_outside_range
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path:
+        - hd_layout_offset
+        - is_predicted_offset_outside_range
+    values:
+      boolean: true
+  - name: hd_layout_offset.pre_refinement_x_offset
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path:
+        - hd_layout_offset
+        - pre_refinement_x_offset
+    values:
+      float: true
+  - name: hd_layout_offset.pre_refinement_y_offset
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path:
+        - hd_layout_offset
+        - pre_refinement_y_offset
+    values:
+      float: true
+  - name: hd_layout_offset.gaussian_fit_x_offset
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path:
+        - hd_layout_offset
+        - gaussian_fit_x_offset
+    values:
+      float: true
+  - name: hd_layout_offset.gaussian_fit_y_offset
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path:
+        - hd_layout_offset
+        - gaussian_fit_y_offset
+    values:
+      float: true
+  - name: hd_layout_offset.gaussian_sigma_x
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path:
+        - hd_layout_offset
+        - gaussian_sigma_x
+    values:
+      float: true
+  - name: hd_layout_offset.gaussian_sigma_y
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path:
+        - hd_layout_offset
+        - gaussian_sigma_y
+    values:
+      float: true
+  - name: hd_layout_offset.gaussian_amplitude
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path:
+        - hd_layout_offset
+        - gaussian_amplitude
+    values:
+      float: true
+  - name: hd_layout_offset.gaussian_fit_background
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path:
+        - hd_layout_offset
+        - gaussian_fit_background
+    values:
+      float: true
+  - name: hd_layout_offset.has_gaussian_fit_failed
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path:
+        - hd_layout_offset
+        - has_gaussian_fit_failed
+    values:
+      boolean: true
+  - name: hd_layout_offset.is_gaussian_fit_outside_range
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path:
+        - hd_layout_offset
+        - is_gaussian_fit_outside_range
+    values:
+      boolean: true
+  - name: hd_layout_offset.is_pre_refinement_offset_outside_range
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path:
+        - hd_layout_offset
+        - is_pre_refinement_offset_outside_range
+    values:
+      boolean: true
+  - name: hd_layout_offset.is_pre_refinement_offset_good_but_fit_bad
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path:
+        - hd_layout_offset
+        - is_pre_refinement_offset_good_but_fit_bad
+    values:
+      boolean: true
+  - name: hd_layout_offset.phase_correlation_all_finite
+    groups:
+      - count_success
+    file_content:
+      path: ${lib_metrics}
+      json_path:
+        - hd_layout_offset
+        - phase_correlation_all_finite
+    values:
+      boolean: true

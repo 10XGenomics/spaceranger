@@ -1,9 +1,10 @@
 //!
 //! Corrects sequencing errors in barcodes, allowing up to one mismatch.
 //!
+#![allow(missing_docs)]
 use crate::whitelist::Whitelist;
 use crate::{BarcodeSegment, BarcodeSegmentState, BcSegQual, BcSegSeq};
-use metric::SimpleHistogram;
+use metric::{Histogram, SimpleHistogram};
 
 const BC_MAX_QV: u8 = 66; // This is the illumina quality value
 pub(crate) const BASE_OPTS: [u8; 4] = [b'A', b'C', b'G', b'T'];
@@ -164,7 +165,7 @@ impl CorrectBarcode for Posterior {
     }
 }
 
-pub fn probability(qual: u8) -> f64 {
+fn probability(qual: u8) -> f64 {
     //33 is the illumina qual offset
     let q = f64::from(qual);
     (10_f64).powf(-(q - 33.0) / 10.0)
@@ -174,7 +175,7 @@ pub fn probability(qual: u8) -> f64 {
 mod test {
     use super::*;
     use crate::BcSegSeq;
-    use metric::{SimpleHistogram, TxHashSet};
+    use metric::{Histogram, SimpleHistogram, TxHashSet};
     use proptest::proptest;
 
     fn posterior(

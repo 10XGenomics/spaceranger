@@ -6,7 +6,7 @@ from __future__ import annotations
 import matplotlib.pyplot as plt
 import numpy as np
 import skimage
-from skimage import img_as_ubyte
+from skimage.util import img_as_ubyte
 
 from cellranger.spatial.transform import convert_transform_corner_to_center
 
@@ -31,6 +31,7 @@ def create_tissue_regist_qc_img(
     Returns:
         np.ndarray: the qc image
     """
+    # skimage.transform.warp uses center-based sub-pixel coordinates
     center_based_transform = convert_transform_corner_to_center(transform_matrix)
     transform = skimage.transform.ProjectiveTransform(matrix=center_based_transform)
 

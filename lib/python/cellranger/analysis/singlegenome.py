@@ -35,6 +35,9 @@ COMPONENTS = {
 
 TSNE_NAME = "tsne"
 UMAP_NAME = "umap"
+PROJECTION_TITLE = {TSNE_NAME: "t-SNE", UMAP_NAME: "UMAP"}
+
+type Projection = str
 
 
 class SingleGenomeAnalysis:
@@ -140,6 +143,11 @@ class SingleGenomeAnalysis:
         for name, tsne in self.tsne.items():
             self.tsne[name] = TSNE(
                 tsne.transformed_tsne_matrix[cell_bc_indices, :], name=tsne.name, key=tsne.key
+            )
+
+        for name, umap in self.umap.items():
+            self.umap[name] = UMAP(
+                umap.transformed_umap_matrix[cell_bc_indices, :], name=umap.name, key=umap.key
             )
 
     def subsample_bcs(self, num_bcs):
@@ -313,18 +321,9 @@ class SingleGenomeAnalysis:
             )
 
     @staticmethod
-    def load_bcs_from_matrix_h5(filename):
-        """Load just the barcodes from a matrix h5."""
-        with h5.File(ensure_binary(filename), "r") as f:
-            # Take the first group, assuming a single-genome matrix
-            # TODO: fixme when we have a single matrix group
-            group_name = next(iter(f.keys()))
-            return cr_matrix.CountMatrix.load_bcs_from_h5_group(f[group_name])
-
-    @staticmethod
-    def load_default_format(base_dir, method):
+    def load_default_format(base_dir, *, method, projections: Sequence[Projection]):
         h5_file_path = analysis_io.h5_path(base_dir)
         if os.path.exists(h5_file_path):
-            return SingleGenomeAnalysis.load_h5(h5_file_path, method)
+            return SingleGenomeAnalysis.load_h5(h5_file_path, method, projections)
         else:
             return None

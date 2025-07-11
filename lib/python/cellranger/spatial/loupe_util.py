@@ -11,6 +11,7 @@ import itertools
 import json
 import os
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import TypedDict
 
 import numpy as np
@@ -19,11 +20,13 @@ from cellranger.spatial.slide_design_o3 import (  # pylint: disable=no-name-in-m
     VisiumHdLayout,
     VisiumHdSlideWrapper,
 )
+from cellranger.spatial.tiffer import call_tiffer_checksum
 from cellranger.spatial.transform import (
     normalize_perspective_transform,
     scale_from_transform_matrix,
     scale_matrix,
     transform_pts_2d,
+    translation_matrix,
 )
 
 
@@ -119,7 +122,7 @@ class SpotDataDict(RequiredSpotDataDict, total=False):
 
 
 class CytAssistInfoDict(TypedDict):
-    pathHiRes: str
+    checksumHiRes: str
     transformImages: list[list[float]]
 
 
@@ -175,6 +178,18 @@ class AlignFileData(BaseAlignData, total=False):
 
 
 SLIDE_LAYOUT_FILE_KEY = "slide_layout_file"
+
+
+@dataclass
+class HdLayoutOffset:
+    """Layout offset for HD in um."""
+
+    x_offset: float
+    y_offset: float
+
+    def total_offset(self):
+        """Return the norm of the offset."""
+        return np.linalg.norm([self.x_offset, self.y_offset])
 
 
 # pylint: disable=too-many-public-methods
@@ -259,13 +274,22 @@ class LoupeParser:
 
             if SLIDE_LAYOUT_FILE_KEY in self._data_dict:
                 vlf_str = base64.b64decode(self._data_dict[SLIDE_LAYOUT_FILE_KEY]).decode()
-                hd_layout = VisiumHdLayout.from_vlf_str_and_area(vlf_str, self._data_dict["area"])
-                slide_name = (
-                    "visium_hd_rc1"
-                    if hd_layout.slide_design == "ct042723"
-                    else hd_layout.slide_design
+                area = (
+                    self._data_dict["area"]
+                    if "A1" in vlf_str or "B1" in vlf_str
+                    else self._data_dict["area"][0]
                 )
+                hd_layout = VisiumHdLayout.from_vlf_str_and_area(vlf_str, area)
+
+                if hd_layout.slide_design == "ct042723":
+                    slide_name = "visium_hd_rc1"
+                elif hd_layout.slide_design == "xl112023":
+                    slide_name = "visium_hd_rcxl1"
+                else:
+                    slide_name = hd_layout.slide_design
+
                 self.hd_slide = VisiumHdSlideWrapper(slide_name, hd_layout)
+
             elif "hd_slide_info" in self._data_dict:
                 slide_info = self._data_dict["hd_slide_info"]
                 self.hd_slide = VisiumHdSlideWrapper(
@@ -292,6 +316,10 @@ class LoupeParser:
                 ),
             )
 
+        self.loupe_alignment_json_version = None
+        if loupe_version := self._data_dict.get("metadata", {}).get("version"):
+            self.loupe_alignment_json_version = loupe_version
+
         # Checking that if the oligos are a string then we have a HD slide
         assert not (isinstance(self._data_dict.get("oligo"), str) ^ (self.hd_slide is not None)), (
             "Failure while building LoupeParser. We find inconsistencies between HD slide and metadata. "
@@ -307,6 +335,9 @@ class LoupeParser:
     def get_remove_image_pages(self) -> list:
         return self._data_dict.get("removeImagePages", [])
 
+    def get_loupe_alignment_json_version(self) -> str | None:
+        return self.loupe_alignment_json_version
+
     def get_image_page_names(self) -> list:
         return self._data_dict.get("imagePageNames", [])
 
@@ -320,6 +351,10 @@ class LoupeParser:
         if not area_id:  # make sure empty strings are interpreted as None
             area_id = None
         return area_id
+
+    def set_area(self, area: str):
+        """Sets capture area ID."""
+        self._data_dict["area"] = area
 
     def hd_slide_layout(self) -> VisiumHdLayout | None:
         """Get the HD slide layout."""
@@ -350,6 +385,10 @@ class LoupeParser:
         if not serial_number:  # make sure empty strings are interpreted as None
             serial_number = None
         return serial_number
+
+    def set_serial_number(self, serial_number: str):
+        """Sets the slide serial number."""
+        self._data_dict["serialNumber"] = serial_number
 
     def contain_fiducial_info(self) -> bool:
         """Whether the data contain the fiducial information.
@@ -535,6 +574,10 @@ class LoupeParser:
         else:
             return np.eye(3)
 
+    def set_spot_transform(self, transform: list[list[float]]):
+        """Set spot transform."""
+        self._data_dict["transform"] = transform
+
     def get_fiducials_xy(self) -> np.ndarray[tuple[int, int], np.dtype[np.float64]]:
         """Get the design x, y of fiducials."""
         fids_xy = [[pt_dict["x"], pt_dict["y"]] for pt_dict in self._data_dict["fiducial"]]
@@ -690,6 +733,19 @@ class LoupeParser:
         for pt_dict in self._data_dict["oligo"]:
             pt_dict["dia"] = pt_dict["dia"] * scale
 
+    def update_tissue_transform(self, transform: list[list[float]], tissue_image_path: str):
+        """Adds Tissue Registration Transform and checksum if not already in json_file."""
+        if "cytAssistInfo" not in self._data_dict:
+            self._data_dict["cytAssistInfo"] = {
+                "checksumHiRes": call_tiffer_checksum(tissue_image_path),
+                "transformImages": transform,
+            }
+
+    def update_checksum(self, cytassist_image_path: str):
+        """Adds Cytassist Image checksum to json_file if not already there."""
+        if "checksum" not in self._data_dict:
+            self._data_dict["checksum"] = call_tiffer_checksum(cytassist_image_path)
+
     def save_to_json(self, filepath: str):
         """Save the data to json file."""
         with open(filepath, "w") as f:
@@ -710,6 +766,20 @@ class LoupeParser:
             self.update_spots_dia_by_scale(scale)
         else:
             self._data_dict["transform"] = transform_mat.tolist()
+
+    def update_hd_layout_with_offset(self, offset: HdLayoutOffset):
+        """Update the HD layout with the offset. Caller needs to ensure that the layout is not None."""
+        if self.hd_slide is None:
+            raise RuntimeError("No HD slide found in LoupeParser.")
+        layout = self.hd_slide.layout()
+        if layout is None:
+            raise RuntimeError("No HD layout found in LoupeParser.")
+
+        layout.transform = layout.transform @ translation_matrix(offset.x_offset, offset.y_offset)
+        self.hd_slide = VisiumHdSlideWrapper(
+            self.hd_slide.name(),
+            layout,
+        )
 
     @staticmethod
     def estimate_mem_gb_from_json_file(json_file: str | None) -> float:

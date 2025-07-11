@@ -7,30 +7,30 @@ import csv
 import json
 from pathlib import Path
 
-# Key in CAS out
+# Key in cell annotation out
 BARCODE_KEY = "barcode"
 SCORE_KEY = "score"
-CAS_CELL_TYPES_ID_KEY_IN = "cell_type_ontology_term_id"
+CELL_TYPES_ID_KEY_IN = "cell_type_ontology_term_id"
 MATCHES_KEY_IN = "matches"
 
-# Keys in Postprocessed CAS out
+# Keys in Postprocessed cell annotation out
 FINE_CELL_TYPES_KEY = "fine_cell_type"
 COARSE_CELL_TYPES_KEY = "coarse_cell_type"
 
 
 # Key in consolidated cell typing matrix created
-CAS_CELL_TYPES_KEY = "cas_cell_type"
+CELL_TYPES_KEY = "cas_cell_type"
 GROUND_TRUTH_CELL_TYPES_KEY = "gt_cell_type"
-CAS_CELL_TYPES_AFTER_MAPPING_KEY = "cas_mapped_cell_type"
+CELL_TYPES_AFTER_MAPPING_KEY = "cas_mapped_cell_type"
 GROUND_TRUTH_CELL_TYPES_AFTER_MAPPING_KEY = "gt_mapped_cell_type"
 
-# Values when no GT and no CAS in cell typing matrix created
+# Values when no GT and no cell annotation in cell typing matrix created
 NO_GROUND_TRUTH_VALUE = "no ground truth"
 NO_CAS_VALUE = "no cas annotation"
 DEFAULT_CELL_MAPPING = "cell"
 DEFAULT_CELL_MAPPING_ID = "CL:0000000"
 
-# file to get the CAS cell map from
+# file to get the cell annotation cell map from
 CAS_CELL_TYPE_MAP_BASE_DIRECTORY = Path(__file__).parent / "ontology_tree"
 CAS_CELL_TYPE_MAP_FILENAME = "V5_mappings.csv"
 CAS_CELL_TYPE_MAP_PATH = CAS_CELL_TYPE_MAP_BASE_DIRECTORY / CAS_CELL_TYPE_MAP_FILENAME
@@ -39,9 +39,9 @@ CAS_CELL_TYPE_MAP_PATH = CAS_CELL_TYPE_MAP_BASE_DIRECTORY / CAS_CELL_TYPE_MAP_FI
 SOURCE_NODE_MAP_KEY = "source_node_name"
 TARGET_NODE_MAP_KEY = "target_node_name"
 
-# file to get the CAS display map from
+# file to get the cell annotation display map from
 CAS_DISPLAY_MAP_BASE_DIRECTORY = Path(__file__).parent / "display_map"
-CAS_DISPLAY_MAP_FILENAME = "celltype_display_mapping_V5.json"
+CAS_DISPLAY_MAP_FILENAME = "celltype_display_mapping_v8.json"
 CAS_DISPLAY_MAP_PATH = CAS_DISPLAY_MAP_BASE_DIRECTORY / CAS_DISPLAY_MAP_FILENAME
 
 # Keys of metrics JSON

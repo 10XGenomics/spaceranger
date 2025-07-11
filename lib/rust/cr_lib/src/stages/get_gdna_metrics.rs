@@ -1,4 +1,5 @@
 //! Martian stage GET_GDNA_METRICS
+#![allow(missing_docs)]
 
 use crate::gdna_utils::compute_gdna_metrics;
 use anyhow::Result;
@@ -9,7 +10,6 @@ use martian_derive::{make_mro, MartianStruct};
 use martian_filetypes::json_file::JsonFile;
 use martian_filetypes::FileTypeWrite;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
 #[derive(Serialize)]
 pub struct GdnaMetric {
@@ -29,7 +29,6 @@ pub struct GdnaPlottingSummary {
 #[derive(Clone, Deserialize, MartianStruct)]
 pub struct GetGdnaMetricsStageInputs {
     pub molecule_info: H5File,
-    pub reference_path: PathBuf,
     pub probe_set: TargetSetFile,
 }
 
@@ -48,8 +47,7 @@ impl MartianMain for GetGdnaMetrics {
     type StageOutputs = GetGdnaMetricsStageOutputs;
 
     fn main(&self, args: Self::StageInputs, rover: MartianRover) -> Result<Self::StageOutputs> {
-        let gdna_metrics =
-            compute_gdna_metrics(&args.molecule_info, &args.probe_set, &args.reference_path);
+        let gdna_metrics = compute_gdna_metrics(&args.molecule_info, &args.probe_set)?;
 
         let summary: JsonFile<_> = rover.make_path("summary");
         summary.write(&GdnaMetric {

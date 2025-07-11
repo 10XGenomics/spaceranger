@@ -7,14 +7,30 @@ filetype bi.bincode;
 filetype csf;
 filetype csv;
 filetype frf.bincode;
+filetype geojson;
 filetype h5;
 filetype html;
 filetype jpg;
 filetype json;
+filetype npy;
 filetype parquet;
+filetype tiff;
+
+struct UmiRegOutsSubset(
+    json transform_matrices,
+    jpg  tissue_on_spots,
+)
+
+struct BinLevelInfo(
+    int  scale,
+    bool no_secondary_analysis,
+    bool disable_cloupe,
+)
 
 struct WhitelistSpec(
     string name,
+    bool   translation,
+    string strand,
     file   translation_whitelist_path,
     string slide,
     string part,
@@ -61,15 +77,22 @@ struct ChemistryDef(
     map                    barcode_extraction,
 )
 
-struct BinLevelInfo(
-    int  scale,
-    bool no_secondary_analysis,
-    bool disable_cloupe,
+struct BarcodeIndexOutput(
+    bi.bincode index,
+    int        num_barcodes,
 )
 
-struct UmiRegOutsSubset(
-    json transform_matrices,
-    jpg  tissue_on_spots,
+stage ASSIGN_NUCLEI(
+    in  npy spot_mask,
+    in  h5  hd_feature_slice,
+    in  int barcode_assignment_distance_micron,
+    out npy expanded_spot_mask,
+    out npy minimum_distance_mask,
+    out npy closest_object_mask,
+    src comp "spatial martian assign_nuclei",
+) using (
+    mem_gb   = 4,
+    volatile = strict,
 )
 
 stage BIN_COUNT_MATRIX(
@@ -87,7 +110,20 @@ stage BIN_COUNT_MATRIX(
     out parquet    binned_tissue_positions_parquet,
     src comp       "spatial martian bin_count_matrix",
 ) using (
-    mem_gb   = 12,
+    mem_gb   = 30,
+    volatile = strict,
+)
+
+stage BIN_SPOTS_TO_CELLS(
+    in  npy        segmentation_spot_mask,
+    in  csf[]      counts,
+    out csf        cell_counts,
+    out bi.bincode cell_barcode_index,
+    out json       filtered_cell_barcodes,
+    out bool       disable_writing_matrices,
+    src comp       "spatial martian bin_spots_to_cells",
+) using (
+    mem_gb   = 4,
     volatile = strict,
 )
 
@@ -109,34 +145,7 @@ stage COMPUTE_SUBSAMPLED_BIN_METRICS(
     out csv subsampled_metrics,
     src comp "spatial martian compute_subsampled_bin_metrics",
 ) using (
-    mem_gb   = 6,
-    volatile = strict,
-)
-
-stage WRITE_BINNED_H5_MATRIX(
-    in  int               gem_well,
-    in  csf[]             counts,
-    in  frf.bincode       feature_reference,
-    in  map<ChemistryDef> chemistry_defs,
-    in  string            sample_id,
-    in  bi.bincode        barcode_index,
-    out h5                matrix,
-    src comp              "spatial martian write_binned_h5_matrix",
-) using (
-    mem_gb   = 5,
-    volatile = strict,
-)
-
-stage SETUP_BINNING(
-    in  string            slide_name,
-    in  bool              no_secondary_analysis,
-    in  int[]             scales,
-    in  int               custom_bin_size,
-    out map<BinLevelInfo> bin_infos,
-    out bool              disable_binning,
-    src comp              "spatial martian setup_binning",
-) using (
-    mem_gb   = 2,
+    mem_gb   = 16,
     volatile = strict,
 )
 
@@ -155,6 +164,36 @@ stage CREATE_HD_FEATURE_SLICE(
     volatile = strict,
 )
 
+stage GENERATE_HD_WEBSUMMARY_CS(
+    in  json      sd_web_summary_json,
+    in  json      end_to_end_alignment_data,
+    in  map<json> bin_level_metrics,
+    in  json      cluster_plot,
+    in  json      saturation_plots,
+    in  json      nucleus_segmentation_graphclust_diffexp,
+    in  json      segmentation_metrics,
+    in  json      cell_area_chart,
+    in  json      features_per_bc_chart,
+    in  json      counts_per_bc_chart,
+    in  json      segmentation_umap_chart,
+    in  json      spatial_segmentation_chart,
+    out html      web_summary,
+    src comp      "spatial martian generate_hd_websummary_cs",
+) using (
+    volatile = strict,
+)
+
+stage GENERATE_SEGMENT_WEBSUMMARY(
+    in  string sample_id,
+    in  string sample_desc,
+    in  json   spatial_segmentation_chart,
+    in  int    num_nuclei_detected,
+    in  int    max_nucleus_diameter_px_used,
+    in  json   segment_nuclei_metrics,
+    out html   summary,
+    src comp   "spatial martian generate_segment_websummary",
+)
+
 stage MERGE_BIN_METRICS(
     in  json[]    summaries,
     in  map<json> bin_summaries,
@@ -164,14 +203,71 @@ stage MERGE_BIN_METRICS(
     volatile = strict,
 )
 
-stage GENERATE_HD_WEBSUMMARY_CS(
-    in  json      sd_web_summary_json,
-    in  json      end_to_end_alignment_data,
-    in  map<json> bin_level_metrics,
-    in  json      cluster_plot,
-    in  json      saturation_plots,
-    out html      web_summary,
-    src comp      "spatial martian generate_hd_websummary_cs",
+stage PREPROCESS_INSTANCE_MASK(
+    in  tiff instance_mask_tiff,
+    in  npy  instance_mask_npy,
+    in  csv  square_barcode_to_cell_map,
+    in  h5   hd_feature_slice,
+    in  json tissue_image_shape,
+    out npy  spot_mask_from_user,
+    src comp "spatial martian preprocess_instance_mask",
+) split (
+) using (
+    volatile = strict,
+)
+
+stage PREPROCESS_NUCLEUS_SEGMENTATION_GEOJSON(
+    in  geojson segmentations,
+    in  npy     spot_mask_from_user,
+    in  h5      hd_feature_slice,
+    out json    processed_segmentations,
+    out geojson named_segmentations,
+    out npy     spot_mask,
+    src comp    "spatial martian preprocess_nucleus_segmentation_geojson",
+) split (
+    in  int     start_row_coordinate,
+    in  int     end_row_coordinate,
+    out npy     mask_chunk_image,
+) using (
+    mem_gb   = 4,
+    volatile = strict,
+)
+
+stage SETUP_BINNING(
+    in  string            slide_name,
+    in  bool              no_secondary_analysis,
+    in  int[]             scales,
+    in  int               custom_bin_size,
+    in  bool              disable_segmentation_in,
+    out map<BinLevelInfo> bin_infos,
+    out bool              disable_binning,
+    out bool              disable_segmentation,
+    src comp              "spatial martian setup_binning",
+) using (
+    mem_gb   = 2,
+    volatile = strict,
+)
+
+stage WRITE_BINNED_H5_MATRIX(
+    in  int               gem_well,
+    in  csf[]             counts,
+    in  frf.bincode       feature_reference,
+    in  map<ChemistryDef> chemistry_defs,
+    in  string            sample_id,
+    in  bi.bincode        barcode_index,
+    out h5                matrix,
+    src comp              "spatial martian write_binned_h5_matrix",
+) using (
+    mem_gb   = 12,
+    volatile = strict,
+)
+
+stage WRITE_SPATIAL_BARCODE_INDEX(
+    in  string             barcode_whitelist,
+    in  string             visium_hd_slide_name,
+    out BarcodeIndexOutput barcode_index_output,
+    src comp               "spatial martian write_spatial_barcode_index",
+) split (
 ) using (
     volatile = strict,
 )

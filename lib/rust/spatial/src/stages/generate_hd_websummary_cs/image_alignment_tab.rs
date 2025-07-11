@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use super::end_to_end::EndToEndAlignmentCard;
 use serde::Serialize;
 use tenx_websummary::components::{

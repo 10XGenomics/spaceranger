@@ -1,4 +1,5 @@
 // Logging options.
+#![allow(missing_docs)]
 
 #[derive(Default)]
 pub struct LogOpts {

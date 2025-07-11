@@ -1,7 +1,8 @@
+#![allow(missing_docs)]
 use crate::config::csv::CsvParser;
 use crate::config::parse::{Parse, ParseCtx};
 use crate::config::scsv::{plain_csv, Section, Span, XtraData};
-use crate::config::{multiconst, Ident, MultiConfigCsv};
+use crate::config::{multiconst, samplesconst, Ident, MultiConfigCsv};
 use anyhow::{anyhow, bail, Context, Result};
 use itertools::FoldWhile::{Continue, Done};
 use itertools::Itertools;
@@ -245,21 +246,32 @@ impl<'a> TryFrom<(&Section<'a, String>, &MultiConfigCsv)> for SampleAssignmentCs
 
     fn try_from((sec, cfg): (&Section<'a, String>, &MultiConfigCsv)) -> Result<Self> {
         use hdrs::{ASSIGNMENT, BARCODE, OPT_HDRS, REQ_HDRS, SAMPLE_ID};
-        let cmo_sample_map = cfg
-            .samples
-            .as_ref()
-            .ok_or_else(
-                #[cold]
-                || {
-                    anyhow!(
-                        "[{}] barcode-sample-assignment provided but no samples defined in [{}]",
-                        multiconst::GENE_EXPRESSION,
-                        multiconst::SAMPLES,
-                    )
-                },
-            )?
-            .get_cmo_sample_map();
-        let samples: TxHashSet<_> = cmo_sample_map.values().cloned().collect();
+
+        let samples = cfg.samples.as_ref().ok_or_else(
+            #[cold]
+            || {
+                anyhow!(
+                    "[{}] barcode-sample-assignment provided but no samples defined in [{}]",
+                    multiconst::GENE_EXPRESSION,
+                    multiconst::SAMPLES,
+                )
+            },
+        )?;
+        let (sample_map, sample_barcode_id) = match (
+            samples.has_cmo_ids(),
+            samples.has_hashtag_ids(),
+        ) {
+            (true, false) => (samples.get_cmo_sample_map(), samplesconst::CMO_IDS),
+            (false, true) => (samples.get_hashtag_sample_map(), samplesconst::HASHTAG_IDS),
+            (_, _) => bail!(
+                "[{}] barcode-sample-assignment requires samples definition in [{}] to use the mutually exclusive {} or {}",
+                multiconst::GENE_EXPRESSION,
+                multiconst::SAMPLES,
+                samplesconst::CMO_IDS,
+                samplesconst::HASHTAG_IDS
+            ),
+        };
+        let samples: TxHashSet<_> = sample_map.values().cloned().collect();
         let parser = CsvParser::new(sec.clone(), REQ_HDRS, OPT_HDRS)?;
         let mut rows = vec![];
         let hdr = &sec.name;
@@ -314,17 +326,18 @@ impl<'a> TryFrom<(&Section<'a, String>, &MultiConfigCsv)> for SampleAssignmentCs
                         "multiplet" => SampleAssignment::Multiplet,
                         "unassigned" => SampleAssignment::Unassigned,
                         _ => {
-                            let sample_id = cmo_sample_map
+                            let sample_id = sample_map
                                 .get(&assignment)
                                 .ok_or_else(
                                     #[cold]
                                     || {
                                         anyhow!(
-                                           "invalid {} on row {}, cmo_id {} not found in [samples]",
-                                           ASSIGNMENT,
-                                           row + 1,
-                                           assignment
-                                       )
+                                            "invalid {} on row {}, {} {} not found in [samples]",
+                                            ASSIGNMENT,
+                                            row + 1,
+                                            sample_barcode_id,
+                                            assignment
+                                        )
                                     },
                                 )?
                                 .clone();
@@ -362,7 +375,7 @@ impl<'a> TryFrom<(&Section<'a, String>, &MultiConfigCsv)> for SampleAssignmentCs
         Ok(SampleAssignmentCsv {
             rows,
             samples,
-            cmo_sample_map,
+            cmo_sample_map: sample_map,
         })
     }
 }
@@ -374,7 +387,7 @@ mod tests {
     use crate::config::MultiConfigCsv;
     use anyhow::Result;
 
-    const BASE_CONFIG: &str = r#"
+    const BASE_CONFIG: &str = r"
 [gene-expression]
 ref,/path/to/gex/ref
 barcode-sample-assignment,sample_bc_assignment_disallowed_sample_id.csv
@@ -389,18 +402,18 @@ tiny_cmo,/path_to_fastqs,any,cmo,Multiplexing Capture,
 sample_id,cmo_ids,description
 raji,CMO301,raji
 jurkat,CMO302,jurkat
-"#;
+";
 
     #[test]
     fn incorrect_sample_id() -> Result<()> {
         let xtra = XtraData::new("tests::incorrect_sample_id");
         let exp = MultiConfigCsv::from_reader(BASE_CONFIG.as_bytes(), xtra)?;
 
-        let sample_assign = r#"Barcode,Sample_ID
+        let sample_assign = r"Barcode,Sample_ID
 AAAGGTAGTGTTAGCT-1,jurkat
 AACCATGAGCACACCC-1,jurkat
 AAGATAGCAGAGATGC-1,raji raji
-"#;
+";
         let input = Span::new_extra(sample_assign, "tests::incorrect_sample_id".into());
         let name = "tests::incorrect_sample_id".into();
         let exp = SampleAssignmentCsv::from_span(input, name, &exp);
@@ -417,11 +430,11 @@ AAGATAGCAGAGATGC-1,raji raji
         let xtra = XtraData::new("tests::duplicate_barcodes");
         let exp = MultiConfigCsv::from_reader(BASE_CONFIG.as_bytes(), xtra)?;
 
-        let sample_assign = r#"Barcode,Sample_ID
+        let sample_assign = r"Barcode,Sample_ID
 AAAGGTAGTGTTAGCT-1,jurkat
 AAAGGTAGTGTTAGCT-1,jurkat
 AAGATAGCAGAGATGC-1,raji
-"#;
+";
         let input = Span::new_extra(sample_assign, "tests::duplicate_barcodes".into());
         let name = "tests::duplicate_barcodes".into();
         let exp = SampleAssignmentCsv::from_span(input, name, &exp);
@@ -441,17 +454,17 @@ AAGATAGCAGAGATGC-1,raji
         let xtra = XtraData::new("tests::invalid_gem_group");
         let exp = MultiConfigCsv::from_reader(BASE_CONFIG.as_bytes(), xtra)?;
 
-        let sample_assign = r#"Barcode,Sample_ID
+        let sample_assign = r"Barcode,Sample_ID
 AAAGGTAGTGTTAGCT-1,jurkat
 AAGATAGCAGAGATGC-2,raji
-"#;
+";
         let input = Span::new_extra(sample_assign, "tests::invalid_gem_group".into());
         let name = "tests::invalid_gem_group".into();
         let exp = SampleAssignmentCsv::from_span(input, name, &exp);
         assert!(exp.is_err());
         let err_msg = exp.unwrap_err().to_string();
         assert!(
-            err_msg.contains(r#"invalid gem group 2, must be 1"#),
+            err_msg.contains(r"invalid gem group 2, must be 1"),
             "{}",
             err_msg
         );

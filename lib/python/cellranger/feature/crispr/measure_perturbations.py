@@ -1,38 +1,67 @@
 # Copyright (c) 2019 10x Genomics, Inc. All rights reserved.
+# Keeping the annotation import for now until PEP 563 is mandatory in a future Python version
+# Check: https://peps.python.org/pep-0563/
+# Check: https://github.com/astral-sh/ruff/issues/7214
 from __future__ import annotations
+
+import csv
+import os
+import sys
+from collections import OrderedDict
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
-from six import ensure_binary, ensure_str
 
 from cellranger.analysis.analysis_types import DifferentialExpression
+from cellranger.analysis.diffexp import get_local_sseq_params, sseq_differential_expression
 from cellranger.constants import FILTER_LIST
+from cellranger.rna.library import GENE_EXPRESSION_LIBRARY_TYPE
+from tenkit.stats import robust_divide
+
+if TYPE_CHECKING:
+    from typing import Any
+
+    fc_t = tuple[float, float, int, int]
+    ci_t = tuple[np.float64, np.float64]
+    np_1d_array_int64 = np.ndarray[tuple[int], np.dtype[np.int64]]
+    np_1d_array_intp = np.ndarray[tuple[int], np.dtype[np.intp]]
+    from cellranger.matrix import CountMatrix
 
 pd.set_option("compute.use_numexpr", False)
-import collections
-import os
-import sys
 
-import cellranger.analysis.diffexp as cr_diffexp
-import cellranger.rna.library as rna_library
-import tenkit.stats as tk_stats
 
-NUM_BOOTSTRAPS = 500  # number of bootstrap draws to do for calculating
-# empirical confidence intervals for perturbation efficiencies
-CI_LOWER_BOUND = 5.0  # CI lower bound (ie percentile value) for perturbation efficiencies
-CI_UPPER_BOUND = 95.0  # CI upper bound (ie percentile value) for perturbation efficiencies
-# for which we can't or won't compute perturbation efficiencies
-CONTROL_LIST = ["Non-Targeting"]  # Target IDs used for specifying control perturbations
-MIN_NUMBER_CELLS_PER_PERTURBATION = 10  # Minimum number of cells a perturbation has to have before we compute differential expression for it
-MIN_COUNTS_PERTURBATION = 5
-MIN_COUNTS_CONTROL = 5
+@dataclass
+class TargetInfo:
+    target_id: str
+    gene_id: str
+    gene_name: str
 
-UMI_NUM_TRIES = 10  # Number of initial points to try for GMM-fitting
-UMI_MIX_INIT_SD = 0.25  # Intial standard deviation for GMM components
 
-PERTURBATION_EFFICIENCY_SUMMARY_COLUMNS = [
+@dataclass
+class ProtospacerCall:
+    feature_call: str
+    gene_id: str
+
+
+@dataclass
+class PerturbationResult:
+    perturbation_name: str
+    target_or_gene_name: str
+    log2_fc: float
+    p_val: float
+    lower_bound: np.float64
+    upper_bound: np.float64
+    num_cells_with_perb: int
+    mean_umi_count_perb: float
+    num_cells_with_control: int
+    mean_umi_count_control: float
+
+
+PERT_EFFI_SUMM_COLS_BY_FEAT = (
     "Perturbation",
-    "target_string",
+    "Target Guide",
     "Log2 Fold Change",
     "p Value",
     "Log2 Fold Change Lower Bound",
@@ -41,9 +70,25 @@ PERTURBATION_EFFICIENCY_SUMMARY_COLUMNS = [
     "Mean UMI Count Among Cells with Perturbation",
     "Cells with Non-Targeting Guides",
     "Mean UMI Count Among Cells with Non-Targeting Guides",
-]
+)
+PERT_EFFI_SUMM_COLS_BY_TRGT = (
+    PERT_EFFI_SUMM_COLS_BY_FEAT[:1] + ("Target Gene",) + PERT_EFFI_SUMM_COLS_BY_FEAT[2:]
+)
+NUM_BOOTSTRAPS = 500  # number of bootstrap draws to do for calculating
+# empirical confidence intervals for perturbation efficiencies
+CI_LOWER_BOUND = 5.0  # CI lower bound (ie percentile value) for perturbation efficiencies
+CI_UPPER_BOUND = 95.0  # CI upper bound (ie percentile value) for perturbation efficiencies
+# for which we can't or won't compute perturbation efficiencies
+CONTROL_LIST = ("Non-Targeting",)  # Target IDs used for specifying control perturbations
+MIN_NUMBER_CELLS_PER_PERTURBATION = 10  # Minimum number of cells a perturbation has to have before we compute differential expression for it
+MIN_COUNTS_PERTURBATION = 5
+MIN_COUNTS_CONTROL = 5
 
-TOP_GENES_SUMMARY_MAP = collections.OrderedDict(
+UMI_NUM_TRIES = 10  # Number of initial points to try for GMM-fitting
+UMI_MIX_INIT_SD = 0.25  # Intial standard deviation for GMM components
+
+
+TOP_GENES_SUMMARY_MAP = OrderedDict(
     [
         ("Gene Name", "Gene Name"),
         ("Gene ID", "Gene ID"),
@@ -51,60 +96,82 @@ TOP_GENES_SUMMARY_MAP = collections.OrderedDict(
         ("adjusted_p_value", "Adjusted p-value"),
     ]
 )
-NUM_TOP_GENES = 10
+NUM_TOP_GENES = None
 
 
-def construct_perturbation_efficiency_summary(
-    f_change,
-    f_change_ci,
-    num_cells_per_perturbation,
-    by_feature,
-    summary_columns=PERTURBATION_EFFICIENCY_SUMMARY_COLUMNS,
-):
-    if (f_change is None) or (f_change_ci is None):
-        return None
+def read_and_validate_feature_ref(
+    feature_reference: str,
+) -> None | dict[str, TargetInfo]:
+    """Returns a dict of target_id to TargetInfo."""
+    with open(feature_reference) as csv_file:
+        csv_reader = csv.reader(csv_file)
+        # Read the header
+        col_name_to_idx = {n: i for i, n in enumerate(next(csv_reader))}
 
-    if by_feature:
-        summary_columns[1] = "Target Guide"
-    else:
-        summary_columns[1] = "Target Gene"
-
-    this_df = pd.DataFrame(columns=summary_columns)
-    counter = 0
-    control_num_cells = num_cells_per_perturbation["Non-Targeting"]
-    for key in sorted(f_change.keys()):
-        this_key_results = f_change.get(key)
-        this_key_ci = f_change_ci.get(key)
-        if this_key_results is None:
-            continue
-
-        this_num_cells = num_cells_per_perturbation[key]
-
-        for ps, results in this_key_results.items():
-            lower_bound = this_key_ci.get(ps)[0]
-            upper_bound = this_key_ci.get(ps)[1]
-            this_df.loc[counter] = (
-                key,
-                ps,
-                results[0],
-                results[1],
-                lower_bound,
-                upper_bound,
-                this_num_cells,
-                tk_stats.robust_divide(results[2], this_num_cells),
-                control_num_cells,
-                tk_stats.robust_divide(results[3], control_num_cells),
+        if "target_gene_id" not in col_name_to_idx.keys():
+            sys.stderr.write(
+                "feature_reference CSV does not have target_gene_id column which "
+                + "is a requirement for measuring perturbation efficiencies"
             )
-            counter += 1
-    this_df.sort_values(by=["Log2 Fold Change"], ascending=True, inplace=True)
-    return this_df
+            return None
+
+        assert (
+            "id" in col_name_to_idx.keys()
+        ), f'This feature_reference CSV does not have "id" column: {feature_reference}'
+
+        # If target_gene_name is not present, use target_gene_id as target_gene_name
+        if "target_gene_name" not in col_name_to_idx.keys():
+            col_name_to_idx["target_gene_name"] = col_name_to_idx["target_gene_id"]
+
+        target_info = {
+            row[col_name_to_idx["id"]]: TargetInfo(
+                target_id=row[col_name_to_idx["id"]],
+                gene_id=row[col_name_to_idx["target_gene_id"]],
+                gene_name=row[col_name_to_idx["target_gene_name"]],
+            )
+            for row in csv_reader
+        }
+    if not any(v.gene_id == "Non-Targeting" for v in target_info.values()):
+        sys.stderr.write(
+            "Non-Targeting guides required as controls for differential expression calculations"
+        )
+        return None
+    return target_info
+
+
+def save_perturbation_efficiency_summary(
+    outpath: str,
+    fold_change_per_perturbation: dict[str, dict[str, PerturbationResult]],
+    by_feature: bool,
+) -> None:
+    with open(outpath, "w", newline="") as outfile:
+        writer = csv.writer(outfile, dialect="unix", quoting=csv.QUOTE_MINIMAL)
+        writer.writerow(PERT_EFFI_SUMM_COLS_BY_FEAT if by_feature else PERT_EFFI_SUMM_COLS_BY_TRGT)
+        rows = sorted(
+            (
+                (
+                    fc.perturbation_name,
+                    fc.target_or_gene_name,
+                    fc.log2_fc,
+                    fc.p_val,
+                    fc.lower_bound,
+                    fc.upper_bound,
+                    fc.num_cells_with_perb,
+                    fc.mean_umi_count_perb,
+                    fc.num_cells_with_control,
+                    fc.mean_umi_count_control,
+                )
+                for fold_changes in fold_change_per_perturbation.values()
+                for fc in fold_changes.values()
+            ),
+            key=lambda x: x[2],
+        )
+        writer.writerows(rows)
 
 
 def save_top_perturbed_genes(
-    base_dir,
-    results_per_perturbation,
-    column_map=TOP_GENES_SUMMARY_MAP,
-    num_genes_to_keep=NUM_TOP_GENES,
+    base_dir: str,
+    results_per_perturbation: OrderedDict[str, pd.DataFrame],
 ):
     if not results_per_perturbation:
         return
@@ -113,64 +180,41 @@ def save_top_perturbed_genes(
 
     list_df_results = []
     summary_df_columns = []
-    for perturbation in results_per_perturbation:
-        this_results = sanitize_perturbation_results(results_per_perturbation.get(perturbation))
-
-        if this_results is None:
-            continue
-
-        this_results = this_results[list(column_map)[:num_genes_to_keep]]
-        this_results.reset_index(drop=True, inplace=True)
-        list_df_results.append(this_results)
-        summary_df_columns += [f"Perturbation: {perturbation}, {s}" for s in column_map.values()]
-
+    for name, de_result in results_per_perturbation.items():
+        list_df_results.append(de_result)
+        summary_df_columns += [f"Perturbation: {name}, {s}" for s in TOP_GENES_SUMMARY_MAP.values()]
     summary_df = pd.concat(list_df_results, ignore_index=True, axis=1)
     summary_df.columns = summary_df_columns
     summary_df.to_csv(fn, index=False)
 
 
-def sanitize_perturbation_results(res_table):
-    if res_table is None or res_table.empty:
-        return None
+def sanitize_perturbation_results(
+    res_table: pd.DataFrame,
+) -> pd.DataFrame:
 
-    res_table = res_table[res_table["sum_b"] > 0]
     # at least 1 count amongst all the control cells
+    res_table = res_table[res_table["sum_b"] > 0]
+    # at least the minimum number of counts in either category (perturbation or control)
     res_table = res_table[
         (res_table["sum_a"] >= MIN_COUNTS_PERTURBATION) | (res_table["sum_b"] >= MIN_COUNTS_CONTROL)
     ]
-    # at least the minimum number of counts in either category (perturbation or control)
-
     res_table["abs_log2_fold_change"] = np.abs(res_table["log2_fold_change"])
+    # sort by abs log2 fold change, adjusted_p_value, Gene Name, in that order
     res_table.sort_values(
         by=["abs_log2_fold_change", "adjusted_p_value", "Gene Name"],
         ascending=[False, True, True],
         inplace=True,
     )
-    # sort by abs log2 fold change, adjusted_p_value, Gene Name, in that order
+    res_table = res_table[list(TOP_GENES_SUMMARY_MAP)][:NUM_TOP_GENES]
+    res_table.reset_index(drop=True, inplace=True)
+
     return res_table
 
 
-def _add_bcs_without_ps_calls(bc_targets_dict, bcs):
-    str_bcs = [ensure_str(bc) for bc in bcs]
-    bcs_without_ps_calls = list(set(str_bcs).difference(set(bc_targets_dict.keys())))
-    for bc in bcs_without_ps_calls:
-        bc_targets_dict[bc] = {
-            "target_name": "None",
-            "num_features": -1,
-            "target_id": "None",
-            "feature_call": "None",
-        }
-
-    return bc_targets_dict
-
-
 def _get_bc_targets_dict(
-    target_info,
-    protospacers_per_cell,
-    ignore_multiples=False,
-    control_list=CONTROL_LIST,
-    filter_list=FILTER_LIST,
-):
+    target_info: dict[str, TargetInfo],
+    protospacers_per_cell_path: str,
+) -> dict[str, ProtospacerCall]:
     """Get the dict of barcode pairs.
 
     The values are dicts with information about the targets of the features assgined to the barcode.
@@ -181,67 +225,57 @@ def _get_bc_targets_dict(
     Note:
         barcodes without any protospacers will not be present in this dict.
     """
-    bc_targets_dict = {}
+    bc_targets_dict: dict[str, ProtospacerCall] = {}
 
-    for this_row in protospacers_per_cell.itertuples():
-        feature_call = this_row.feature_call
+    with open(protospacers_per_cell_path) as csv_file:
+        csv_reader = csv.reader(csv_file)
+        # Read the header
+        col_name_to_idx = {n: i for i, n in enumerate(next(csv_reader))}
 
-        if feature_call in target_info:
-            # single feature
-            this_target_id = target_info.get(feature_call).get("target_id")
-            this_target_name = target_info.get(feature_call).get("target_name")
-        else:
-            this_target_id = this_target_name = feature_call
+        for row in csv_reader:
+            feature_call = row[col_name_to_idx["feature_call"]]
+            num_features = int(row[col_name_to_idx["num_features"]])
+            cell_barcode = row[col_name_to_idx["cell_barcode"]]
 
-        if this_row.num_features > 1:
-            # multiple features
-            if ignore_multiples:
-                this_target_id = this_target_name = "Ignore"
+            if feature_call in target_info:
+                # single feature
+                gene_id = target_info[feature_call].gene_id
             else:
-                this_features = feature_call.split("|")
-                this_target_ids = [target_info.get(x).get("target_id") for x in this_features]
-                this_target_names = [target_info.get(x).get("target_name") for x in this_features]
+                gene_id: str = feature_call
 
-                if set(this_target_ids) == set(control_list):
-                    this_target_id = this_target_name = "Non-Targeting"
+            if num_features > 1:
+                # multiple features
+                this_features = feature_call.split("|")
+                gene_ids = [target_info[x].gene_id for x in this_features]
+
+                if set(gene_ids) == set(CONTROL_LIST):
+                    gene_id = "Non-Targeting"
                     # each feature is a non-targeting guide, and so the cell is a control cell
                 else:
-                    this_target_ids = list(set(this_target_ids).difference(set(filter_list)))
-                    this_target_names = list(set(this_target_names).difference(set(filter_list)))
-                    if this_target_ids:
-                        this_target_id = "|".join(this_target_ids)
-                        this_target_name = "|".join(this_target_names)
+                    gene_ids = sorted(set(gene_ids).difference(FILTER_LIST))
+                    if gene_ids:
+                        gene_id = "|".join(gene_ids)
                     else:
-                        this_target_id = this_target_name = "Ignore"
+                        gene_id = "Ignore"
 
-        bc_targets_dict[this_row.Index] = {
-            "num_features": this_row.num_features,
-            "feature_call": feature_call,
-            "target_id": this_target_id,
-            "target_name": this_target_name,
-        }
+            bc_targets_dict[cell_barcode] = ProtospacerCall(
+                feature_call=feature_call,
+                gene_id=gene_id,
+            )
     return bc_targets_dict
 
 
-def _get_target_name_from_id(target_id_name_map, target_id, sep="|"):
-    if sep not in target_id:
-        return target_id_name_map.get(target_id, target_id)
-    return "|".join([target_id_name_map.get(x, x) for x in target_id.split(sep)])
-
-
 def _should_filter(
-    perturbation_name,
-    feature_ref_table,
-    target_info,
-    filter_list=FILTER_LIST,
-    by_feature=False,
+    perturbation_name: str,
+    target_id_name_map: dict[str, str],
 ):
-    target_id_name_map = _get_target_id_name_map(feature_ref_table, target_info, by_feature)
-    target_tuple = _get_target_id_from_name(perturbation_name, target_id_name_map, target_info)
-    return all(x in filter_list for x in target_tuple[1])
+    target_tuple = _get_target_id_from_name(perturbation_name, target_id_name_map)
+    return all(x in FILTER_LIST for x in target_tuple[1])
 
 
-def _get_target_id_from_name(this_perturbation_name, target_id_name_map, target_info):
+def _get_target_id_from_name(
+    this_perturbation_name: str, target_id_name_map: dict[str, str]
+) -> tuple[list[str], list[str]]:
     if "|" not in this_perturbation_name:
         return ([this_perturbation_name], [target_id_name_map[this_perturbation_name]])
 
@@ -251,22 +285,23 @@ def _get_target_id_from_name(this_perturbation_name, target_id_name_map, target_
 
 
 def get_perturbation_efficiency(
-    feature_ref_table,
-    protospacers_per_cell,
-    feature_count_matrix,
-    by_feature=False,
-    ignore_multiples=False,
-    filter_list=FILTER_LIST,
-    num_bootstraps=NUM_BOOTSTRAPS,
-    ci_lower=CI_LOWER_BOUND,
-    ci_upper=CI_UPPER_BOUND,
-    sseq_params=None,
+    target_info: dict[str, TargetInfo],
+    protospacers_per_cell_path: str,
+    feature_count_matrix: CountMatrix,
+    by_feature: bool = False,
+) -> (
+    tuple[
+        OrderedDict[str, pd.DataFrame],
+        DifferentialExpression,
+        dict[str, dict[str, PerturbationResult]],
+    ]
+    | None
 ):
     """Calculates log2 fold change and empirical confidence intervals for log2 fold change for target genes.
 
     Args:
-        feature_ref_table (pd.DataFrame): obtained by reading the feature reference file
-        protospacers_per_cell (pd.DataFrame): protospacer calls per cell. Output of protospacer calling stage
+        targets (list[TargetInfo]): list of TargetInfo dataclass objects
+        protospacers_per_cell (str): path to the protospacer calls per cell CSV file
         feature_count_matrix (CountMatrix): Feature Barcode Matrix
         by_feature (bool): if True, cells are grouped by the combination of protospacers
                            present in them, rather than the gene targets of those protospacers.
@@ -274,104 +309,28 @@ def get_perturbation_efficiency(
                            (by_feature=True) or by target (by_feature=False) by calling
                            the MEASURE_PERTURBATIONS_PD stage twice using the "as" keyword in
                            Martian 3.0
-        ignore_multiples (bool): if True, cells with multiple protospacers are ignored from the analysis. Default is False
-        filter_list (list): list of target id values to be filtered out of differential expression calculations
-        num_bootstraps (int): number of bootstrap draws for computing empirical confideence interval for log2 fold change
-        ci_lower (float):  percentile value for calculating the lower bound of the emprirical confidence interval for log2 fold change
-        ci_upper (float): percentile value for calculating the upper bound of the emprirical confidence interval for log2 fold change
-        sseq_params (dict): global parameters for differential expression calculations. If None (default),
-                    computed by cr_diffexp.compute_sseq_params
 
     Returns:
-        log2_fold_change: keys are perturbations, grouped by features or by targets.
-                            Values are a dictionary where the keys are individual features or targets,
-                            and values are a tuple of floats, each with 4 entries.
-                            First entry is the log2_fold_change, second entry is the p-value.=,
-                            third entry is the sum of UMI counts for that target gene across all cells in the condition,
-                            fourth entry is the sum of UMI counts for that target gene across all cells in the control.
-                            Eg.:: {'COA3': {'COA3': (-1.4, 0.02, 5, 20)},
-                                'COX18|COX6C': {'COX18': (-0.87, 1.0, 3, 40), ...} ...}
-        fold_change_CI: similar nested dict, except the tuple indicates the confidence interval.
-                        First entry is the lower percentile bound and second is the
-                        upper percentile bound.
-                        Eg. {'COA3': {'COA3': (-2.12, -0.93)},
-                                'COX18|COX6C': {'COX18': (-1.16, -0.57),...}... }
+        results_per_perturbation (OrderedDict[str, DataFrame]): dict[perturbation_name, DE results]
+        results_all_perturbations (DifferentialExpression): All DE results
+        fold_change_per_perturbation (dict[str, dict[str, FoldChange]]): (perturbation_name, dict[target/feature name, FoldChange])
     """
-    matrix = feature_count_matrix.select_features_by_type(rna_library.GENE_EXPRESSION_LIBRARY_TYPE)
-    target_info = _get_target_info(feature_ref_table)
-    target_id_name_map = _get_target_id_name_map(feature_ref_table, target_info, by_feature)
-    (cluster_per_bc, perturbation_keys) = _get_ps_clusters(
-        target_info, protospacers_per_cell, matrix.bcs, by_feature, ignore_multiples
-    )
+    matrix = feature_count_matrix.select_features_by_type(GENE_EXPRESSION_LIBRARY_TYPE)
 
-    num_cells_per_perturbation = {
-        name: sum(cluster_per_bc == cluster) for (cluster, name) in perturbation_keys.items()
-    }
-
-    diff_exp_results = _analyze_transcriptome(
-        matrix,
-        target_id_name_map,
-        cluster_per_bc,
-        perturbation_keys,
-        feature_ref_table,
-        by_feature,
+    (target_calls, perturbation_keys) = _get_ps_clusters(
         target_info,
-        num_bootstraps,
-        ci_lower,
-        ci_upper,
-        filter_list,
+        protospacers_per_cell_path,
+        [bc.decode() for bc in matrix.bcs],
+        by_feature,
     )
 
-    if diff_exp_results is None:
-        return (None, None, None, None, None)
-
-    results_per_perturbation = diff_exp_results["results_per_perturbation"]
-    results_all_perturbations = diff_exp_results["results_all_perturbations"]
-    log2_fold_change_CIs = diff_exp_results["log2_fold_change_CIs"]
-    log2_fold_change = diff_exp_results["log2_fold_change"]
-
-    return (
-        log2_fold_change,
-        log2_fold_change_CIs,
-        num_cells_per_perturbation,
-        results_per_perturbation,
-        results_all_perturbations,
-    )
-
-
-def _analyze_transcriptome(
-    matrix,
-    target_id_name_map,
-    target_calls,
-    perturbation_keys,
-    feature_ref_table,
-    by_feature,
-    target_info,
-    num_bootstraps,
-    ci_lower,
-    ci_upper,
-    filter_list=FILTER_LIST,
-):
-    """Compute differential expression for each perturbation vs non-targeting control.
-
-    Args:
-        matrix (CountMatrix): gene expression data, sub-selected from all feature expression data in the CountMatrix
-        target_calls (np.array(int)): integer perturbation target labels.
-                                        Numbering starts at 1
-        perturbation_keys (dict): (cluster_number:perturbation_name) pairs
-        feature_ref_table (pd.DataFrame): obtained by reading the feature reference file
-        by_feature (bool): if True, cells are grouped by features (rather than by target)
-        target_info (dict): Nested dict: {feature1: {'target_id': value1, 'target_name': value2}, ...}
-        filter_list (list): list of target ids to be filtered out of the analysis
-
-    Returns:
-        dict: {'results_all_perturbations': named tuple containing a dataframe of differential expression outputs,
-               'results_per_perturbation': dict of perturbation_name:diffexp_dataframe pairs,
-               }
-    """
-    results_per_perturbation = collections.OrderedDict()
+    target_to_gene_id = {
+        target.target_id if by_feature else target.gene_name: target.gene_id
+        for target in target_info.values()
+    }
+    results_per_perturbation: OrderedDict[str, pd.DataFrame] = OrderedDict()
     # MEASURE_PERTURBATIONS assumes this dict to be ordered
-    filter_cluster_indices = [x for x in perturbation_keys if perturbation_keys[x] in filter_list]
+    filter_cluster_indices = [x for x in perturbation_keys if perturbation_keys[x] in FILTER_LIST]
     n_clusters = len(perturbation_keys)
     n_effective_clusters = n_clusters - len(filter_cluster_indices)
 
@@ -382,23 +341,22 @@ def _analyze_transcriptome(
 
     nt_indices = [x for x in perturbation_keys if perturbation_keys[x] == "Non-Targeting"]
 
-    if (nt_indices is None) or (nt_indices == []):
+    if len(nt_indices) == 0:
         return None
     nt_index = nt_indices[0]
+    control_num_cells = sum(target_calls == nt_index)
 
     in_control_cluster = target_calls == nt_index
     feature_defs = matrix.feature_ref.feature_defs
-    gene_ids = [ensure_str(feature_def.id) for feature_def in feature_defs]
-    gene_names = [ensure_str(feature_def.name) for feature_def in feature_defs]
+    gene_ids = [feature_def.id.decode() for feature_def in feature_defs]
+    gene_names = [feature_def.name for feature_def in feature_defs]
 
-    log2_fold_change_CIs = {}
-    log2_fold_change = {}
+    fold_change_per_perturbation: dict[str, dict[str, PerturbationResult]] = {}
     cluster_counter = 1
     column_counter = 0
-    for cluster in perturbation_keys:
-        perturbation_name = perturbation_keys.get(cluster)
+    for cluster, perturbation_name in perturbation_keys.items():
         if (cluster in filter_cluster_indices) or _should_filter(
-            perturbation_name, feature_ref_table, target_info, filter_list, by_feature
+            perturbation_name, target_to_gene_id
         ):
             continue
 
@@ -419,105 +377,115 @@ def _analyze_transcriptome(
             new_group_a,
             new_group_b,
             matrix_groups,
-        ) = cr_diffexp.get_local_sseq_params(matrix.m, group_a, group_b)
+        ) = get_local_sseq_params(matrix.m, group_a, group_b)
 
-        de_result = cr_diffexp.sseq_differential_expression(
+        de_result = sseq_differential_expression(
             matrix_groups, new_group_a, new_group_b, local_sseq_params
         )
+        assert de_result is not None
         de_result["Gene ID"] = gene_ids
         de_result["Gene Name"] = gene_names
-        results_per_perturbation[perturbation_name] = de_result
 
         all_de_results[:, 0 + 3 * (cluster_counter - 1)] = de_result["sum_a"] / len(group_a)
         all_de_results[:, 1 + 3 * (cluster_counter - 1)] = de_result["log2_fold_change"]
         all_de_results[:, 2 + 3 * (cluster_counter - 1)] = de_result["adjusted_p_value"]
         column_counter += 3
 
-        (this_log2_fc, this_log2_cis) = _get_log2_fold_change(
+        num_cells = sum(target_calls == cluster)
+
+        fold_change_per_perturbation[perturbation_name] = _get_log2_fold_change(
             perturbation_name,
+            num_cells,
+            control_num_cells,
             de_result,
-            target_id_name_map,
-            target_info,
+            target_to_gene_id,
             local_matrix,
             new_group_a,
             new_group_b,
             local_sseq_params,
         )
 
-        log2_fold_change[perturbation_name] = this_log2_fc
-        log2_fold_change_CIs[perturbation_name] = this_log2_cis
+        de_result = sanitize_perturbation_results(de_result)
+        results_per_perturbation[perturbation_name] = de_result
 
         cluster_counter += 1
 
     all_de_results = all_de_results[:, 0:column_counter]
+    results_all_perturbations = DifferentialExpression(all_de_results)
 
-    return {
-        "results_per_perturbation": results_per_perturbation,
-        "results_all_perturbations": DifferentialExpression(all_de_results),
-        "log2_fold_change_CIs": log2_fold_change_CIs,
-        "log2_fold_change": log2_fold_change,
-    }
+    return (
+        results_per_perturbation,
+        results_all_perturbations,
+        fold_change_per_perturbation,
+    )
 
 
 def _get_log2_fold_change(
-    perturbation_name,
-    this_results,
-    target_id_name_map,
-    target_info,
-    matrix,
-    group_a,
-    group_b,
-    local_params,
-    filter_list=FILTER_LIST,
-):
+    perturbation_name: str,
+    num_cells: int,
+    control_num_cells: int,
+    results: pd.DataFrame,
+    target_to_gene_id: dict[str, str],
+    matrix: CountMatrix,
+    group_a: np_1d_array_intp,
+    group_b: np_1d_array_intp,
+    local_params: dict[str, Any],
+) -> dict[str, PerturbationResult]:
     (this_names, this_ids) = _get_target_id_from_name(
-        perturbation_name, target_id_name_map, target_info
+        perturbation_name,
+        target_to_gene_id,
     )
 
-    log2_fc = {}
-    log2_cis = {}
+    perturbation_results: dict[str, PerturbationResult] = {}
 
     for name, target in zip(this_names, this_ids):
-        if target in filter_list:
+        if target in FILTER_LIST:
+            continue
+        deg_result = results.loc[results["Gene ID"] == target]
+        if deg_result.empty:
             continue
 
-        deg_result = _get_ko_per_target(this_results, target)
-        if deg_result is not None:
-            log2_fc[name] = deg_result
-            log2_cis[name] = _get_fold_change_cis(matrix, target, group_a, group_b, local_params)
+        lower_bound, upper_bound = _get_fold_change_cis(
+            matrix,
+            target,
+            group_a,
+            group_b,
+            local_params,
+        )
+        log2_fold_change = deg_result["log2_fold_change"].values[0]
+        p_value = deg_result["p_value"].values[0]
+        sum_a = deg_result["sum_a"].values[0]
+        sum_b = deg_result["sum_b"].values[0]
+        perturbation_results[name] = PerturbationResult(
+            perturbation_name=perturbation_name,
+            target_or_gene_name=name,
+            log2_fc=log2_fold_change,
+            p_val=p_value,
+            lower_bound=lower_bound,
+            upper_bound=upper_bound,
+            num_cells_with_perb=num_cells,
+            mean_umi_count_perb=robust_divide(sum_a, num_cells),
+            num_cells_with_control=control_num_cells,
+            mean_umi_count_control=robust_divide(sum_b, control_num_cells),
+        )
 
-    return (log2_fc, log2_cis)
-
-
-def _get_ko_per_target(results, target):
-    deg_result = results.loc[results["Gene ID"] == target]
-    if deg_result.empty:
-        return None
-    return (
-        deg_result["log2_fold_change"].values[0],
-        deg_result["p_value"].values[0],
-        deg_result["sum_a"].values[0],
-        deg_result["sum_b"].values[0],
-    )
+    return perturbation_results
 
 
 def _get_fold_change_cis(
-    matrix,
-    target,
-    cond_a,
-    cond_b,
-    computed_params,
-    num_bootstraps=NUM_BOOTSTRAPS,
-    ci_lower=CI_LOWER_BOUND,
-    ci_upper=CI_UPPER_BOUND,
-):
+    matrix: CountMatrix,
+    target: str,
+    cond_a: np_1d_array_intp,
+    cond_b: np_1d_array_intp,
+    computed_params: dict[str, Any],
+) -> tuple[np.float64, np.float64]:
     # filter the matrix to select only the target gene
-    this_matrix = matrix.select_features_by_ids([ensure_binary(target)])
+    this_matrix = matrix.select_features_by_ids([target.encode()])
 
     x = this_matrix.m
 
-    log2_fold_change_vals = list(range(num_bootstraps))
-    for i in range(num_bootstraps):
+    log2_fold_change_vals = list(range(NUM_BOOTSTRAPS))
+    for i in range(NUM_BOOTSTRAPS):
         this_cond_a = np.random.choice(cond_a, size=len(cond_a), replace=True)
         this_cond_b = np.random.choice(cond_b, size=len(cond_b), replace=True)
         x_a = x[:, this_cond_a]
@@ -535,100 +503,87 @@ def _get_fold_change_cis(
         )
 
     return (
-        np.percentile(log2_fold_change_vals, ci_lower),
-        np.percentile(log2_fold_change_vals, ci_upper),
+        np.percentile(log2_fold_change_vals, CI_LOWER_BOUND),
+        np.percentile(log2_fold_change_vals, CI_UPPER_BOUND),
     )
 
 
-def _get_target_id_name_map(feature_ref_table, target_info, by_feature=False):
-    """Returns a dict from either gene name or protospacer to gene id.
-
-    Returns:
-        a dict of target_gene_name:target_gene_id pairs if by_feature = False
-        and a dict of protospacer:target_gene_id pairs if by_feature = True
-    """
-    if not (by_feature):
-        return {target_info[x]["target_name"]: target_info[x]["target_id"] for x in target_info}
-    return {x: target_info[x]["target_id"] for x in target_info}
-
-
-def _get_target_info(feature_ref_table):
-    """Returns a nested dict.
-
-    {feature1: {'target_id': value1, 'target_name': value2}, ...}
-    """
-    target_info = {}
-    for this_row in feature_ref_table.itertuples():
-        this_target_id = getattr(this_row, "target_gene_id")
-        this_target_name = getattr(this_row, "target_gene_name", this_target_id)
-        target_info[this_row.id] = {
-            "target_id": this_target_id,
-            "target_name": this_target_name,
-        }
-
-    return target_info
-
-
 def _get_ps_clusters(
-    target_info, protospacers_per_cell, bcs, by_feature=True, ignore_multiples=True
-):
+    target_info: dict[str, TargetInfo],
+    protospacers_per_cell_path: str,
+    barcodes: list[str],
+    by_feature: bool = True,
+) -> tuple[np_1d_array_int64, dict[int, str]]:
     """Returns a tuple (target_calls, perturbation_keys).
 
     Args:
         target_calls (np.array(int)): identifies the perturbation assigned to
             each cell in the gene-barcode matrix
         perturbation_keys (dict): (cluster_number:perturbation_name) pairs
+
+    Returns:
+        target_calls (np_1d_array_int64): integer perturbation target labels starting from 1
+        perturbation_keys (dict): dict[cluster_number, perturbation_name]
     """
-    bc_targets_dict = _get_bc_targets_dict(target_info, protospacers_per_cell, ignore_multiples)
-    bc_targets_dict = _add_bcs_without_ps_calls(bc_targets_dict, bcs)
-    if not (by_feature):
-        return _get_ps_clusters_by_target(
-            target_info, bc_targets_dict, protospacers_per_cell, bcs, ignore_multiples
-        )
-    return _get_ps_clusters_by_feature(
-        target_info, bc_targets_dict, protospacers_per_cell, bcs, ignore_multiples
-    )
+    bc_targets_dict = _get_bc_targets_dict(target_info, protospacers_per_cell_path)
+    for bc in barcodes:
+        if bc not in bc_targets_dict:
+            bc_targets_dict[bc] = ProtospacerCall(
+                feature_call="None",
+                gene_id="None",
+            )
+
+    if by_feature:
+        return _get_ps_clusters_by_feature(bc_targets_dict, barcodes)
+    else:
+        return _get_ps_clusters_by_target(target_info, bc_targets_dict, barcodes)
 
 
 def _get_ps_clusters_by_target(
-    target_info, bc_targets_dict, protospacers_per_cell, bcs, ignore_multiples=True
-):
-    target_id_name_map = {v.get("target_id"): v.get("target_name") for v in target_info.values()}
-    target_id_per_bc = [bc_targets_dict.get(ensure_str(bc)).get("target_id") for bc in bcs]
-    unique_targets_list = list(set(target_id_per_bc))
-    unique_targets_list.sort()
+    target_info: dict[str, TargetInfo],
+    bc_targets_dict: dict[str, ProtospacerCall],
+    barcodes: list[str],
+) -> tuple[np_1d_array_int64, dict[int, str]]:
 
-    target_to_int = {el: i + 1 for (i, el) in enumerate(unique_targets_list)}
+    gene_id_to_gene_name = {v.gene_id: v.gene_name for v in target_info.values()}
 
-    perturbation_from_cluster = {
-        b: _get_target_name_from_id(target_id_name_map, a, sep="|")
-        for (a, b) in target_to_int.items()
-    }
+    def get_target_name(gene_id: str) -> str:
+        sep = "|"
+        if sep not in gene_id:
+            return gene_id_to_gene_name.get(gene_id, gene_id)
+        return "|".join([gene_id_to_gene_name.get(gid, gid) for gid in gene_id.split(sep)])
 
-    calls_vector = np.asarray([target_to_int.get(x) for x in target_id_per_bc])
+    gene_ids = [bc_targets_dict[bc].gene_id for bc in barcodes]
+    unique_gene_ids = sorted(set(gene_ids))
 
-    return (calls_vector, perturbation_from_cluster)
+    gene_id_to_idx = {gene_id: idx for (idx, gene_id) in enumerate(unique_gene_ids, start=1)}
+    target_calls = np.asarray([gene_id_to_idx[x] for x in gene_ids], dtype=np.int64)
+
+    perturbation_keys = {idx: get_target_name(gid) for (gid, idx) in gene_id_to_idx.items()}
+
+    return (target_calls, perturbation_keys)
 
 
 def _get_ps_clusters_by_feature(
-    target_info, bc_targets_dict, protospacers_per_cell, bcs, ignore_multiples=True
-):
-    feature_per_bc = [_get_feature_from_bc(bc_targets_dict, ensure_str(bc)) for bc in bcs]
-    unique_feature_calls = list(set(feature_per_bc))
-    unique_feature_calls.sort()
+    bc_targets_dict: dict[str, ProtospacerCall],
+    barcodes: list[str],
+) -> tuple[np_1d_array_int64, dict[int, str]]:
 
-    feature_to_int = {el: i + 1 for (i, el) in enumerate(unique_feature_calls)}
-    perturbation_from_cluster = {b: a for (a, b) in feature_to_int.items()}
-    calls_vector = np.asarray([feature_to_int.get(x) for x in feature_per_bc])
+    def _get_feature_from_pc(protospacer_call: ProtospacerCall) -> str:
+        if protospacer_call.gene_id not in FILTER_LIST:
+            return protospacer_call.feature_call
 
-    return (calls_vector, perturbation_from_cluster)
+        if protospacer_call.gene_id == "None":
+            return "Ignore"
 
+        return protospacer_call.gene_id
 
-def _get_feature_from_bc(bc_targets_dict, bc, filter_list=FILTER_LIST):
-    if bc_targets_dict.get(bc).get("target_id") not in filter_list:
-        return bc_targets_dict.get(bc).get("feature_call")
+    features = [_get_feature_from_pc(bc_targets_dict[bc]) for bc in barcodes]
+    unique_features = sorted(set(features))
 
-    if bc_targets_dict.get(bc).get("target_id") in ["None"]:
-        return "Ignore"
+    feature_to_idx = {feat: idx for (idx, feat) in enumerate(unique_features, start=1)}
+    target_calls = np.asarray([feature_to_idx[feat] for feat in features], dtype=np.int64)
 
-    return bc_targets_dict.get(bc).get("target_id")
+    perturbation_keys = {b: a for a, b in feature_to_idx.items()}
+
+    return (target_calls, perturbation_keys)

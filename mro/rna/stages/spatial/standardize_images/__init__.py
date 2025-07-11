@@ -15,6 +15,7 @@ import cv2
 import martian
 import numpy as np
 
+import cellranger.cr_io as cr_io
 import cellranger.feature.utils as feature_utils
 import cellranger.spatial.cytassist_img_preprocess as cyt_img_prep
 import cellranger.spatial.data_utils as data_utils
@@ -136,10 +137,21 @@ def join(args, outs, _chunk_defs, _chunk_outs):
 
     feature_utils.write_json_from_dict(scalefactors_dict, outs.scalefactors_json)
     feature_utils.write_json_from_dict(crop_info_dict, outs.crop_info_json)
+    outs.cloupe_display_image_paths = []
     if args.tissue_image_paths:
-        outs.cloupe_display_image_paths = args.tissue_image_paths
+        for tissue_img_path in args.tissue_image_paths:
+            new_tissue_img_path = martian.make_path(os.path.basename(tissue_img_path)).decode()
+            cr_io.hardlink_with_fallback(tissue_img_path, new_tissue_img_path)
+            outs.cloupe_display_image_paths.append(new_tissue_img_path)
+    elif args.cytassist_image_paths:
+        for cytassist_img_paths in args.cytassist_image_paths:
+            new_cytassist_img_path = martian.make_path(
+                os.path.basename(cytassist_img_paths)
+            ).decode()
+            cr_io.hardlink_with_fallback(cytassist_img_paths, new_cytassist_img_path)
+            outs.cloupe_display_image_paths.append(new_cytassist_img_path)
     else:
-        outs.cloupe_display_image_paths = args.cytassist_image_paths
+        outs.cloupe_display_image_paths = None
     if pipeline_mode.product == Product.CYT and args.tissue_image_paths:
         outs.skip_tissue_registration = False
     else:
@@ -386,7 +398,7 @@ def standardize_images(
             tissue_detect_saturation_img_path=output_path.tissue_detection_saturation_image,
             out_cyt_img_path=output_path.cytassist_image,
             qc_crop_img_path=output_path.qc_cytassist_crop_image,
-            is_visium_hd=pipeline_mode.is_visium_hd_with_fiducials(),
+            is_visium_hd=pipeline_mode.is_hd_with_fiducials(),
         )
         process_img_scalef = 1.0
         if tissue_image_paths:

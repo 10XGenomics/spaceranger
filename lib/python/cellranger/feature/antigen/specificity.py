@@ -106,23 +106,18 @@ def build_clonotype_maps(filtered_contig_annotations):
     bc_clonotype_map = {}
     bc_exact_subclonotype_map = {}
     with open(filtered_contig_annotations) as csvfile:
-        csvreader = csv.reader(csvfile)
-        seen_header = False
-        for row in csvreader:
-            if not seen_header:
-                assert row[0] == "barcode"
-                assert row[28] == "raw_clonotype_id"
-                assert row[30] == "exact_subclonotype_id"
-                seen_header = True
+        for row in csv.DictReader(csvfile):
+            barcode = row["barcode"]
+            raw_clonotype_id = row["raw_clonotype_id"]
+            exact_subclonotype_id = row["exact_subclonotype_id"]
+            if raw_clonotype_id == "":
                 continue
-            if row[28] is None or row[28] == "":
-                continue
-            elif row[0] in bc_clonotype_map:
-                assert bc_clonotype_map[row[0]] == row[28]
-                assert bc_exact_subclonotype_map[row[0]] == row[30]
+            elif barcode in bc_clonotype_map:
+                assert bc_clonotype_map[barcode] == raw_clonotype_id
+                assert bc_exact_subclonotype_map[barcode] == exact_subclonotype_id
             else:
-                bc_clonotype_map[row[0]] = row[28]
-                bc_exact_subclonotype_map[row[0]] = row[30]
+                bc_clonotype_map[barcode] = raw_clonotype_id
+                bc_exact_subclonotype_map[barcode] = exact_subclonotype_id
     return bc_clonotype_map, bc_exact_subclonotype_map
 
 
@@ -533,14 +528,14 @@ class BarcodeAS:
     """Data structure representing antigen counts and specificity scores for a single barcode."""
 
     __slots__ = (
+        "_antigens",
+        "_assignments",
+        "_specificity_scores",
+        "allele",
         "barcode",
         "clonotype_id",
-        "exact_subclonotype_id",
         "controls",
-        "allele",
-        "_antigens",
-        "_specificity_scores",
-        "_assignments",
+        "exact_subclonotype_id",
         # "sample_id",
     )
 

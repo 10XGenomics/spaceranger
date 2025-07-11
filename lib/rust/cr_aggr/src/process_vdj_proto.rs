@@ -1,4 +1,5 @@
 //! Martian stage PROCESS_VDJ_PROTO
+#![allow(missing_docs)]
 
 use crate::parse_aggr_csv::VdjAggrCsvLibrary;
 use anyhow::Result;

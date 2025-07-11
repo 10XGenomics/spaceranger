@@ -1,4 +1,5 @@
 //! Martian stage BARCODE_CORRECTION
+#![allow(missing_docs)]
 
 use crate::barcode_correction_metrics::{
     BarcodeCorrectionMetricsFormat, BarcodeCorrectionVisitor, BarcodeDiversityMetrics,
@@ -9,24 +10,28 @@ use crate::types::ReadShardFile;
 use anyhow::Result;
 use barcode::{
     Barcode, BarcodeConstruct, BarcodeCorrector, BarcodeSegment, BarcodeSegmentState, BcSegQual,
-    SegmentedBarcode, Segments, Whitelist,
+    SegmentedBarcode, Segments,
 };
 use barcode_extensions::select_barcode_corrector;
 use cr_bam::constants::{ALN_BC_DISK_CHUNK_SZ, ALN_BC_ITEM_BUFFER_SZ, ALN_BC_SEND_BUFFER_SZ};
 use cr_types::chemistry::{BarcodeExtraction, ChemistryDefs};
 use cr_types::rna_read::RnaRead;
-use cr_types::types::{
-    BcCountDataType, BcCountFormat, BcSegmentCountFormat, GemWell, LibraryType, TotalBcCountFormat,
+use cr_types::types::{BcSegmentCountFormat, GemWell};
+use cr_types::{
+    write_sorted_count_file_from_histogram, LibraryType, MergeSortedCounts, MetricsFile,
+    PerLibrarySortedBarcodeCounts, SortedBarcodeCountFile,
 };
-use cr_types::MetricsFile;
 use fastq_set::read_pair::{ReadPair, ReadPart, RpRange};
-use itertools::Itertools;
+use itertools::{izip, Itertools};
 use martian::prelude::*;
 use martian_derive::{make_mro, MartianStruct};
-use martian_filetypes::{FileTypeRead, FileTypeWrite};
-use metric::{self, JsonReport, Metric, SimpleHistogram, TxHashMap, TxHashSet};
+use martian_filetypes::{FileTypeRead, FileTypeWrite, LazyFileTypeIO, LazyWrite};
+use metric::histogram::OrderedHistogram;
+use metric::{self, Histogram, JsonReport, Metric, TxHashMap};
 use serde::{Deserialize, Serialize};
-use shardio::{Range, ShardReader, ShardWriter};
+use shardio::{ShardWriter, UnsortedShardReader};
+use stats::effective_diversity;
+use std::path::PathBuf;
 
 #[derive(Deserialize, Clone, MartianStruct)]
 pub struct BarcodeCorrectionStageInputs {
@@ -34,27 +39,23 @@ pub struct BarcodeCorrectionStageInputs {
     pub invalid_uncorrected: Vec<ReadShardFile>,
     pub chemistry_defs: ChemistryDefs,
     pub barcode_segment_counts: BcSegmentCountFormat,
-    pub barcode_counts: BcCountFormat,
+    pub barcode_counts: PerLibrarySortedBarcodeCounts,
     pub valid_read_metrics: BarcodeCorrectionMetricsFormat,
-    pub libraries_to_translate: TxHashSet<LibraryType>,
     pub correction_map: Option<CorrectionMapFormat>,
-    // Counts for all barcodes over this amount will be
-    // be reported in the total_barcode_counts output.
-    pub min_reads_to_report_bc: i64,
 }
 
 #[derive(Serialize, Deserialize, Clone, MartianStruct)]
 pub struct BarcodeCorrectionChunkInputs {
-    #[mro_type = "map"]
-    range: shardio::Range<Barcode>,
+    index: usize,
+    count: usize,
 }
 
 #[derive(Serialize, Deserialize, MartianStruct)]
 pub struct BarcodeCorrectionChunkOutputs {
     valid_shard: ReadShardFile,
     invalid_shard: ReadShardFile,
-    corrected_barcode_counts: BcCountFormat,
-    total_barcode_counts: TotalBcCountFormat,
+    corrected_barcode_counts: PerLibrarySortedBarcodeCounts,
+    invalid_barcode_counts: SortedBarcodeCountFile,
     chunk_summary: BarcodeCorrectionMetricsFormat,
 }
 
@@ -63,8 +64,8 @@ pub struct BarcodeCorrectionStageOutputs {
     pub valid_corrected: Vec<ReadShardFile>,
     pub invalid: Vec<ReadShardFile>,
     pub summary: MetricsFile,
-    pub corrected_barcode_counts: BcCountFormat,
-    pub total_barcode_counts: TotalBcCountFormat,
+    pub corrected_barcode_counts: PerLibrarySortedBarcodeCounts,
+    pub invalid_barcode_counts: SortedBarcodeCountFile,
 }
 
 pub const MAX_BC_CORRECT_CHUNKS_PER_GG: usize = 100;
@@ -73,7 +74,8 @@ pub const MIN_BC_CORRECT_READ_PAIRS_PER_CHUNK: usize = 500_000;
 /// Correct sequencing errors in barcodes, up to one mismatch.
 pub struct BarcodeCorrection;
 
-fn correct_barcode_in_read(
+/// function to correct barcode in read
+pub fn correct_barcode_in_read(
     rna_read: &mut RnaRead,
     extractor: Option<&BarcodeExtraction>,
     corrector_and_length_range: BarcodeConstruct<&(
@@ -81,14 +83,13 @@ fn correct_barcode_in_read(
         Option<std::ops::Range<usize>>,
     )>,
 ) {
-    // This is needed to get around the borrow checker
-    let bc_qual = rna_read.raw_bc_construct_qual();
-    let corrector = corrector_and_length_range.map(|(corrector, _range)| corrector);
-
     match extractor {
-        Some(BarcodeExtraction::Independent) | None => {
+        None => {
+            let bc_qual = rna_read.raw_bc_construct_qual();
+            let corrector = corrector_and_length_range.map(|(corrector, _range)| corrector);
+
             for (segment, qual, corrector) in izip!(
-                rna_read.segmented_barcode_mut().segments_mut(),
+                rna_read.segmented_barcode.segments_mut(),
                 bc_qual,
                 corrector
             ) {
@@ -97,30 +98,58 @@ fn correct_barcode_in_read(
                 }
             }
         }
+        Some(BarcodeExtraction::VariableMultiplexingBarcode {
+            min_offset,
+            max_offset,
+        }) => {
+            // We should only ever have GelBeadAndProbe constructs in this case.
+            let (corrector_gb, corrector_probe) = corrector_and_length_range
+                .map(|(corrector, _range)| corrector)
+                .gel_bead_and_probe();
+            let bc_qual_gb = rna_read.raw_bc_construct_qual().gel_bead();
+
+            // Correct the gel bead barcode, non-variable position.
+            {
+                let segment_gb = rna_read.segmented_barcode.segments_mut().gel_bead();
+                if !segment_gb.is_valid() {
+                    corrector_gb.correct_barcode(segment_gb, Some(bc_qual_gb));
+                }
+            }
+            // If the probe barcode is already valid, we're done.
+            if rna_read.segmented_barcode.segments().probe().is_valid() {
+                return;
+            }
+
+            // Correct the probe barcode, taking variable position into account.
+            let bc_range = rna_read.bc_range().probe();
+            let which_read = bc_range.read();
+
+            if let Some((new_range, corrected_seg, _dist)) = (*min_offset..=*max_offset)
+                .filter_map(|offset| {
+                    let new_offset = bc_range.offset() as i64 + offset;
+                    assert!(new_offset >= 0);
+                    let offset_range =
+                        RpRange::new(which_read, new_offset as usize, bc_range.len());
+                    try_correct(rna_read.readpair(), offset_range, corrector_probe)
+                })
+                .min_by_key(|(_range, _seg, dist)| *dist)
+            {
+                *rna_read.segmented_barcode.segments_mut().probe() = corrected_seg;
+                rna_read.bc_range = BarcodeConstruct::new_gel_bead_and_probe(
+                    rna_read.bc_range.gel_bead(),
+                    new_range,
+                );
+            }
+        }
         Some(BarcodeExtraction::JointBc1Bc2 {
             min_offset,
             max_offset,
         }) => {
-            fn try_correct(
-                read: &ReadPair,
-                range: RpRange,
-                corrector: &BarcodeCorrector,
-                bc_qual: BcSegQual,
-            ) -> Option<(RpRange, BarcodeSegment, u16)> {
-                read.get_range(range, ReadPart::Seq).and_then(|seq| {
-                    let mut bc = BarcodeSegment::with_sequence(seq, BarcodeSegmentState::Invalid);
-                    corrector
-                        .correct_barcode(&mut bc, Some(bc_qual))
-                        .map(|dist| (range, bc, dist))
-                })
-            }
-            let segmented_barcode = rna_read.segmented_barcode();
-            let valid = segmented_barcode.segments_valid().array_vec();
+            let valid = rna_read.segmented_barcode.segments_valid().array_vec();
 
             let corrector_and_length = corrector_and_length_range.segments().array_vec();
             let bc_range = rna_read.bc_range();
             let bc_range_vec = bc_range.array_vec();
-            let bc_qual_vec = bc_qual.array_vec();
             let which_read = bc_range_vec[0].read();
             let read_len = rna_read.readpair().len(which_read).unwrap();
 
@@ -147,14 +176,17 @@ fn correct_barcode_in_read(
                                 rna_read.readpair(),
                                 RpRange::new(which_read, bc1_end, Some(len2)),
                                 corrector,
-                                bc_qual_vec[1],
                             )
                         })
                         // Among the options pick the one with the least correction
                         .min_by_key(|(_, _, dist)| *dist)
                     {
                         *rna_read.bc_range.as_mut_ref().segments().segment2 = range;
-                        *rna_read.barcode.segments_mut().segments().segment2 = segment;
+                        *rna_read
+                            .segmented_barcode
+                            .segments_mut()
+                            .segments()
+                            .segment2 = segment;
                     };
                 }
                 (false, true) => {
@@ -173,17 +205,21 @@ fn correct_barcode_in_read(
                                     Some((bc2_start - offset).min(max_bc1_length)),
                                 ),
                                 corrector,
-                                bc_qual_vec[0],
                             )
                         })
                         .min_by_key(|(_, _, dist)| *dist)
                     {
                         *rna_read.bc_range.as_mut_ref().segments().segment1 = range;
-                        *rna_read.barcode.segments_mut().segments().segment1 = segment;
+                        *rna_read
+                            .segmented_barcode
+                            .segments_mut()
+                            .segments()
+                            .segment1 = segment;
                     }
                 }
                 (false, false) => {
                     const LARGE_DISTANCE: u16 = 1_000;
+                    let corrector = corrector_and_length_range.map(|(corrector, _range)| corrector);
                     if let Some(corrected) = (*min_offset..=*max_offset)
                         .flat_map(|offset| {
                             // For the given bc1 start position (offset), find the possible ranges for bc1 and bc2
@@ -204,11 +240,9 @@ fn correct_barcode_in_read(
                                 })
                         })
                         .map(|bc_range| {
-                            bc_range.zip(bc_qual).zip(corrector).map(
-                                |((range, qual), segment_corrector)| {
-                                    try_correct(rna_read.readpair(), range, segment_corrector, qual)
-                                },
-                            )
+                            bc_range.zip(corrector).map(|(range, segment_corrector)| {
+                                try_correct(rna_read.readpair(), range, segment_corrector)
+                            })
                         })
                         .min_by_key(|value| {
                             value
@@ -221,19 +255,35 @@ fn correct_barcode_in_read(
                             .zip(corrected)
                             .map(|(default, new)| new.map_or(default, |x| x.0));
                         let barcode = SegmentedBarcode::new(
-                            rna_read.barcode.gem_group(),
-                            segmented_barcode
+                            rna_read.segmented_barcode.gem_group(),
+                            rna_read
+                                .segmented_barcode
                                 .segments()
                                 .zip(corrected)
                                 .map(|(default, new)| new.map_or(default, |x| x.1)),
                         );
                         rna_read.bc_range = bc_range;
-                        rna_read.barcode = barcode;
+                        rna_read.segmented_barcode = barcode;
                     }
                 }
             }
         }
     }
+}
+
+fn try_correct(
+    read: &ReadPair,
+    range: RpRange,
+    corrector: &BarcodeCorrector,
+) -> Option<(RpRange, BarcodeSegment, u16)> {
+    read.get_range(range, ReadPart::Seq).and_then(|seq| {
+        let bc_qual =
+            BcSegQual::from_bytes_unchecked(read.get_range(range, ReadPart::Qual).unwrap());
+        let mut bc = BarcodeSegment::with_sequence(seq, BarcodeSegmentState::Invalid);
+        corrector
+            .correct_barcode(&mut bc, Some(bc_qual))
+            .map(|dist| (range, bc, dist))
+    })
 }
 
 #[make_mro(volatile = strict)]
@@ -249,22 +299,22 @@ impl MartianStage for BarcodeCorrection {
         _rover: MartianRover,
     ) -> Result<StageDef<Self::ChunkInputs>> {
         // Figure out how many chunks to create.
-        let reader: ShardReader<RnaRead, BarcodeOrder> =
-            ShardReader::open_set(&args.invalid_uncorrected)?;
-        let n = reader.len();
+        let n = UnsortedShardReader::<RnaRead, BarcodeOrder>::len(&args.invalid_uncorrected)?;
         let num_chunks =
             (n / MIN_BC_CORRECT_READ_PAIRS_PER_CHUNK).clamp(1, MAX_BC_CORRECT_CHUNKS_PER_GG);
-        Ok(reader
-            .make_chunks(num_chunks, &Range::all())
-            .into_iter()
-            .map(|range| {
+        let chunk_size = n.div_ceil(num_chunks);
+        Ok((0..num_chunks)
+            .map(|n| {
                 (
-                    BarcodeCorrectionChunkInputs { range },
+                    BarcodeCorrectionChunkInputs {
+                        index: n,
+                        count: chunk_size,
+                    },
                     Resource::with_mem_gb(5),
                 )
             })
             .collect::<StageDef<_>>()
-            .join_resource(Resource::with_mem_gb(6)))
+            .join_resource(Resource::with_mem_gb(4)))
     }
 
     fn main(
@@ -276,8 +326,12 @@ impl MartianStage for BarcodeCorrection {
         let valid_shard: ReadShardFile = rover.make_path("valid_shard");
         let invalid_shard: ReadShardFile = rover.make_path("invalid_shard");
 
-        let reader: ShardReader<RnaRead, BarcodeOrder> =
-            ShardReader::open_set(&args.invalid_uncorrected)?;
+        let mut reader =
+            UnsortedShardReader::<RnaRead, BarcodeOrder>::open_set(&args.invalid_uncorrected);
+
+        // Seek to the start of this chunk.
+        reader.skip_lazy(chunk_args.index * chunk_args.count)?;
+
         let mut valid_writer: ShardWriter<RnaRead, BarcodeOrder> = ShardWriter::new(
             &valid_shard,
             ALN_BC_SEND_BUFFER_SZ,
@@ -294,8 +348,9 @@ impl MartianStage for BarcodeCorrection {
         )?;
         let mut invalid_sender = invalid_writer.get_sender();
 
-        let mut bc_counts_corrected: BcCountDataType = TxHashMap::default();
-        let mut bc_counts_total: SimpleHistogram<Barcode> = SimpleHistogram::default();
+        let mut bc_counts_corrected: TxHashMap<LibraryType, OrderedHistogram<Barcode>> =
+            Default::default();
+        let mut bc_counts_invalid = OrderedHistogram::default();
 
         let bc_segment_counts = args.barcode_segment_counts.read()?;
 
@@ -310,10 +365,7 @@ impl MartianStage for BarcodeCorrection {
             .map(|(library_type, v)| {
                 let chemistry_def = &args.chemistry_defs[&library_type];
                 let extractor = chemistry_def.barcode_extraction();
-                let whitelist = Whitelist::construct(
-                    chemistry_def.barcode_whitelist(),
-                    args.libraries_to_translate.contains(&library_type),
-                )?;
+                let whitelist = chemistry_def.barcode_whitelist()?;
 
                 anyhow::Ok((
                     library_type,
@@ -330,7 +382,7 @@ impl MartianStage for BarcodeCorrection {
             .try_collect()?;
 
         let mut visitor = BarcodeCorrectionVisitor::new();
-        for rna_read in reader.iter_range(&chunk_args.range)? {
+        for rna_read in reader.take(chunk_args.count) {
             let mut rna_read = rna_read?;
             let (extractor, corrector) = &extractors_and_correctors[&rna_read.library_type];
             correct_barcode_in_read(&mut rna_read, *extractor, corrector.as_ref());
@@ -344,9 +396,9 @@ impl MartianStage for BarcodeCorrection {
                     .observe(&bc);
                 valid_sender.send(rna_read)?;
             } else {
+                bc_counts_invalid.observe_owned(bc);
                 invalid_sender.send(rna_read)?;
             }
-            bc_counts_total.observe_owned(bc);
         }
         valid_sender.finished()?;
         valid_writer.finish()?;
@@ -356,20 +408,21 @@ impl MartianStage for BarcodeCorrection {
         let chunk_summary: BarcodeCorrectionMetricsFormat = rover.make_path("chunk_summary");
         chunk_summary.write(&visitor.metrics)?;
 
-        let corrected_barcode_counts_file: BcCountFormat =
-            rover.make_path("corrected_barcode_counts");
-        corrected_barcode_counts_file.write(&bc_counts_corrected)?;
+        let corrected_barcode_counts =
+            PerLibrarySortedBarcodeCounts::write_histograms(&bc_counts_corrected, |lib_type| {
+                rover.make_path(format!("{lib_type}_sorted_barcode_counts"))
+            })?;
 
-        let total_barcode_counts_file: TotalBcCountFormat = rover.make_path("total_barcode_counts");
-
-        bc_counts_total.retain(|_, v| args.min_reads_to_report_bc <= v.count());
-        total_barcode_counts_file.write(&bc_counts_total)?;
+        let invalid_barcode_counts = write_sorted_count_file_from_histogram(
+            &bc_counts_invalid,
+            &rover.make_path::<PathBuf>("invalid_barcode_counts"),
+        )?;
 
         Ok(BarcodeCorrectionChunkOutputs {
             valid_shard,
             invalid_shard,
-            corrected_barcode_counts: corrected_barcode_counts_file,
-            total_barcode_counts: total_barcode_counts_file,
+            corrected_barcode_counts,
+            invalid_barcode_counts,
             chunk_summary,
         })
     }
@@ -381,35 +434,14 @@ impl MartianStage for BarcodeCorrection {
         chunk_outs: Vec<Self::ChunkOutputs>,
         rover: MartianRover,
     ) -> Result<Self::StageOutputs> {
-        let bc_counts_raw = args.barcode_counts.read()?;
-
-        let bc_counts_total = {
-            let mut result = SimpleHistogram::default();
-            for co in &chunk_outs {
-                result += co.total_barcode_counts.read()?;
-            }
-            for counts in bc_counts_raw.values() {
-                let mut retained = SimpleHistogram::default();
-                counts
-                    .distribution()
-                    .iter()
-                    .filter(|(_, v)| args.min_reads_to_report_bc <= v.count())
-                    .for_each(|(k, v)| retained.observe_by(k, v.count()));
-                result += retained;
-            }
-            result
-        };
-
-        let total_barcode_counts: TotalBcCountFormat = rover.make_path("total_barcode_counts");
-        total_barcode_counts.write(&bc_counts_total)?;
-
-        let mut bc_counts_corrected = bc_counts_raw;
-        for co in &chunk_outs {
-            bc_counts_corrected.merge(co.corrected_barcode_counts.read()?);
-        }
-
-        let corrected_barcode_counts: BcCountFormat = rover.make_path("correct_barcode_counts");
-        corrected_barcode_counts.write(&bc_counts_corrected)?;
+        // Merge the original valid and corrected barcode counts.
+        let corrected_barcode_counts = PerLibrarySortedBarcodeCounts::merge(
+            chunk_outs
+                .iter()
+                .map(|c| c.corrected_barcode_counts.clone())
+                .chain(std::iter::once(args.barcode_counts)),
+            |lib_type| rover.make_path(format!("{lib_type}_corrected_barcode_counts")),
+        )?;
 
         let mut metrics = args.valid_read_metrics.read()?;
         for chunk_out in &chunk_outs {
@@ -429,28 +461,45 @@ impl MartianStage for BarcodeCorrection {
             })
             .collect();
 
-        let barcode_diversity_metrics: TxHashMap<_, _> = bc_counts_corrected
+        // FIXME: streaming this collection from disk twice isn't ideal, but its
+        // awkward to try to avoid.
+        let barcode_diversity_metrics: TxHashMap<_, _> = corrected_barcode_counts
+            .iter_each_lib()?
             .into_iter()
             .map(|(lib_type, bc_counts)| {
-                (
-                    if lib_type.is_vdj() {
-                        None
-                    } else {
-                        lib_type.as_metric_prefix_static()
-                    },
+                let mut barcodes_detected: usize = 0;
+
+                // Count the number of elements in the iterator while computing
+                // effective diversity.
+                let effective_barcode_diversity = bc_counts.process_results(|iter| {
+                    effective_diversity(iter.map(|(_bc, count)| {
+                        barcodes_detected += 1;
+                        count as f64
+                    }))
+                })?;
+
+                let key = if lib_type.is_vdj() {
+                    None
+                } else {
+                    lib_type.as_metric_prefix_static()
+                };
+                anyhow::Ok((
+                    key,
                     BarcodeDiversityMetrics {
-                        barcodes_detected: bc_counts.distribution().len(),
-                        effective_barcode_diversity: bc_counts.effective_diversity(),
+                        barcodes_detected,
+                        effective_barcode_diversity,
                     },
-                )
+                ))
             })
-            .collect();
+            .try_collect()?;
 
         let summary = MetricsFile::from_reporter(
             &rover,
             "summary",
             &(metrics.to_json_reporter() + barcode_diversity_metrics.to_json_reporter()),
         )?;
+
+        let invalid_barcode_counts = merge_invalid_barcode_counts(&chunk_outs, &rover)?;
 
         let (valid_corrected, invalid) = chunk_outs
             .into_iter()
@@ -461,7 +510,32 @@ impl MartianStage for BarcodeCorrection {
             invalid,
             summary,
             corrected_barcode_counts,
-            total_barcode_counts,
+            invalid_barcode_counts,
         })
     }
+}
+
+/// Merge all invalid barcode counts from all chunks.
+///
+/// The barcode counts must have been written in sorted order for this merge
+/// to work properly.
+fn merge_invalid_barcode_counts(
+    chunks: &[BarcodeCorrectionChunkOutputs],
+    rover: &MartianRover,
+) -> Result<SortedBarcodeCountFile> {
+    let f: SortedBarcodeCountFile = rover.make_path("invalid_barcode_counts");
+    let mut writer = f.lazy_writer()?;
+    // Merge all invalid barcode counts.
+    // These were written in sorted order, so we can group their merged iterators
+    // without extra allocations.
+    for result in MergeSortedCounts::from_readers(
+        chunks
+            .iter()
+            .map(|c| c.invalid_barcode_counts.lazy_reader())
+            .try_collect()?,
+    ) {
+        writer.write_item(&result?)?;
+    }
+    writer.finish()?;
+    Ok(f)
 }

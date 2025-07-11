@@ -1,3 +1,6 @@
+//! spatial::stages::generate_hd_websummary_cs::summary_tab
+#![allow(missing_docs)]
+
 use self::key_metrics::KeyMetricsCard;
 use super::end_to_end::EndToEndAlignmentCard;
 use serde::{Deserialize, Serialize};
@@ -24,6 +27,7 @@ pub struct SummaryTabLeft {
     pub(crate) key_metrics: KeyMetricsCard,
     pub(crate) mapping_metrics: CardWithTableMetric,
     pub(crate) sequencing_metrics: CardWithTableMetric,
+    pub(crate) segmentation_summary: Option<SegmentationCard>,
 }
 
 #[derive(Serialize, HtmlTemplate)]
@@ -42,6 +46,21 @@ pub struct GenomicDnaTemplate {
 #[derive(Serialize, HtmlTemplate)]
 pub struct SummaryTabRight {
     pub(crate) end_to_end_alignment: EndToEndAlignmentCard,
+}
+#[derive(Serialize, HtmlTemplate)]
+pub struct SegmentationCard {
+    pub card: Card<WithTitle<TableMetric>>,
+}
+
+impl SegmentationCard {
+    pub fn new(segmentation_summary: TableMetric) -> Self {
+        Self {
+            card: Card::half_width(WithTitle::new(
+                Title::new("Cell Segmentation"),
+                segmentation_summary,
+            )),
+        }
+    }
 }
 
 #[derive(Serialize, HtmlTemplate)]

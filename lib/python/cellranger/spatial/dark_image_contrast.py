@@ -23,7 +23,8 @@ class ClipLimits(NamedTuple):
 def get_clip_limits(img: np.ndarray) -> ClipLimits:
     """Compute clip limits used for contrast enhancement.
 
-    The algorithm here is ported over from ImageJ's FIJI.
+    The algorithm here is ported over from ImageJ's FIJI via loupe here:
+    https://github.com/10XDev/unoloupe/blob/main/packages/webgl/src/layers/FilteredBitmapLayer.ts#L8-L194.
     The lower threshold is the lowest pixel value that is seen in more than
     1/5000 pixels but less than 10% of pixels.
     The upper threshold for clipping is the largest pixel value that is seen in

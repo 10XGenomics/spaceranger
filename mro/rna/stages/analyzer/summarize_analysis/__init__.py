@@ -61,8 +61,12 @@ def main(args, outs):
 
     # Pytables doesn't support variable len strings, so use h5py first
     with h5.File(ensure_binary(args.matrix_h5), "r") as matrix, h5.File(analysis_h5, "w") as out:
-        # TODO: copy the first group; fixme when we have a key
-        name = next(iter(matrix.keys()))
+        keys = list(matrix.keys())
+        if "matrix" in keys:
+            name = "matrix"
+        else:
+            name = keys[0]
+
         matrix.copy(matrix[name], out, name="matrix")
 
     h5s_to_combine = [args.pca_h5, args.clustering_h5, args.diffexp_h5, args.umap_h5]
@@ -71,6 +75,7 @@ def main(args, outs):
     cr_h5.combine_h5s_into_one(analysis_h5, h5s_to_combine)
 
     pca_dir = os.path.join(outs.analysis_csv, "pca")
+    os.makedirs(pca_dir, exist_ok=True)
     cr_io.hardlink_with_fallback(args.pca_csv, pca_dir)
 
     clustering_dir = os.path.join(outs.analysis_csv, "clustering")

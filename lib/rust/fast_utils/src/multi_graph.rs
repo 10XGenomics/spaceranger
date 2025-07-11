@@ -1,6 +1,6 @@
 //! Wrapping the Rust handling of the multi config.
-use cr_types::{CellMultiplexingType, CrMultiGraph, Fingerprint};
-use itertools::Itertools;
+#![deny(missing_docs)]
+use cr_types::{BarcodeMultiplexingType, CellLevel, CrMultiGraph, Fingerprint, ReadLevel};
 use martian::MartianFileType;
 use martian_filetypes::json_file::JsonFile;
 use martian_filetypes::FileTypeRead;
@@ -21,7 +21,7 @@ pub struct MultiGraph(CrMultiGraph);
 impl MultiGraph {
     /// Load the multi graph from the provided path.
     #[classmethod]
-    pub fn from_path(_cls: &PyType, path: &str) -> PyResult<Self> {
+    pub fn from_path(_cls: &Bound<'_, PyType>, path: &str) -> PyResult<Self> {
         Ok(Self(JsonFile::from_path(Path::new(path)).read().map_err(
             |err| PyErr::new::<PyException, _>(format!("{err:#}")),
         )?))
@@ -29,7 +29,7 @@ impl MultiGraph {
 
     /// Load the multi graph from the provided JSON-encoded string.
     #[classmethod]
-    pub fn from_str(_cls: &PyType, contents: &str) -> PyResult<Self> {
+    pub fn from_str(_cls: &Bound<'_, PyType>, contents: &str) -> PyResult<Self> {
         Ok(Self(serde_json::from_str(contents).map_err(|err| {
             PyErr::new::<PyException, _>(format!("{err:#}"))
         })?))
@@ -63,14 +63,12 @@ impl MultiGraph {
             .collect()
     }
 
-    /// Extract the names of all feature barcoding types present.
-    pub fn feature_types(&self) -> HashSet<String> {
+    /// Get the names of all library types.
+    pub fn library_types(&self) -> HashSet<&'static str> {
         self.0
             .libraries
             .iter()
-            .filter_map(|lib| lib.library_type.feature_barcode_type())
-            .unique()
-            .map(|fbt| fbt.to_string())
+            .map(|x| x.library_type.as_str())
             .collect()
     }
 
@@ -81,17 +79,26 @@ impl MultiGraph {
 
     /// Return true if this data is using CMO multiplexing.
     pub fn is_cmo_multiplexed(&self) -> bool {
-        self.0.cell_multiplexing_type() == Some(CellMultiplexingType::CMO)
+        self.0.barcode_multiplexing_type()
+            == Some(BarcodeMultiplexingType::CellLevel(CellLevel::CMO))
+    }
+
+    /// Return true if this data is using HASHTAG multiplexing.
+    pub fn is_hashtag_multiplexed(&self) -> bool {
+        self.0.barcode_multiplexing_type()
+            == Some(BarcodeMultiplexingType::CellLevel(CellLevel::Hashtag))
     }
 
     /// Return true if this data is using RTL multiplexing.
     pub fn is_rtl_multiplexed(&self) -> bool {
-        self.0.cell_multiplexing_type() == Some(CellMultiplexingType::RTL)
+        self.0.barcode_multiplexing_type()
+            == Some(BarcodeMultiplexingType::ReadLevel(ReadLevel::RTL))
     }
 
     /// Return true if this data is using OH multiplexing.
     pub fn is_oh_multiplexed(&self) -> bool {
-        self.0.cell_multiplexing_type() == Some(CellMultiplexingType::OH)
+        self.0.barcode_multiplexing_type()
+            == Some(BarcodeMultiplexingType::ReadLevel(ReadLevel::OH))
     }
 
     /// Return tuples of sample ID and finerprints.

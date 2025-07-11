@@ -1,12 +1,13 @@
+#![deny(missing_docs)]
 use super::scsv::{eof, rstrip_space, take_until_eof, Span};
 use anyhow::{bail, Result};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till};
-use nom::character::complete::{alpha1, digit1, one_of, space0, space1};
+use nom::character::complete::{space0, space1};
 use nom::combinator::peek;
 use nom::multi::many0;
 use nom::sequence::{delimited, preceded, terminated};
-use nom::{AsChar, IResult, InputTakeAtPosition};
+use nom::IResult;
 use regex::bytes::Regex;
 use std::fmt::{Display, Formatter};
 use std::ops::RangeInclusive;
@@ -20,7 +21,7 @@ pub enum ParseCtx<'a, T: Display> {
     HdrRowCol(T, usize, &'a str),
 }
 
-impl<'a, T: Display> Display for ParseCtx<'a, T> {
+impl<T: Display> Display for ParseCtx<'_, T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         use ParseCtx::{Hdr, HdrCol, HdrRow, HdrRowCol};
         match self {
@@ -49,7 +50,7 @@ pub trait Parse<T: Display> {
         <R as FromStr>::Err: Display;
 }
 
-impl<'a, T: Display> Parse<T> for Span<'a> {
+impl<T: Display> Parse<T> for Span<'_> {
     fn parse<R>(&self, ctx: ParseCtx<'_, T>) -> Result<R>
     where
         R: FromStr,
@@ -105,22 +106,6 @@ pub fn parse_vec(input: Span<'_>) -> Result<Vec<Span<'_>>, nom::Err<nom::error::
     }
 }
 
-#[allow(dead_code)]
-pub fn parse_ident<T>(input: T) -> IResult<T, T>
-where
-    T: InputTakeAtPosition + Clone,
-    <T as InputTakeAtPosition>::Item: AsChar + Copy,
-{
-    let (s, _) = peek(alpha1)(input)?;
-    s.split_at_position_complete(|c| !(c.is_alphanum() || c.as_char() == '_'))
-}
-
-#[allow(dead_code)]
-fn number(input: Span<'_>) -> IResult<Span<'_>, Span<'_>> {
-    let (s, _) = peek(one_of("123456789"))(input)?;
-    digit1(s)
-}
-
 pub fn parse_range<T>(input: Span<'_>) -> Result<RangeInclusive<T>>
 where
     T: FromStr + PartialOrd<T> + Clone,
@@ -172,10 +157,21 @@ mod tests {
     use super::super::scsv::{Span, XtraData};
     use super::*;
     use anyhow::Result;
+    use nom::character::complete::alpha1;
+    use nom::{AsChar, InputTakeAtPosition};
 
     fn span(s: &str) -> Span<'_> {
         let xtra = XtraData::new("parse::tests");
         Span::new_extra(s, xtra)
+    }
+
+    pub fn parse_ident<T>(input: T) -> IResult<T, T>
+    where
+        T: InputTakeAtPosition + Clone,
+        <T as InputTakeAtPosition>::Item: AsChar + Copy,
+    {
+        let (s, _) = peek(alpha1)(input)?;
+        s.split_at_position_complete(|c| !(c.is_alphanum() || c.as_char() == '_'))
     }
 
     #[test]

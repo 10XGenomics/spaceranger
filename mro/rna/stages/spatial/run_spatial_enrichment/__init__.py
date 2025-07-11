@@ -20,7 +20,7 @@ from statsmodels.stats.multitest import multipletests
 import cellranger.analysis.morans_i as cr_morans_i
 import cellranger.analysis.stats as analysis_stats
 import cellranger.matrix as cr_matrix
-import cellranger.spatial.data_utils as data_utils
+import cellranger.spatial.spatial_pandas_utils as spatial_pandas_utils
 import tenkit.safe_json as tk_safe_json
 from cellranger.analysis.morans_i import KNN_NEIGHBORS, MORANS_I_PERMUTATIONS
 from cellranger.spatial.data_utils import IMAGEX_LOWRES, IMAGEY_LOWRES
@@ -77,7 +77,9 @@ def split(args):
         or args.tissue_positions is None
     ):
         return {"chunks": []}
-    coords = data_utils.get_lowres_coordinates(args.tissue_positions, args.image_scale_factors)
+    coords = spatial_pandas_utils.get_lowres_coordinates(
+        args.tissue_positions, args.image_scale_factors
+    )
     spots = coords.loc[bcs]
     weight_matrix = cr_morans_i.get_neighbors_weight_matrix(
         spots[[IMAGEY_LOWRES, IMAGEX_LOWRES]].values
@@ -98,13 +100,13 @@ def split(args):
     for row_start in range(0, filtered_matrix_norm.shape[0], FEATURES_PER_CHUNK):
         row_end = min(row_start + FEATURES_PER_CHUNK, filtered_matrix_norm.shape[0])
         # Write the submatrix to an h5 file
-        submatrix_path = martian.make_path("%d_spatial_submatrix.h5" % row_start)
+        submatrix_path = martian.make_path(f"{row_start}_spatial_submatrix.h5")
         # dense matrix used for Moran's I calc.
         chunk_matrix = filtered_matrix_norm[row_start:row_end, :].toarray()
         with h5py.File(submatrix_path, "w") as f:
             f.create_dataset(SPATIAL_SUBMATRIX_NAME, data=chunk_matrix)
         # Write the features to a pickle file
-        feature_def_path = martian.make_path("%d_spatial_feature_def.pickle" % row_start)
+        feature_def_path = martian.make_path(f"{row_start}_spatial_feature_def.pickle")
         with open(feature_def_path, "wb") as f:
             cPickle.dump(features[row_start:row_end], f, cPickle.HIGHEST_PROTOCOL)
         chunks.append(
@@ -170,7 +172,7 @@ def main(args, outs):
 # pylint: disable=too-many-locals
 def join(args, outs, chunk_defs, chunk_outs):
     if len(chunk_outs) == 0:
-        outs.spatial_enrichment_csv = None
+        martian.clear(outs)
         return
     chunk_res_names = [chunk.chunked_spatial_enrichment_files for chunk in chunk_outs]
     frames = []

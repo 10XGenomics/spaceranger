@@ -1,52 +1,6 @@
-// Warning groups (as of rust 1.55)
-#![deny(
-    future_incompatible,
-    nonstandard_style,
-    rust_2018_compatibility,
-    rust_2021_compatibility,
-    rust_2018_idioms,
-    unused
-)]
-// Other warnings (as of rust 1.55)
-#![deny(
-    asm_sub_register,
-    bad_asm_style,
-    bindings_with_variant_name,
-    clashing_extern_declarations,
-    confusable_idents,
-    const_item_mutation,
-    deprecated,
-    deref_nullptr,
-    drop_bounds,
-    dyn_drop,
-    elided_lifetimes_in_paths,
-    exported_private_dependencies,
-    function_item_references,
-    improper_ctypes,
-    improper_ctypes_definitions,
-    incomplete_features,
-    inline_no_sanitize,
-    invalid_value,
-    irrefutable_let_patterns,
-    large_assignments,
-    mixed_script_confusables,
-    non_shorthand_field_patterns,
-    no_mangle_generic_items,
-    overlapping_range_endpoints,
-    renamed_and_removed_lints,
-    stable_features,
-    temporary_cstring_as_ptr,
-    trivial_bounds,
-    type_alias_bounds,
-    uncommon_codepoints,
-    unconditional_recursion,
-    unknown_lints,
-    unnameable_test_items,
-    unused_comparisons,
-    while_true
-)]
+//! cr_wrap
+#![deny(missing_docs)]
 
-// handling pipeline environments
 pub mod arc;
 pub mod chemistry_arg;
 pub mod cloud;
@@ -58,29 +12,41 @@ pub mod mkfastq;
 pub mod mkref;
 pub mod mrp_args;
 pub mod shared_cmd;
-pub mod targeted_compare;
+pub mod telemetry;
 pub mod utils;
 
 use anyhow::{ensure, Context, Result};
-use cr_types::constants::COMMAND_LINE_ENV_VARIABLE_NAME;
 use mrp_args::MrpArgs;
 use serde::Serialize;
-use shell_escape::escape;
 use std::fs::{create_dir, File};
 use std::io::Write;
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, ExitStatus, Stdio};
+use std::time::Instant;
+use telemetry::TelemetryCollector;
 
 /// Convert something to an ExitCode.
 trait IntoExitCode {
+    fn into_u8(self) -> u8;
     fn into_exit_code(self) -> ExitCode;
 }
 
 impl IntoExitCode for ExitStatus {
+    /// Return the exit code, or 128 + the signal number, or 255.
+    fn into_u8(self) -> u8 {
+        if let Some(code) = self.code() {
+            code as u8
+        } else if let Some(signal) = self.signal() {
+            128 + signal as u8
+        } else {
+            255
+        }
+    }
+
     /// Convert an ExitStatus to an ExitCode.
     fn into_exit_code(self) -> ExitCode {
-        self.code()
-            .map_or(ExitCode::FAILURE, |x| ExitCode::from(x as u8))
+        ExitCode::from(self.into_u8())
     }
 }
 
@@ -106,6 +72,7 @@ pub fn make_mro<T: Serialize>(call: &str, args: &T, pipeline_mro_file: &str) -> 
     Ok(mro_string)
 }
 
+/// Make an MRO file with a comment
 pub fn make_mro_with_comment<T: Serialize>(
     call: &str,
     args: &T,
@@ -146,6 +113,7 @@ fn call_mrg(msg: &str) -> Result<String> {
     Ok(result)
 }
 
+#[allow(missing_docs)]
 pub enum MroInvocation {
     MroString(String),
     File(PathBuf),
@@ -162,8 +130,9 @@ pub fn execute(
     invocation: &str,
     mrp_args: &MrpArgs,
     dry_run: bool,
+    telemetry: &mut TelemetryCollector,
 ) -> Result<ExitCode> {
-    Ok(execute_to_status(job_id, invocation, mrp_args, dry_run)?.into_exit_code())
+    Ok(execute_to_status(job_id, invocation, mrp_args, dry_run, telemetry)?.into_exit_code())
 }
 
 /// Execute a Martian pipeline with mrp and return an ExitStatus.
@@ -172,12 +141,20 @@ pub fn execute_to_status(
     invocation: &str,
     mrp_args: &MrpArgs,
     dry_run: bool,
+    telemetry: &mut TelemetryCollector,
 ) -> Result<ExitStatus> {
     let inv = MroInvocation::MroString(invocation.to_string());
-    execute_any(job_id, inv, mrp_args, dry_run)
+    let start = Instant::now();
+    let mrp_exit_status = execute_any(job_id, inv, mrp_args, dry_run)?;
+    telemetry.collect(
+        Some(&format!("{} {job_id}", mrp_args.get_args().join(" "))),
+        Some(&mrp_exit_status),
+        Some(start.elapsed()),
+    );
+    Ok(mrp_exit_status)
 }
 
-pub fn execute_any(
+fn execute_any(
     job_id: &str,
     invocation: MroInvocation,
     mrp_args: &MrpArgs,
@@ -220,32 +197,11 @@ pub fn execute_any(
     Ok(exit_status)
 }
 
-/// Set CMDLINE to the command line arguments, needed to create the pipeline output file _cmdline.
-fn set_env_cmdline() {
-    let cmdline: Vec<_> = std::env::args().map(|x| escape(x.into())).collect();
-    std::env::set_var(COMMAND_LINE_ENV_VARIABLE_NAME, cmdline.join(" "));
-}
-
-// Set COLUMNS to 80 when the terminal size is unknown.
-// Wrap the output of --help to 80 columns when the terminal size is unknown.
-// The default value of clap is 100.
-fn set_env_columns() {
-    if terminal_size::terminal_size().is_none() && std::env::var_os("COLUMNS").is_none() {
-        std::env::set_var("COLUMNS", "80");
-    }
-}
-
-// Set environment variables.
-pub fn set_env_vars() {
-    set_env_cmdline();
-    set_env_columns();
-}
-
 fn run_mrp(job_id: &str, mro_path: &Path, mrp_args: &MrpArgs) -> Result<ExitStatus> {
     if let Some(output_dir) = &mrp_args.output_dir {
         // Create output_dir to ensure that it is created successfully.
         match create_dir(output_dir) {
-            Ok(_) => (),
+            Ok(()) => (),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (),
             Err(error) => return Err(error).context(output_dir.clone()),
         }
@@ -281,6 +237,7 @@ fn run_tarmri(output_dir: &str, exit_status: ExitStatus) -> Result<ExitCode> {
         .into_exit_code())
 }
 
+/// Check for a deprecated OS
 pub fn check_deprecated_os() -> Result<()> {
     if std::env::var("TENX_IGNORE_DEPRECATED_OS")
         .map(|s| s != "0")

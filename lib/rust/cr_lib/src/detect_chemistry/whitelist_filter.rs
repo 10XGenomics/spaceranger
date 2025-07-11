@@ -1,12 +1,15 @@
+#![deny(missing_docs)]
 use super::chemistry_filter::{ChemistryFilter, DetectChemistryUnit};
 use super::errors::DetectChemistryErrors;
 use anyhow::Result;
-use barcode::{BarcodeConstruct, BcSegSeq, Whitelist, WhitelistSpec};
-use cr_types::chemistry::{ChemistryDef, ChemistryName};
-use fastq_set::read_pair::{ReadPair, ReadPart, RpRange};
+use barcode::{BarcodeConstruct, BcSegSeq, Whitelist, WhitelistSource, WhitelistSpec};
+use cr_types::chemistry::{BarcodeExtraction, BarcodeReadComponent, ChemistryDef, ChemistryName};
+use cr_types::rna_read::extract_barcode;
+use fastq_set::read_pair::ReadPair;
 use itertools::Itertools;
 use metric::{set, PercentMetric, TxHashMap, TxHashSet};
 use parameters_toml::min_fraction_whitelist_match;
+use std::ops::Range;
 
 pub(crate) struct WhitelistMatchFilter<'a> {
     allowed_chems: &'a TxHashSet<ChemistryName>,
@@ -30,16 +33,19 @@ impl<'a> WhitelistMatchFilter<'a> {
         let mut wl_matchers = Vec::new();
         for wl in chem_defs
             .iter()
-            .map(cr_types::chemistry::ChemistryDef::barcode_whitelist)
+            .map(ChemistryDef::barcode_whitelist_spec)
             .unique()
         {
             index_map.insert(wl, wl_matchers.len());
-            wl_matchers.push(WhitelistMatcher::new(wl)?);
+            wl_matchers.push(WhitelistMatcher::new(
+                wl.map_result(WhitelistSpec::as_source)?,
+            )?);
         }
         let index_of_chem = chem_defs
             .iter()
-            .map(|def| (def.name, index_map[&def.barcode_whitelist()]))
+            .map(|def| (def.name, index_map[&def.barcode_whitelist_spec()]))
             .collect();
+
         Ok(WhitelistMatchFilter {
             allowed_chems,
             chem_defs,
@@ -65,8 +71,8 @@ impl<'a> ChemistryFilter<'a> for WhitelistMatchFilter<'a> {
         reads: &[ReadPair],
     ) -> Result<TxHashSet<ChemistryName>, DetectChemistryErrors> {
         // Special case for HD CELLRANGER-7761
-        if self.chem_defs.len() == 1 && self.chem_defs[0].name == ChemistryName::SpatialHdV1 {
-            return Ok(set![ChemistryName::SpatialHdV1]);
+        if self.chem_defs.len() == 1 && self.chem_defs[0].name.is_spatial() {
+            return Ok(set![self.chem_defs[0].name]);
         }
 
         let min_frac_whitelist_match = *min_fraction_whitelist_match()
@@ -75,7 +81,11 @@ impl<'a> ChemistryFilter<'a> for WhitelistMatchFilter<'a> {
         let mut best_wl_match = 0.0f64;
         for chem_def in &self.chem_defs {
             let wl_matches = self.wl_matchers[self.index_of_chem[&chem_def.name]]
-                .count_matches(reads, chem_def.barcode_range())
+                .count_matches(
+                    reads,
+                    chem_def.barcode_construct(),
+                    chem_def.barcode_extraction(),
+                )
                 .fraction();
             // TODO: Handle reads_with_bc = 0
             if wl_matches > best_wl_match {
@@ -150,26 +160,44 @@ impl WhitelistMatchStats {
 
 pub struct WhitelistMatcher {
     whitelist: BarcodeConstruct<Whitelist>,
+    barcode_lengths: BarcodeConstruct<Range<usize>>,
 }
 
 impl WhitelistMatcher {
-    pub fn new(barcode_whitelist: BarcodeConstruct<&WhitelistSpec>) -> Result<Self> {
+    pub fn new(whitelist: BarcodeConstruct<WhitelistSource>) -> Result<Self> {
+        // Load this whitelist as a "plain" whitelist, regardless of type.
+        //
+        // This is sufficient for checking membership in the whitelist, but neglects
+        // all translation information. Using this method instead of as_whitelist
+        // reduces memory consumption since we are working in a context where
+        // we only care about matching to the whitelist, but not using translation.
+        let whitelist = whitelist.map_result(|source| Ok(Whitelist::Plain(source.as_set()?)))?;
         Ok(WhitelistMatcher {
-            whitelist: Whitelist::construct(barcode_whitelist, false)?,
+            barcode_lengths: whitelist.as_ref().map(Whitelist::sequence_lengths),
+            whitelist,
         })
     }
 
     fn count_matches(
         &self,
         read_pairs: &[ReadPair],
-        bc_range: BarcodeConstruct<RpRange>,
+        barcode_components: BarcodeConstruct<&BarcodeReadComponent>,
+        barcode_extraction: Option<&BarcodeExtraction>,
     ) -> WhitelistMatchStats {
         let mut stats = WhitelistMatchStats::default();
         for read_pair in read_pairs {
             stats.total_reads += 1;
-            if let Some(seq) = bc_range.map_option(|r| read_pair.get_range(r, ReadPart::Seq)) {
+
+            if let Ok((_bc_ranges, bc)) = extract_barcode(
+                read_pair,
+                barcode_components,
+                barcode_extraction,
+                self.whitelist.as_ref(),
+                self.barcode_lengths.as_ref(),
+                0,
+            ) {
                 stats.reads_with_bc += 1;
-                if self.contains(seq) {
+                if self.contains(bc.sequence()) {
                     stats.reads_with_bc_in_wl += 1;
                 }
             }
@@ -177,18 +205,14 @@ impl WhitelistMatcher {
         stats
     }
 
-    pub fn match_to_whitelist(
-        &self,
-        seqs: BarcodeConstruct<&[u8]>,
-    ) -> Option<BarcodeConstruct<BcSegSeq>> {
-        self.whitelist
-            .as_ref()
-            .zip(seqs)
-            .map_option(|(wl, seq)| wl.match_to_whitelist(BcSegSeq::from_bytes(seq)))
-    }
-
     fn contains(&self, sseq: BarcodeConstruct<&[u8]>) -> bool {
         // NOTE: This is robust to a single N cycle
-        self.match_to_whitelist(sseq).is_some()
+        self.whitelist
+            .as_ref()
+            .zip(sseq)
+            .map_option(|(wl, seq)| {
+                wl.match_to_whitelist_allow_one_n(BcSegSeq::from_bytes(seq), false)
+            })
+            .is_some()
     }
 }

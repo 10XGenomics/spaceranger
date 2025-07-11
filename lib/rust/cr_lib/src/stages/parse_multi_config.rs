@@ -1,16 +1,24 @@
 //! Martian stage PARSE_MULTI_CONFIG
+#![allow(missing_docs)]
 
+use super::setup_reference_info::get_reference_info;
 use crate::preflight::hostname;
 use anyhow::{anyhow, bail, Result};
+use base64::prelude::BASE64_STANDARD;
+use base64::Engine;
+use cr_types::cell_annotation::CellAnnotationModel;
 use cr_types::chemistry::{
-    AutoChemistryName, AutoOrRefinedChemistry, ChemistryDef, ChemistrySpecs, IndexScheme,
+    AutoChemistryName, AutoOrRefinedChemistry, ChemistryDef, ChemistryDefs, ChemistrySpecs,
+    IndexScheme,
 };
-use cr_types::probe_set::merge_probe_set_csvs;
+use cr_types::probe_set::{merge_probe_set_csvs, ProbeSetReferenceMetadata};
 use cr_types::reference::feature_reference::{FeatureConfig, FeatureReferenceFile};
 use cr_types::reference::probe_set_reference::TargetSetFile;
+use cr_types::reference::reference_info::ReferenceInfo;
 use cr_types::sample_def::SampleDef;
 use cr_types::types::FileOrBytes;
-use cr_types::{AlignerParam, LibraryType, TargetingMethod, VdjChainType};
+use cr_types::{AlignerParam, GenomeName, LibraryType, TargetingMethod, VdjChainType};
+use itertools::Itertools;
 use martian::prelude::*;
 use martian_derive::{make_mro, MartianStruct, MartianType};
 use martian_filetypes::json_file::JsonFile;
@@ -19,14 +27,13 @@ use metric::TxHashMap;
 use multi::barcode_sample_assignment::SampleAssignmentCsv;
 use multi::config::preflight::build_feature_reference_with_cmos;
 use multi::config::{create_feature_config, MultiConfigCsvFile};
-use parameters_toml::max_multiplexing_tags;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JValue;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{BufWriter, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Default, Serialize, Deserialize, MartianType)]
 pub struct MultiParams {
@@ -37,7 +44,7 @@ pub struct MultiParams {
     #[serde(default)]
     primers: Vec<Primers>,
     #[serde(default)]
-    index_scheme: Option<IndexScheme>,
+    index_schemes: HashMap<LibraryType, IndexScheme>,
     #[serde(default)]
     barcode_whitelist: Option<String>,
     #[serde(default)]
@@ -126,13 +133,12 @@ pub struct CountInputs {
     pub sample_def: Vec<SampleDef>,
     pub target_set: Option<TargetSetFile>,
     pub target_set_name: Option<String>,
+    pub reference_info: Option<ReferenceInfo>,
     pub chemistry_specs: ChemistrySpecs,
-    pub custom_chemistry_def: Option<ChemistryDef>,
-    pub reference_path: PathBuf,
-    pub gene_index: JsonFile<()>,
+    pub custom_chemistry_defs: ChemistryDefs,
+    pub gene_index: Option<JsonFile<()>>,
     #[mro_type = "map[]"]
     pub primers: Vec<Primers>,
-    pub cell_calling_config: CellCalling,
     pub subsample_rate: Option<f64>,
     pub initial_reads: Option<usize>,
     pub primer_initial_reads: Option<usize>,
@@ -142,7 +148,6 @@ pub struct CountInputs {
     pub trim_polya_min_score: Option<i64>,
     pub trim_tso_min_score: Option<i64>,
     pub no_secondary_analysis: bool,
-    pub no_target_umi_filter: bool,
     pub filter_probes: Option<bool>,
     pub feature_reference: Option<FeatureReferenceFile>,
     pub include_exons: bool,
@@ -162,6 +167,25 @@ pub struct CountInputs {
     pub cell_annotation_model: Option<String>,
     pub skip_cell_annotation: bool,
     pub tenx_cloud_token_path: Option<String>,
+    pub enable_tsne: bool,
+}
+
+impl CountInputs {
+    /// Return the list of genomes
+    pub fn get_genomes(&self) -> Option<&[GenomeName]> {
+        if let Some(reference_info) = self.reference_info.as_ref() {
+            Some(&reference_info.genomes)
+        } else {
+            None
+        }
+    }
+
+    /// Return transcriptome reference_path
+    pub fn get_reference_path(&self) -> Option<&Path> {
+        self.reference_info
+            .as_ref()
+            .and_then(|x| x.get_reference_path())
+    }
 }
 
 /// General VdjInputs which are not chain specific
@@ -216,6 +240,8 @@ pub struct BasicPipelineConfig {
     pub disable_multi_count: bool,
     /// boolean to disable stages that are only needed when probes are present
     pub disable_rtl: bool,
+    /// boolean to disable annotate stages
+    pub disable_annotate: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize, MartianStruct)]
@@ -223,6 +249,7 @@ pub struct BasicPipelineConfig {
 pub struct ParseMultiConfigStageOutputs {
     pub common_input: CommonInputs,
     pub count_input: Option<CountInputs>,
+    pub count_cell_calling_config: Option<CellCalling>,
     pub vdj_inputs: Vec<VdjInputs>, // or just JSON w/ outer array?
     pub vdj_gen_inputs: Option<VdjGenInputs>,
     pub basic_config: BasicPipelineConfig,
@@ -258,7 +285,7 @@ impl MartianMain for ParseMultiConfig {
             FileOrBytes {
                 file: None,
                 bytes: Some(ref bytes),
-            } => base64::decode(bytes)?,
+            } => BASE64_STANDARD.decode(bytes)?,
             FileOrBytes {
                 bytes: None,
                 file: Some(ref file),
@@ -288,7 +315,7 @@ impl MartianMain for ParseMultiConfig {
             initial_reads,
             subsample_rate,
             primers,
-            index_scheme,
+            index_schemes,
             barcode_whitelist,
             special_genomic_regions,
             cell_calling_mode,
@@ -296,6 +323,7 @@ impl MartianMain for ParseMultiConfig {
 
         let (
             count_input,
+            count_cell_calling_config,
             feature_ref,
             cell_barcodes,
             sample_barcodes,
@@ -319,7 +347,7 @@ impl MartianMain for ParseMultiConfig {
                         Ok(acc)
                     })?;
             if sample_def.is_empty() {
-                (None, None, None, None, None, None, None)
+                (None, None, None, None, None, None, None, None)
             } else {
                 let gex = cfg.gene_expression.as_ref().ok_or_else(
                     #[cold]
@@ -340,21 +368,17 @@ impl MartianMain for ParseMultiConfig {
                         sample.r2_length = feature.and_then(|f| f.r2_length);
                     }
                 }
-                // write the gene_index json if we need to
-                let gene_index: JsonFile<()> = rover.make_path("gene_index");
-                transcriptome::python_gene_index::write_gene_index(
-                    &gex.reference_path,
-                    gene_index.as_ref(),
-                )?;
-                /* TODO: when we divvy up CountInputs into a vec by gem-well,
-                //   thread in gem-wells params for force_cells, etc
-                let force_cells = cfg
-                    .gem_wells
-                    .as_ref()
-                    .map(|gw| gw.0.get(&GemWell(1)).map(|p| p.force_cells))
-                    .flatten()
-                    .flatten();
-                */
+
+                let gene_index = if let Some(reference_path) = &gex.reference_path {
+                    let gene_index: JsonFile<()> = rover.make_path("gene_index");
+                    transcriptome::python_gene_index::write_gene_index(
+                        reference_path,
+                        &gene_index,
+                    )?;
+                    Some(gene_index)
+                } else {
+                    None
+                };
 
                 let (
                     cell_barcodes,
@@ -437,44 +461,46 @@ impl MartianMain for ParseMultiConfig {
                     disable_high_occupancy_gem_detection: !gex.filter_high_occupancy_gems,
                 };
 
-                let (feature_reference_file, tenx_cmos) = match build_feature_reference_with_cmos(
-                    &cfg,
-                    args.is_pd,
-                    &hostname(),
-                    *max_multiplexing_tags()?,
-                )? {
-                    (Some(_), None) => {
-                        // Not using CMO multiplexing; use the original feature reference file.
-                        let src = cfg
-                            .feature
-                            .as_ref()
-                            .unwrap()
-                            .reference_path
-                            .as_ref()
-                            .unwrap();
-                        let dst: FeatureReferenceFile = rover.make_path("feature_ref");
-                        if std::fs::hard_link(src, &dst).is_err() {
-                            std::fs::copy(src, &dst)?;
+                let (feature_reference_file, tenx_cmos) =
+                    match build_feature_reference_with_cmos(&cfg, args.is_pd, &hostname())? {
+                        (Some(_), None) => {
+                            // Not using CMO multiplexing; use the original feature reference file.
+                            let src = cfg
+                                .feature
+                                .as_ref()
+                                .unwrap()
+                                .reference_path
+                                .as_ref()
+                                .unwrap();
+                            let dst: FeatureReferenceFile = rover.make_path("feature_ref");
+                            if std::fs::hard_link(src, &dst).is_err() {
+                                std::fs::copy(src, &dst)?;
+                            }
+                            (Some(dst), None)
                         }
-                        (Some(dst), None)
-                    }
-                    (Some(feature_ref), Some(tenx_cmos)) => {
-                        // Using CMO, need to write out the constructed feature reference file.
-                        let dst: FeatureReferenceFile = rover.make_path("feature_ref");
-                        let mut w = BufWriter::new(File::create(&dst)?);
-                        feature_ref.to_csv(&mut w)?;
-                        (Some(dst), Some(tenx_cmos))
-                    }
-                    (None, _) => (None, None),
-                };
+                        (Some(feature_ref), Some(tenx_cmos)) => {
+                            // Using CMO, need to write out the constructed feature reference file.
+                            let dst: FeatureReferenceFile = rover.make_path("feature_ref");
+                            let mut w = BufWriter::new(File::create(&dst)?);
+                            feature_ref.to_csv(&mut w)?;
+                            (Some(dst), Some(tenx_cmos))
+                        }
+                        (None, _) => (None, None),
+                    };
 
-                let custom_chemistry_def = index_scheme.map(|is| {
-                    is.to_chemistry_def(
-                        barcode_whitelist
-                            .expect("Barcode set is required for custom chemistry")
-                            .as_ref(),
-                    )
-                });
+                let custom_chemistry_defs = index_schemes
+                    .into_iter()
+                    .map(|(lib_type, index_scheme)| {
+                        anyhow::Ok((
+                            lib_type,
+                            index_scheme.to_chemistry_def(
+                                barcode_whitelist
+                                    .as_ref()
+                                    .expect("Barcode Set is required for custom chemistry"),
+                            )?,
+                        ))
+                    })
+                    .try_collect()?;
 
                 let chemistry_specs = cfg.chemistry_specs()?;
                 let has_gex_library = chemistry_specs
@@ -486,27 +512,31 @@ impl MartianMain for ParseMultiConfig {
                         (Some(gex_params), true) => match gex_params.probe_set() {
                             [] => (None, None),
                             [probe_set] => (
-                                Some(TargetSetFile::from(probe_set)),
+                                Some(probe_set.clone()),
                                 Some(
-                                    probe_set
-                                        .file_stem()
-                                        .unwrap()
-                                        .to_string_lossy()
-                                        .into_owned(),
+                                    ProbeSetReferenceMetadata::load_from(probe_set)?
+                                        .panel_name()
+                                        .to_string(),
                                 ),
                             ),
-                            multiple => {
+                            probe_sets => {
                                 let target_set: TargetSetFile =
                                     rover.make_path("combined_probe_set");
-                                let name =
-                                    merge_probe_set_csvs(multiple, target_set.buf_writer()?)?;
+                                let name = merge_probe_set_csvs(
+                                    probe_sets,
+                                    target_set.buf_writer()?,
+                                    gex_params.reference_path.as_deref(),
+                                )?;
                                 (Some(target_set), Some(name))
                             }
                         },
                         _ => (None, None),
                     };
+                let reference_info =
+                    get_reference_info(gex.reference_path.as_deref(), target_set.as_ref())?;
 
                 let count_input = Some(CountInputs {
+                    reference_info: Some(reference_info),
                     // Filter the VDJ libraries out of this collection since VDJ
                     // chemistry is handled separately.
                     chemistry_specs: chemistry_specs
@@ -516,11 +546,9 @@ impl MartianMain for ParseMultiConfig {
                     target_set,
                     target_set_name,
                     sample_def,
-                    custom_chemistry_def,
-                    reference_path: PathBuf::from(&gex.reference_path),
+                    custom_chemistry_defs,
                     gene_index,
                     primers: primers.clone(),
-                    cell_calling_config,
                     subsample_rate,
                     initial_reads,
                     primer_initial_reads: Some(1000000),
@@ -530,7 +558,6 @@ impl MartianMain for ParseMultiConfig {
                     trim_polya_min_score: None,
                     trim_tso_min_score: None,
                     no_secondary_analysis: gex.no_secondary_analysis,
-                    no_target_umi_filter: false,
                     filter_probes: gex.filter_probes,
                     feature_reference: feature_reference_file.clone(),
                     include_exons: true,
@@ -550,14 +577,20 @@ impl MartianMain for ParseMultiConfig {
                     min_assignment_confidence: gex.min_assignment_confidence,
                     min_crispr_umi_threshold: cfg.feature.as_ref().map(|x| x.min_crispr_umi),
                     annotations: None,
-                    cell_annotation_model: gex.cell_annotation_model.clone(),
-                    skip_cell_annotation: gex.skip_cell_annotation,
+                    skip_cell_annotation: gex.skip_cell_annotation
+                        || (gex.cell_annotation_model.is_none() && !args.is_pd),
+                    cell_annotation_model: gex
+                        .cell_annotation_model
+                        .as_ref()
+                        .and_then(CellAnnotationModel::to_pipeline_inputs),
                     // this will return a default token path if not supplied
                     tenx_cloud_token_path: gex.get_tenx_cloud_token_path(),
+                    enable_tsne: true,
                 });
 
                 (
                     count_input,
+                    Some(cell_calling_config),
                     feature_reference_file,
                     cell_barcodes,
                     sample_barcodes,
@@ -620,13 +653,12 @@ impl MartianMain for ParseMultiConfig {
                         chemistry_spec: AutoOrRefinedChemistry::Auto(AutoChemistryName::Vdj),
                         sample_def,
                         custom_chemistry_def: None,
-
                         primers: primers.clone(),
                         subsample_rate,
                         initial_reads,
                         primer_initial_reads: Some(1000000),
                         special_genomic_regions: special_genomic_regions.clone(),
-                        denovo: false,
+                        denovo: vdj.denovo.unwrap_or_default(),
                         r1_length: vdj.r1_length,
                         r2_length: vdj.r2_length,
                         inner_enrichment_primers: vdj.inner_enrichment_primers.clone(),
@@ -637,9 +669,8 @@ impl MartianMain for ParseMultiConfig {
                 let vdj_gen_inputs = VdjGenInputs {
                     reference_path: cfg
                         .gene_expression
-                        .as_ref()
-                        .map(|gex| PathBuf::from(&gex.reference_path)),
-                    vdj_reference_path: Some(vdj.reference_path.clone()),
+                        .and_then(|gex| gex.reference_path.clone()),
+                    vdj_reference_path: vdj.reference_path.clone(),
                     min_contig_length: vdj.min_contig_length,
                     filter_flags: VdjFilterFlags {
                         multiplet_filter: vdj.multiplet_filter,
@@ -656,9 +687,8 @@ impl MartianMain for ParseMultiConfig {
             disable_vdj: vdj_inputs.is_empty(),
             disable_multi: false,
             disable_multi_count: count_input.is_none(),
-            disable_rtl: count_input
-                .as_ref()
-                .map_or(true, |c| c.target_set.is_none()),
+            disable_rtl: count_input.as_ref().is_none_or(|c| c.target_set.is_none()),
+            disable_annotate: count_input.as_ref().is_none_or(|c| c.skip_cell_annotation),
         };
 
         let common_input = CommonInputs {
@@ -675,6 +705,7 @@ impl MartianMain for ParseMultiConfig {
             cfg.antigen_specificity.as_ref(),
             cfg.functional_map.as_ref(),
             cfg.libraries.beam_mode(),
+            cfg.samples.as_ref(),
         );
 
         // Create feature reference object to make sure features are continous
@@ -690,6 +721,7 @@ impl MartianMain for ParseMultiConfig {
             common_input,
             target_set: count_input.as_ref().and_then(|c| c.target_set.clone()),
             count_input,
+            count_cell_calling_config,
             vdj_inputs,
             vdj_gen_inputs,
             basic_config,

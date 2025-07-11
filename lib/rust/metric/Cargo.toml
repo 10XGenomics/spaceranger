@@ -1,14 +1,11 @@
 [dependencies]
-bincode = '1'
-num-traits = '0.2'
-serde_derive = '1'
-
 [dependencies.ahash]
-default-features = false
-features = ['std']
-version = '0.8'
+workspace = true
 
 [dependencies.anyhow]
+workspace = true
+
+[dependencies.bincode]
 workspace = true
 
 [dependencies.itertools]
@@ -17,14 +14,23 @@ workspace = true
 [dependencies.metric_derive]
 path = '../metric_derive'
 
+[dependencies.num-traits]
+workspace = true
+
 [dependencies.serde]
 workspace = true
 
 [dependencies.serde_json]
 workspace = true
 
+[dependencies.stats]
+path = '../stats'
+
 [lib]
 test = false
+
+[lints]
+workspace = true
 
 [package]
 authors = ['10x Genomics']

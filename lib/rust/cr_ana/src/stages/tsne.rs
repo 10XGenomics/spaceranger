@@ -1,4 +1,5 @@
-//! t-SNE stage code
+//! Martian stage RUN_TSNE
+#![allow(missing_docs)]
 
 use crate::io::{csv, h5};
 use crate::types::{EmbeddingResult, EmbeddingType, H5File};
@@ -55,10 +56,10 @@ pub struct TsneChunkOutputs {
     tsne_csv: PathBuf,
 }
 
-pub struct TsneStage;
+pub struct RunTsne;
 
-#[make_mro(stage_name = RUN_TSNE_NG, volatile = strict)]
-impl MartianStage for TsneStage {
+#[make_mro(volatile = strict)]
+impl MartianStage for RunTsne {
     type StageInputs = TsneStageInputs;
     type StageOutputs = TsneStageOutputs;
     type ChunkInputs = TsneChunkInputs;
@@ -130,7 +131,7 @@ impl MartianStage for TsneStage {
                     barcodes, matrix, ..
                 } = read_adaptive_csr_matrix(
                     &args.matrix_h5,
-                    Some(chunk_args.feature_type.to_string().as_str()),
+                    Some(chunk_args.feature_type.as_str()),
                     None,
                 )?
                 .0;

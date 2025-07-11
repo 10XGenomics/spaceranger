@@ -1,21 +1,23 @@
 //! A feature-barcode count matrix.
+#![allow(missing_docs)]
 
 use crate::{
     extend_dataset, feature_reference_io, make_column_ds, scalar_attribute, write_column_ds,
+    ChunkedWriter, ColumnAction,
 };
 use anyhow::{bail, Context, Result};
-use barcode::MAX_BARCODE_AND_GEM_GROUP_LENGTH;
+use barcode::{Barcode, MAX_BARCODE_AND_GEM_GROUP_LENGTH};
 use cr_types::barcode_index::BarcodeIndex;
 use cr_types::reference::feature_reference::{FeatureDef, FeatureReference, FeatureType};
 use cr_types::{BarcodeThenFeatureOrder, CountShardFile, FeatureBarcodeCount, GemWell, H5File};
 use hdf5::types::{FixedAscii, VarLenAscii, VarLenUnicode};
 use hdf5::Group;
-use itertools::{process_results, Itertools};
+use itertools::Itertools;
 use martian_derive::martian_filetype;
 use serde::{Deserialize, Serialize};
 use shardio::ShardReader;
 use std::cell::OnceCell;
-use std::fmt::Display;
+use std::io::Write;
 use std::iter::zip;
 use std::mem::size_of;
 use std::ops::Range;
@@ -58,7 +60,7 @@ martian_filetype!(CountMatrixFile, "h5");
 
 /// A feature-barcode count matrix HDF5 file.
 impl CountMatrixFile {
-    fn matrix_group(&self) -> Result<hdf5::Group> {
+    fn matrix_group(&self) -> Result<Group> {
         Ok(hdf5::File::open(self)
             .with_context(|| format!("While opening {self:?}"))?
             .group(MATRIX_GROUP)?)
@@ -280,26 +282,29 @@ pub struct AnnotatedCount<'a> {
     pub feature: &'a FeatureDef,
 }
 
-/// Write a column of barcode strings to an HDF5 file.
-pub fn write_barcodes_column<B>(
+/// Write a sorted iterator of barcodes (with GEM group) to an HDF5 file.
+pub fn write_barcodes_column(
     hdf5_group: &Group,
     column_name: &str,
-    sorted_barcodes: &[B],
-) -> Result<()>
-where
-    B: Display,
-{
-    let strings = sorted_barcodes
-        .iter()
-        .map(|barcode| FixedAscii::from_ascii(&barcode.to_string()).unwrap())
-        .collect::<Vec<BarcodeWithGemGroup>>();
-    hdf5_group
-        .new_dataset::<BarcodeWithGemGroup>()
-        .deflate(1)
-        .shape((strings.len(),))
-        .create(column_name)?
-        .write(&strings)?;
-    Ok(())
+    sorted_barcodes: impl Iterator<Item = Barcode>,
+) -> Result<()> {
+    // Buffer for writing out the fixed-width string representation of each barcode.
+    let mut buf = Vec::with_capacity(BarcodeWithGemGroup::capacity());
+    let formatted_bc_iter = sorted_barcodes.map(|bc| {
+        write!(&mut buf, "{bc}")?;
+        let formatted = BarcodeWithGemGroup::from_ascii(&buf)?;
+        buf.clear();
+        anyhow::Ok(formatted)
+    });
+    formatted_bc_iter.process_results(|bc_iter| {
+        ChunkedWriter::write_all(
+            hdf5_group,
+            column_name,
+            MAT_H5_BUF_SZ,
+            ColumnAction::CreateNew,
+            bc_iter,
+        )
+    })?
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -371,6 +376,7 @@ pub fn write_matrix_h5(
         .create(H5_ORIG_GEM_GROUP_MAPPING_KEY)?;
     attr.as_writer().write(orig_gem_group.view())?;
 
+    f.close()?;
     Ok(())
 }
 
@@ -402,16 +408,16 @@ fn write_matrix_h5_helper(
     let mut indices_buf = Vec::with_capacity(MAT_H5_BUF_SZ);
     let mut barcode_counts = vec![0; barcode_index.len()];
 
-    process_results(reader.iter()?, |iter| {
-        for (barcode, bc_counts) in &iter.group_by(|x| x.barcode) {
+    reader.iter()?.process_results(|iter| {
+        for (barcode, bc_counts) in &iter.chunk_by(|x| x.barcode) {
             let mut n = 0i64;
-            for (feature_idx, feat_counts) in &bc_counts.group_by(|x| x.feature_idx) {
+            for (feature_idx, feat_counts) in &bc_counts.chunk_by(|x| x.feature_idx) {
                 let umi_count: u32 = feat_counts.into_iter().map(|x| x.umi_count).sum();
                 data_buf.push(umi_count as Count);
                 indices_buf.push(feature_idx as FeatureIdx);
                 n += 1;
             }
-            let barcode_index = barcode_index.get_index(&barcode);
+            let barcode_index = barcode_index.must_get(&barcode);
             assert_eq!(barcode_counts[barcode_index], 0);
             barcode_counts[barcode_index] = n;
 

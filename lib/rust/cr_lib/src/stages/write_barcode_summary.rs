@@ -1,19 +1,21 @@
 //! Martian stage WRITE_BARCODE_SUMMARY
 //! Write the file barcode_summary.h5.
+#![allow(missing_docs)]
 
 use crate::align_metrics::{
     BarcodeKind, BarcodeMetrics, GenomeMapping, LibFeatThenBarcodeOrder, MappingRegion,
     MULTI_GENOME,
 };
 use crate::types::FeatureReferenceFormat;
+use crate::utils::estimate_mem::barcode_mem_gib;
 use crate::BarcodeMetricsShardFile;
 use anyhow::{bail, Result};
 use cr_h5::count_matrix::write_barcodes_column;
 use cr_types::barcode_index::BarcodeIndex;
 use cr_types::reference::feature_reference::{FeatureReference, FeatureType};
-use cr_types::{BarcodeIndexFormat, GenomeName, H5File, LibraryType};
+use cr_types::{BarcodeIndexOutput, GenomeName, H5File, LibraryType};
 use itertools::zip_eq;
-use martian::prelude::{MartianMain, MartianRover};
+use martian::{MartianRover, MartianStage, MartianVoid, Resource, StageDef};
 use martian_derive::{make_mro, MartianStruct};
 use martian_filetypes::FileTypeRead;
 use metric::join_metric_name;
@@ -29,7 +31,7 @@ pub struct WriteBarcodeSummaryStageInputs {
     /// Metrics computed per barcode sorted by (library type, barcode)
     pub per_barcode_metrics: Vec<BarcodeMetricsShardFile>,
     pub feature_reference: FeatureReferenceFormat,
-    pub barcode_index: BarcodeIndexFormat,
+    pub barcode_index_output: BarcodeIndexOutput,
 }
 
 /// The Martian stage outputs.
@@ -144,7 +146,7 @@ impl BarcodeSummaryData {
         let metrics_reader =
             UnsortedShardReader::<BarcodeMetrics, LibFeatThenBarcodeOrder>::open_set(
                 per_barcode_metrics,
-            )?;
+            );
 
         fn update_counts(
             genome_barcode_counts: &mut HashMap<(FeatureType, GenomeName), BarcodeCounts>,
@@ -166,7 +168,7 @@ impl BarcodeSummaryData {
                 metrics,
             } = barcode_metrics?;
             if let BarcodeKind::Valid(bc) = barcode {
-                let index = barcode_index.get_index(&bc);
+                let index = barcode_index.must_get(&bc);
                 let feature_type = match library_type {
                     LibraryType::Gex => {
                         for (genome, genome_metrics) in metrics.per_genome_name {
@@ -362,30 +364,54 @@ fn write_barcode_summary_h5(
         }
     }
 
+    file.close()?;
+
     Ok(())
 }
 
-#[make_mro(mem_gb = 7, volatile = strict)]
-impl MartianMain for WriteBarcodeSummary {
+#[make_mro(volatile = strict)]
+impl MartianStage for WriteBarcodeSummary {
     type StageInputs = WriteBarcodeSummaryStageInputs;
     type StageOutputs = WriteBarcodeSummaryStageOutputs;
+    type ChunkInputs = MartianVoid;
+    type ChunkOutputs = MartianVoid;
 
-    /// Run the Martian stage WRITE_BARCODE_SUMMARY.
+    fn split(
+        &self,
+        args: Self::StageInputs,
+        _rover: MartianRover,
+    ) -> Result<StageDef<Self::ChunkInputs>> {
+        // Multi uses more memory for sample_barcodes and other data.
+        let barcodes_count = args.barcode_index_output.num_barcodes;
+        // bytes_per_barcode and offset_gib are empirically determined.
+        let mem_gib = barcode_mem_gib(barcodes_count as isize, 220, 2);
+        println!("barcode_count={barcodes_count},mem_gib={mem_gib}");
+        Ok(StageDef::with_join_resource(Resource::with_mem_gb(mem_gib)))
+    }
+
     fn main(
         &self,
-        WriteBarcodeSummaryStageInputs {
-            per_barcode_metrics,
-            feature_reference,
-            barcode_index,
-        }: Self::StageInputs,
+        _args: Self::StageInputs,
+        _chunk_args: MartianVoid,
+        _rover: MartianRover,
+    ) -> Result<Self::ChunkOutputs> {
+        unreachable!()
+    }
+
+    /// Run the Martian stage WRITE_BARCODE_SUMMARY.
+    fn join(
+        &self,
+        args: Self::StageInputs,
+        _chunk_defs: Vec<MartianVoid>,
+        _chunk_outs: Vec<MartianVoid>,
         rover: MartianRover,
     ) -> Result<Self::StageOutputs> {
         let barcode_summary: H5File = rover.make_path("barcode_summary");
-        let barcode_index = barcode_index.read()?;
+        let barcode_index = args.barcode_index_output.index.read()?;
         write_barcode_summary_h5(
             &barcode_summary,
-            &per_barcode_metrics,
-            &feature_reference.read()?,
+            &args.per_barcode_metrics,
+            &args.feature_reference.read()?,
             &barcode_index,
         )?;
         Ok(Self::StageOutputs { barcode_summary })

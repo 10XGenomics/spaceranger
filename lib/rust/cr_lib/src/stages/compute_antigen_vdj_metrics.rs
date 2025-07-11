@@ -1,4 +1,5 @@
 //! Martian stage COMPUTE_ANTIGEN_VDJ_METRICS
+#![allow(missing_docs)]
 
 use crate::align_metrics::{BarcodeKind, BarcodeMetrics, LibFeatThenBarcodeOrder, VisitorMetrics};
 use crate::BarcodeMetricsShardFile;
@@ -11,7 +12,7 @@ use martian_derive::{make_mro, martian_filetype, MartianStruct};
 use martian_filetypes::bin_file::BinaryFormat;
 use martian_filetypes::json_file::JsonFile;
 use martian_filetypes::{FileTypeRead, FileTypeWrite};
-use metric::{MeanMetric, SimpleHistogram, TxHashSet};
+use metric::{Histogram, MeanMetric, SimpleHistogram, TxHashSet};
 use serde::{Deserialize, Serialize};
 use shardio::ShardReader;
 

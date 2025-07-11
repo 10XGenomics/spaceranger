@@ -1,10 +1,13 @@
-use fiducial::fiducial_detector::{turing_detect_fiducial, FidDetectionParameter};
+//! hd_fiducial
+#![deny(missing_docs)]
+use fiducial::fiducial_detector::{detect_fiducial, FidDetectionParameter};
 use fiducial::fiducial_registration::{similarity_transform_components, Coord};
 use numpy::{PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
 
 #[pyfunction]
 #[pyo3(name = "turing_detect_fiducial")]
+#[pyo3(signature = (img, search_start=None, search_end=None, edge_threshold=None, parallel_threshold=None, hough_accu_threshold=None, circle_fit_support=None, outlier_threshold=None, label=None))]
 #[allow(clippy::too_many_arguments)]
 fn turing_detect_fiducial_py(
     img: PyReadonlyArray2<'_, f32>,
@@ -29,7 +32,7 @@ fn turing_detect_fiducial_py(
         outlier_threshold.unwrap_or(0.4),
         label,
     );
-    turing_detect_fiducial(&image, &param, &None)
+    detect_fiducial(&image, &param, &None)
 }
 
 #[pyfunction]
@@ -59,7 +62,7 @@ fn fit_2d_similarity_transform(
 }
 
 #[pymodule]
-fn hd_fiducial(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
+fn hd_fiducial(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(turing_detect_fiducial_py, m)?)?;
     m.add_function(wrap_pyfunction!(fit_2d_similarity_transform, m)?)?;
     Ok(())

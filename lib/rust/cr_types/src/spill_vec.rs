@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use anyhow::Result;
 use martian_filetypes::{LazyFileTypeIO, LazyWrite};
 use std::vec;
@@ -113,7 +114,7 @@ where
                 None => {
                     self.inner = Some(SpillableStorage::MemOnly(vec_iter));
                     match std::fs::remove_file(&self.spill_file) {
-                        Ok(_) => self.next(),
+                        Ok(()) => self.next(),
                         Err(e) => Some(Err(e.into())),
                     }
                 }

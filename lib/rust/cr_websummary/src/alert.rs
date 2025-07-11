@@ -1,10 +1,13 @@
 //!
 //! Alarms in the websummary (aka alerts)
 //!
+#![allow(missing_docs)]
 
-use serde::Serialize;
+use cr_types::LibraryType;
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum AlertLevel {
     Error,
@@ -31,7 +34,7 @@ pub enum AlertLevel {
 /// ```
 /// Only the fields `level`, `title`, `formatted_value` and `message` are used in the web summary
 /// react code.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct AlertSpec {
     pub level: AlertLevel,
     pub title: String,
@@ -44,8 +47,9 @@ pub struct AlertSpec {
 pub struct AlertContext {
     pub is_rtl: bool,
     pub is_arc_chemistry: bool,
+    pub library_types: HashSet<LibraryType>,
+    pub multiplexing_method: Option<cr_types::BarcodeMultiplexingType>,
     pub is_fiveprime: bool,
-    pub is_cmo_multiplexed: bool,
     pub include_introns: bool,
     pub no_preflight: bool,
 }

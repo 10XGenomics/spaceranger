@@ -1,5 +1,6 @@
 //! Interface with the HD feature slice H5 file.
 //! Should be in sync with lib/python/cellranger/spatial/hd_feature_slice.py
+#![allow(missing_docs)]
 
 use anyhow::{bail, Context, Result};
 use cr_h5::feature_reference_io::from_h5;
@@ -7,6 +8,10 @@ use cr_types::reference::feature_reference::{FeatureDef, FeatureReference};
 use dzi::PixelRange;
 use hdf5::types::VarLenUnicode;
 use hdf5::{Attribute, H5Type};
+use io::group_names::{
+    CLUSTERING, EIGHT_MICRON_SQUARE_PREFIX, GENE_EXPRESSION_PREFIX, GRAPHCLUST_SUFFIX,
+    SECONDARY_ANALYSIS,
+};
 use itertools::Itertools;
 use ndarray::Array2;
 use num_traits::Zero;
@@ -80,6 +85,19 @@ impl FeatureSliceH5 {
         &self.metadata
     }
 
+    pub fn link_exists(&self, link_path: &str) -> bool {
+        self.file.link_exists(link_path)
+    }
+
+    pub fn has_eight_micron_gex_graph_clust(&self) -> bool {
+        self.link_exists(
+            format!(
+                "{SECONDARY_ANALYSIS}/{CLUSTERING}/{EIGHT_MICRON_SQUARE_PREFIX}_{GENE_EXPRESSION_PREFIX}_{GRAPHCLUST_SUFFIX}"
+            )
+            .as_str(),
+        )
+    }
+
     /// Transform matrix from the microscope image to the spot
     /// Only present for spatial runs
     pub fn transform_microscope_to_spot(&self) -> Option<&Transform> {
@@ -137,8 +155,8 @@ impl FeatureSliceH5 {
     /// Buffer to store data at the specific bin scale
     pub fn allocate_buffer<T: Clone + Zero>(&self, bin_scale: usize) -> Array2<T> {
         Array2::zeros((
-            (self.metadata.nrows + bin_scale - 1) / bin_scale,
-            (self.metadata.ncols + bin_scale - 1) / bin_scale,
+            self.metadata.nrows.div_ceil(bin_scale),
+            self.metadata.ncols.div_ceil(bin_scale),
         ))
     }
 
@@ -301,13 +319,15 @@ impl FeatureSliceH5 {
         let x0 = pixel_range.x.start;
         let y0 = pixel_range.y.start;
 
-        // TODO: Check if this is correct
         let transform = self.transform_microscope_to_spot().unwrap().clone();
 
         ndarray::indices(shape)
             .into_iter()
             .filter_map(move |(y, x)| {
-                let (xt, yt) = transform.apply(((x + x0) as f64, (y + y0) as f64));
+                // Pixel coordinates are corner-based. Add 0.5 to get the middle of the pixel
+                let pxl_center_x = (x + x0) as f64 + 0.5;
+                let pxl_center_y = (y + y0) as f64 + 0.5;
+                let (xt, yt) = transform.apply((pxl_center_x, pxl_center_y));
                 let xt = xt.round() as isize;
                 let yt = yt.round() as isize;
                 if (xt >= 0 && xt < spots_ncols) && (yt >= 0 && yt < spots_nrows) {

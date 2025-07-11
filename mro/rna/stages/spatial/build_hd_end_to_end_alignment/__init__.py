@@ -4,23 +4,12 @@
 import json
 from dataclasses import asdict, dataclass
 
-# isort: off
-# pylint: disable=wrong-import-position
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-
-# pylint: enable=wrong-import-position
-# isort: on
-
-
 import martian
 import numpy as np
 import skimage
 
 import cellranger.spatial.image_util as image_util
-from cellranger.spatial.hd_feature_slice import HdFeatureSliceIo
+from cellranger.spatial.hd_cs_websummary_plt_utils import heatmap_legend
 from cellranger.spatial.image import base64_encode_image
 from cellranger.spatial.transform import (
     css_transform_list,
@@ -32,13 +21,15 @@ from cellranger.websummary.zoom import InitialZoomPan
 
 __MRO__ = """
 stage BUILD_HD_END_TO_END_ALIGNMENT(
-    in  h5    hd_feature_slice_h5,
+    in  npy   primary_bin_mask,
+    in  npy   primary_bin_total_umis,
+    in  npy   spot_colrow_to_tissue_image_colrow_transform,
     in  jpg   websummary_tissue_image,
     in  float websummary_tissue_image_scale,
     out json  end_to_end_alignment_data,
     src py    "stages/spatial/build_hd_end_to_end_alignment",
 ) using (
-    vmem_gb  = 8,
+    vmem_gb  = 10,
     volatile = strict,
 )
 """
@@ -50,20 +41,7 @@ TISSUE_IMAGE_DISPLAY_WIDTH = 470
 BIN_SCALE_8UM = 4
 LINEAR_MAX_PERCENTILE = 98
 # matplotlib cmap names. unfortunately they are case-sensitive and not consistent
-UMI_IMAGE_COLORMAPS = ["jet", "Blues", "binary"]
-
-
-def heatmap_legend(cmap, title, vmin, vmax, fname):
-    """Generate a heatmap legend image for the UMI plot."""
-    fig, ax = plt.subplots(figsize=(6, 1))
-    fig.subplots_adjust(bottom=0.5)
-    norm = matplotlib.colors.Normalize(vmin=vmin, vmax=vmax)
-    colorbar = matplotlib.colorbar.ColorbarBase(ax, cmap=cmap, norm=norm, orientation="horizontal")
-    colorbar.ax.set_title(title, fontsize=10)
-    plt.tight_layout()
-    plt.savefig(fname, dpi=100, pad_inches=0)
-    plt.close()
-    return base64_encode_image(fname)
+UMI_IMAGE_COLORMAPS = ["viridis", "turbo", "Blues", "binary"]
 
 
 @dataclass
@@ -98,9 +76,7 @@ def main(args, outs):  # pylint: disable=too-many-locals
     image_width = websummary_tissue_image.shape[1]
     websummary_scale = TISSUE_IMAGE_DISPLAY_WIDTH / image_width
 
-    feat_slice = HdFeatureSliceIo(args.hd_feature_slice_h5)
-
-    under_tissue_mask = feat_slice.read_filtered_mask(BIN_SCALE_8UM)
+    under_tissue_mask = np.load(args.primary_bin_mask)
     not_under_tissue_mask = np.logical_not(under_tissue_mask)
 
     tissue_mask_img = (255 * not_under_tissue_mask).astype(np.uint8)
@@ -108,7 +84,7 @@ def main(args, outs):  # pylint: disable=too-many-locals
     skimage.io.imsave(tissue_mask_img_path, tissue_mask_img)
     tissue_mask_img_encoded = base64_encode_image(tissue_mask_img_path)
 
-    umis = feat_slice.total_umis(BIN_SCALE_8UM)
+    umis = np.load(args.primary_bin_total_umis)
     umis_under_mask = umis[under_tissue_mask]
     nonzero_umis_under_mask = umis_under_mask[umis_under_mask > 0]
     percentile_max = max(
@@ -144,9 +120,8 @@ def main(args, outs):  # pylint: disable=too-many-locals
             )
         )
 
-    spot_colrow_to_tissue_image_colrow = (
-        feat_slice.metadata.transform_matrices.get_spot_colrow_to_tissue_image_colrow_transform()
-    )
+    spot_colrow_to_tissue_image_colrow = np.load(args.spot_colrow_to_tissue_image_colrow_transform)
+
     umi_image_transform = normalize_perspective_transform(
         scale_matrix(websummary_scale * args.websummary_tissue_image_scale)
         @ spot_colrow_to_tissue_image_colrow

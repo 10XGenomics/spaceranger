@@ -1,4 +1,5 @@
 //! Martian stage RUN_UMAP
+#![allow(missing_docs)]
 
 use crate::io::{csv, h5};
 use crate::types::{EmbeddingResult, EmbeddingType, H5File};

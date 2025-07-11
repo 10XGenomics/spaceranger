@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use num_traits::PrimInt;
 use std::fmt::Display;
 

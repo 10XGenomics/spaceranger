@@ -1,8 +1,8 @@
 // TODO: fix these.
+#![allow(missing_docs)]
 #![allow(clippy::needless_range_loop)]
 
 use lz4;
-use rust_htslib::bam;
 use rust_htslib::bam::record::Aux;
 use rust_htslib::bam::Record;
 use std::fs::File;
@@ -10,7 +10,7 @@ use std::io::{BufWriter, Write};
 use string_utils::TextUtils;
 
 pub fn write_sam_record_simple(
-    x: &bam::Record,
+    x: &Record,
     u: &str, // corrected umi
     tignames: &[String],
     writer: &mut BufWriter<&mut lz4::Encoder<BufWriter<File>>>,

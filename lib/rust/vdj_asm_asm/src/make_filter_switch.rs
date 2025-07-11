@@ -1,8 +1,9 @@
+#![allow(missing_docs)]
 use anyhow::Result;
 use martian::prelude::*;
 use martian_derive::{make_mro, MartianStruct};
 use serde::{Deserialize, Serialize};
-use vdj_asm_utils::filter_log::FilterSwitch;
+use vdj_filter_barcodes::filter_log::FilterSwitch;
 
 #[derive(Debug, Clone, Serialize, Deserialize, MartianStruct)]
 pub struct StageInputs {

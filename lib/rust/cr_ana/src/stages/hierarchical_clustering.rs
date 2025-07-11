@@ -1,4 +1,5 @@
 //! Martian stage RUN_HIERARCHICAL_CLUSTERING
+#![allow(missing_docs)]
 
 use crate::hclust_utils::get_cluster_representatives;
 use crate::io::{csv, h5};
@@ -81,8 +82,8 @@ impl MartianStage for HierarchicalClusteringStage {
         rayon::ThreadPoolBuilder::new()
             .num_threads(rover.get_threads())
             .build_global()?;
-        let retained = Some(chunk_args.feature_type.to_string());
-        let (matrix, _) = read_adaptive_csr_matrix(&args.matrix_h5, retained.as_deref(), None)?;
+        let retained = Some(chunk_args.feature_type.as_str());
+        let (matrix, _) = read_adaptive_csr_matrix(&args.matrix_h5, retained, None)?;
 
         let graphclust_results = h5::load_clustering(
             &args.graph_clusters_h5,

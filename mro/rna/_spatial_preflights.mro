@@ -2,6 +2,7 @@
 # Copyright (c) 2020 10X Genomics, Inc. All rights reserved.
 #
 
+@include "spatial_segmentation.mro"
 @include "_cr_lib_stages.mro"
 @include "_v1_pattern_fix.mro"
 
@@ -12,33 +13,34 @@ filetype tgz;
 filetype vlf;
 
 stage SPACERANGER_PREFLIGHT(
-    in  map[]            sample_def,
-    in  csv              target_set,
-    in  path             reference_path,
-    in  csv              feature_reference,
-    in  int              recovered_cells,
-    in  int              force_cells,
-    in  int              r1_length,
-    in  int              r2_length,
-    in  file[]           tissue_image_paths,
-    in  int              dark_images,
-    in  int              dapi_channel_index,
-    in  path             loupe_alignment_file,
-    in  bool             override_id,
-    in  gpr              gpr_file,
-    in  vlf              hd_layout_file,
-    in  file[]           cytassist_image_paths,
-    in  tgz              cytassist_tgz_path,
-    in  bool             check_cytassist_sizes,
-    in  string           slide_serial_capture_area,
-    in  string           targeting_method,
-    in  float            image_scale,
-    in  string           chemistry,
-    in  ChemistryDef     custom_chemistry_def,
-    in  V1PatternFixArgs v1_pattern_fix,
-    in  path             hd_log_umi_image,
-    in  bool             is_pd,
-    src py               "stages/common/spaceranger_preflight",
+    in  map[]              sample_def,
+    in  csv                target_set,
+    in  path               reference_path,
+    in  csv                feature_reference,
+    in  int                recovered_cells,
+    in  int                force_cells,
+    in  int                r1_length,
+    in  int                r2_length,
+    in  file[]             tissue_image_paths,
+    in  int                dark_images,
+    in  int                dapi_channel_index,
+    in  path               loupe_alignment_file,
+    in  bool               override_id,
+    in  gpr                gpr_file,
+    in  vlf                hd_layout_file,
+    in  file[]             cytassist_image_paths,
+    in  tgz                cytassist_tgz_path,
+    in  bool               check_cytassist_sizes,
+    in  string             slide_serial_capture_area,
+    in  string             targeting_method,
+    in  float              image_scale,
+    in  string             chemistry,
+    in  ChemistryDef       custom_chemistry_def,
+    in  V1PatternFixArgs   v1_pattern_fix,
+    in  SegmentationInputs segmentation_inputs,
+    in  path               hd_log_umi_image,
+    in  bool               is_pd,
+    src py                 "stages/common/spaceranger_preflight",
 ) split (
 ) using (
     mem_gb  = 3,
@@ -67,4 +69,12 @@ stage SPACERANGER_PREFLIGHT_LOCAL(
     in  V1PatternFixArgs v1_pattern_fix,
     in  bool             is_pd,
     src py               "stages/common/spaceranger_preflight_local",
+)
+
+stage SPATIAL_SEGMENT_NUCLEI_PREFLIGHTS(
+    in  file tissue_image,
+    in  int  max_nucleus_diameter_px,
+    src py   "stages/spatial/spatial_segment_nuclei_preflights",
+) using (
+    vmem_gb = 32,
 )

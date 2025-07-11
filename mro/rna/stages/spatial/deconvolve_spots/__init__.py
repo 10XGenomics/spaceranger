@@ -10,7 +10,6 @@ import os
 
 import h5py
 import martian
-import matplotlib.pyplot as plt
 import numpy as np
 from scipy.cluster import hierarchy
 from sklearn.decomposition import LatentDirichletAllocation as fitLDA
@@ -18,6 +17,7 @@ from sklearn.decomposition import LatentDirichletAllocation as fitLDA
 import cellranger.matrix as cr_matrix
 from cellranger.rna.library import GENE_EXPRESSION_LIBRARY_TYPE
 from cellranger.spatial.deconvolution import get_lda_feature_counts
+from cellranger.spatial.deconvolution_plots import save_dendrogram_figure
 
 __MRO__ = """
 stage DECONVOLVE_SPOTS(
@@ -33,6 +33,8 @@ stage DECONVOLVE_SPOTS(
 MIN_FEATURES = 100
 ## minimum number of UMI to keep a feature
 MIN_UMI = 10
+## Minimum difference in adjacent distance thresholds for them to be considered separeate
+MIN_DIST_THRESHOLD = 10**-9
 
 
 def split(args):
@@ -144,6 +146,21 @@ def join(
             [0.5 * (link_topics[i][2] + link_topics[i + 1][2]) for i in range(max_clusters - 2)]
         )
     )
+    dist_threshold_diffs = np.diff(dist_thresholds)
+    martian.log_info(f"dist thresholds before clamping: {dist_thresholds}")
+    # Clampling distance thresholds if the adjacent ones are less than MIN_DIST_THRESHOLD
+    # the clamping follows a transitive relations; that is
+    # distance_threshold = [1.0, 3*.0.9*MIN_DIST_THRESHOLD, 2*0.9*MIN_DIST_THRESHOLD, 0.9*MIN_DIST_THRESHOLD ]
+    # gets clamped down to
+    # [1.0, 3*.0.9*MIN_DIST_THRESHOLD, 3*0.9*MIN_DIST_THRESHOLD, 3*0.9*MIN_DIST_THRESHOLD ]
+    for ind, distance_diff in zip(range(1, len(dist_thresholds)), dist_threshold_diffs):
+        if abs(distance_diff) < MIN_DIST_THRESHOLD:
+            martian.log_info(
+                f"clamping the {ind}-th from {dist_thresholds[ind]} to {dist_thresholds[ind - 1]} "
+                f"as difference to adjacent threshold was {abs(distance_diff)}"
+            )
+            dist_thresholds[ind] = dist_thresholds[ind - 1]
+    martian.log_info(f"dist thresholds after clamping: {dist_thresholds}")
 
     min_cluster = 2
     os.makedirs(outs.deconvolution, exist_ok=True)
@@ -158,44 +175,11 @@ def join(
             )
 
             # save the dendrogram using distances
-            plt.figure(figsize=(10, 10))
-            ax = plt.gca()
-            hierarchy.dendrogram(
-                link_topics, labels=range(1, max_clusters + 1), color_threshold=-1, ax=ax
+            save_dendrogram_figure(
+                link_topics=link_topics,
+                max_clusters=max_clusters,
+                outs_directory=outs.deconvolution,
             )
-            plt.xlabel("Topic Number")
-            plt.ylabel("Manhattan Distance")
-            plt.savefig(
-                os.path.join(outs.deconvolution, f"dendrogram_k{max_clusters}_distances.png"),
-                format="png",
-                bbox_inches="tight",
-            )
-            plt.close()
-
-            # save dendogram of levels
-            plt.figure(figsize=(10, 10))
-            # Getting a new link topic with distance being given by the level.
-            # The third column of the link_topics is distances in ascending order
-            # Resetting this to this level number gives us level as distance
-            level_link_topics = link_topics.copy()
-            level_link_topics[:, 2] = np.arange(1, max_clusters)
-            ax = plt.gca()
-            hierarchy.dendrogram(
-                level_link_topics, labels=range(1, max_clusters + 1), color_threshold=-1, ax=ax
-            )
-            ax.set_yticks(
-                np.arange(max_clusters - 1),
-                (max_clusters - np.arange(max_clusters - 1)).astype("int"),
-            )
-            ax.grid(axis="y")
-            plt.xlabel("Topic Number")
-            plt.ylabel("K")
-            plt.savefig(
-                os.path.join(outs.deconvolution, f"dendrogram_k{max_clusters}.png"),
-                format="png",
-                bbox_inches="tight",
-            )
-            plt.close()
 
         else:
             # Get the distance threshold to use

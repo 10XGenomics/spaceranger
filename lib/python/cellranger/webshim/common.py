@@ -12,6 +12,7 @@ import math
 import random
 import re
 import sys
+from collections.abc import Sequence
 from typing import Any  # pylint: disable=unused-import
 
 import numpy as np
@@ -29,11 +30,11 @@ import cellranger.webshim.constants.shared as shared_constants
 import cellranger.webshim.constants.vdj as ws_vdj_constants
 import tenkit.safe_json as tk_safe_json
 from cellranger.analysis.multigenome import MultiGenomeAnalysis
-from cellranger.analysis.singlegenome import SingleGenomeAnalysis
+from cellranger.analysis.singlegenome import Projection, SingleGenomeAnalysis
 from cellranger.reference_paths import get_ref_name_from_genomes
 from cellranger.webshim.data import SampleData, generate_counter_barcode_rank_plot_data
 from cellranger.webshim.jibes_plotting import _make_rc_vectors, make_color_map, make_histogram_plot
-from cellranger.websummary.helpers import get_tsne_key
+from cellranger.websummary.helpers import get_projection_key
 from cellranger.websummary.sample_properties import CountSampleProperties, SampleProperties
 
 
@@ -434,7 +435,7 @@ def _plot_segmented_barcode_rank(chart, counts, plot_segments):
 
 
 def plot_basic_barcode_rank(
-    chart, cell_barcodes: set[bytes], barcode_summary, genomes, lib_prefix, restrict_barcodes=None
+    chart, cell_barcodes: set[bytes], barcode_summary, genomes, lib_prefix, restrict_barcodes
 ):
     """Generate a basic RNA counter barcode rank plot without depending on SampleData/SampleProperties.
 
@@ -443,7 +444,8 @@ def plot_basic_barcode_rank(
         cell_barcodes: set of cell barcodes as bytes
         barcode_summary: barcode summary from the barcode_summary.h5
         lib_prefix: The library prefix to create the plot for
-        restrict_barcodes: Optional list of cell barcodes to restrict to
+        restrict_barcodes: Optional set of cell barcodes to restrict to; if empty,
+            use all barcodes.
     """
     genome = rna_library.MULTI_REFS_PREFIX
 
@@ -463,7 +465,6 @@ def plot_basic_barcode_rank(
 
     if key not in barcode_summary:
         return None
-
     counts_per_bc, plot_segments = generate_counter_barcode_rank_plot_data(
         cell_barcodes, barcode_summary, key, restrict_barcodes=restrict_barcodes
     )
@@ -530,7 +531,7 @@ def plot_barcode_rank(chart, sample_properties, sample_data):
 # TODO: This unneccesary argument is needed because of how the PD code is structured.
 def plot_vdj_barcode_rank(chart, sample_properties, sample_data):
     """Generate the VDJ barcode rank plot."""
-    if not sample_data.cell_barcodes:  # No cells
+    if not sample_data.cell_barcodes or sample_data.vdj_all_contig_annotations is None:
         return None
 
     counts_per_bc, plot_segments = sample_data.vdj_barcode_rank_plot_data()
@@ -722,8 +723,8 @@ def plot_preprocess(analyses):
     return analyses
 
 
-def load_sample_data(sample_properties, sample_data_paths):
-    return SampleData(sample_properties, sample_data_paths, plot_preprocess)
+def load_sample_data(sample_properties, sample_data_paths, projections: Sequence[Projection]):
+    return SampleData(sample_properties, sample_data_paths, plot_preprocess, projections)
 
 
 def plot_tsne(chart, sample_properties, sample_data):
@@ -735,9 +736,9 @@ def plot_tsne(chart, sample_properties, sample_data):
     matrix = sample_data.get_analysis(SingleGenomeAnalysis).matrix
     library_types = matrix.get_library_types()
     if rna_library.GENE_EXPRESSION_LIBRARY_TYPE in library_types:
-        key = get_tsne_key(rna_library.GENE_EXPRESSION_LIBRARY_TYPE, 2)
+        key = get_projection_key(rna_library.GENE_EXPRESSION_LIBRARY_TYPE, 2)
     elif rna_library.ANTIBODY_LIBRARY_TYPE in library_types:
-        key = get_tsne_key(rna_library.ANTIBODY_LIBRARY_TYPE, 2)
+        key = get_projection_key(rna_library.ANTIBODY_LIBRARY_TYPE, 2)
 
     args = [
         analysis.get_tsne(key=key).transformed_tsne_matrix,
@@ -856,10 +857,10 @@ def plot_tsne_totalcounts(chart, sample_properties, sample_data):
     library_types = matrix.get_library_types()
     if rna_library.GENE_EXPRESSION_LIBRARY_TYPE in library_types:
         library_type = rna_library.GENE_EXPRESSION_LIBRARY_TYPE
-        key = get_tsne_key(library_type, 2)
+        key = get_projection_key(library_type, 2)
     elif rna_library.ANTIBODY_LIBRARY_TYPE in library_types:
         library_type = rna_library.ANTIBODY_LIBRARY_TYPE
-        key = get_tsne_key(library_type, 2)
+        key = get_projection_key(library_type, 2)
 
     matrix = analysis.matrix.select_features_by_type(library_type)
     reads_per_bc = matrix.get_counts_per_bc()
@@ -912,14 +913,14 @@ def _plot_differential_expression(
             {
                 "type": "number",
                 "label": "L2FC",
-                "title": "Log2 fold-change in cluster %d vs other cells" % (i + 1),
+                "title": f"Log2 fold-change in cluster {i + 1} vs other cells",
             }
         )
         cols.append(
             {
                 "type": "number",
                 "label": "p-value",
-                "title": "Adjusted p-value of differential expression in cluster %d" % (i + 1),
+                "title": f"Adjusted p-value of differential expression in cluster {i + 1}",
             }
         )
 
@@ -1268,10 +1269,7 @@ def get_custom_features(sample_data):
 def get_genomes(sample_data):
     """Infer the set of genomes present in a dataset."""
     analysis = sample_data.get_analysis(SingleGenomeAnalysis)
-    if analysis:
-        return [x for x in analysis.matrix.get_genomes() if x != ""]
-    else:
-        return ["dummy"]
+    return analysis.matrix.get_genomes() if analysis else ["dummy"]
 
 
 def build_web_summary_json(sample_properties, sample_data, pipeline):

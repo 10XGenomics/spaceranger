@@ -13,12 +13,12 @@ import cv2
 import numpy as np
 from skimage.morphology import disk
 
-import cellranger.spatial.data_utils as du
+import cellranger.spatial.spatial_pandas_utils as spatial_pandas_utils
 import cellranger.spatial.tiffer as tiffer
 
 
 def calculate_if_mean_sd(
-    channel_dict: dict[Any, Sequence[float] | Sequence[int]]
+    channel_dict: dict[Any, Sequence[float] | Sequence[int]],
 ) -> dict[str, Iterator[float]]:
     """For each IF image page, calculate the spot level mean and sd pixel.
 
@@ -69,7 +69,7 @@ def summarize_spot_pixels(
         which can be used with calculate_if_mean_sd().
         barcode_tissue: dictionary of barcodes and tissue positions (in/out).
     """
-    barcode_tissue_positions = du.read_tissue_positions_csv(tissue_positions_csv)
+    barcode_tissue_positions = spatial_pandas_utils.read_tissue_positions_csv(tissue_positions_csv)
     barcodes = [str(bc, "utf-8") for bc in barcode_tissue_positions.index]
     barcode_tissue_positions = barcode_tissue_positions.values.tolist()
     barcode_tissue_positions = [[bc] + data for bc, data in zip(barcodes, barcode_tissue_positions)]

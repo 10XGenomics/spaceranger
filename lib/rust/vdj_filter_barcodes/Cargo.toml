@@ -1,0 +1,76 @@
+[dependencies]
+arrayref = '0.3'
+
+[dependencies.anyhow]
+workspace = true
+
+[dependencies.barcode]
+path = '../barcode'
+
+[dependencies.bio]
+workspace = true
+
+[dependencies.cr_types]
+path = '../cr_types'
+
+[dependencies.debruijn]
+workspace = true
+
+[dependencies.enclone_process]
+path = '../enclone_process'
+
+[dependencies.fastq_set]
+path = '../fastq_set'
+
+[dependencies.itertools]
+workspace = true
+
+[dependencies.martian]
+workspace = true
+
+[dependencies.martian-derive]
+workspace = true
+
+[dependencies.martian-filetypes]
+workspace = true
+
+[dependencies.metric]
+path = '../metric'
+
+[dependencies.serde]
+workspace = true
+
+[dependencies.strum]
+workspace = true
+
+[dependencies.strum_macros]
+workspace = true
+
+[dependencies.vdj_ann]
+path = '../vdj_ann'
+
+[dependencies.vdj_asm_utils]
+path = '../vdj_asm_utils'
+
+[dependencies.vdj_types]
+path = '../vdj_types'
+
+[dependencies.vector_utils]
+path = '../vector_utils'
+
+[lib]
+test = false
+
+[lints]
+workspace = true
+
+[package]
+authors = ['10x Genomics']
+edition = '2021'
+name = 'vdj_filter_barcodes'
+publish = false
+version = '0.1.0'
+
+[package.metadata]
+[package.metadata.cargo-machete]
+ignored = ['martian']

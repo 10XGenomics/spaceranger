@@ -43,8 +43,8 @@ def get_reference_genome_fasta(reference_path: str) -> str:
 
 
 def get_reference_genomes(reference_path: str) -> list[str]:
-    data = _load_reference_metadata_file(reference_path)
-    return data[cr_constants.REFERENCE_GENOMES_KEY]
+    """Return the genome names from the reference transcriptome."""
+    return _load_reference_metadata_file(reference_path)[cr_constants.REFERENCE_GENOMES_KEY]
 
 
 def is_arc_reference(reference_path: str) -> bool:
@@ -118,4 +118,5 @@ def chunk_reference(
 
 
 def get_ref_name_from_genomes(genomes: Iterable[str]):
+    # Jira: CELLRANGER-9146: Use MULTI_GENOME_SEPARATOR instead of "_and_"
     return "_and_".join(genomes)

@@ -1,9 +1,11 @@
 //! Martian stage DEMUX_PROBE_BC_MATRIX
+#![allow(missing_docs)]
 
 use crate::gdna_utils::get_filtered_per_probe_metrics;
 use crate::probe_barcode_matrix::{read_bc_json, write_probe_bc_matrix, ProbeCounts};
 use barcode::Barcode;
 use cr_types::reference::probe_set_reference::TargetSetFile;
+use cr_types::reference::reference_info::ReferenceInfo;
 use cr_types::{BarcodeIndex, CountShardFile, H5File};
 use martian::prelude::*;
 use martian_derive::{make_mro, MartianStruct};
@@ -15,12 +17,11 @@ use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::iter::zip;
-use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize, MartianStruct)]
 pub struct DemuxProbeBcMatrixStageInputs {
     pub probe_barcode_counts: Vec<CountShardFile>,
-    pub reference_path: PathBuf,
+    pub reference_info: Option<ReferenceInfo>,
     pub probe_set: TargetSetFile,
     pub probe_set_name: String,
     pub sample_barcodes: JsonFile<HashMap<String, Vec<String>>>,
@@ -68,7 +69,7 @@ impl MartianStage for DemuxProbeBcMatrix {
             .map(|sample_name| {
                 (
                     DemuxProbeBcMatrixChunkInputs { sample_name },
-                    Resource::with_mem_gb(5),
+                    Resource::with_mem_gb(6),
                 )
             })
             .collect())
@@ -80,23 +81,23 @@ impl MartianStage for DemuxProbeBcMatrix {
         chunk_args: Self::ChunkInputs,
         rover: MartianRover,
     ) -> Result<Self::ChunkOutputs, Error> {
-        // re-reading the sample barcodes. Because can not use barcodes in split
-        let sample_bcs = read_bc_json(&args.sample_barcodes)?
-            .remove(&chunk_args.sample_name)
-            .unwrap();
         let sample_cell_bcs: TxHashSet<Barcode> = read_bc_json(&args.sample_cell_barcodes)?
             .remove(&chunk_args.sample_name)
             .unwrap()
             .into_iter()
             .collect();
 
+        let reference_path = args
+            .reference_info
+            .as_ref()
+            .and_then(|x| x.get_reference_path());
         // Decide if gDNA analysis should be run. If so run it and get if a probe is filtered. Everything
         // written out in the form of a vec<ProbeCounts>
         let filtered_per_probe_metrics = get_filtered_per_probe_metrics(
             &args.probe_barcode_counts,
             &sample_cell_bcs,
             &args.probe_set,
-            &args.reference_path,
+            reference_path,
         )?;
 
         // Write out sample per probe metrics
@@ -112,11 +113,18 @@ impl MartianStage for DemuxProbeBcMatrix {
 
         // Write out raw-probe-raw-barcode matrix. Filtered probes are annotated. Filtered barcodes are not
         let sample_raw_probe_bc_matrix: H5File = rover.make_path("sample_raw_probe_bc_matrix");
-        let bc_index = BarcodeIndex::from_iter(sample_bcs);
+        // re-reading the sample barcodes. Because can not use barcodes in split
+        let bc_index = {
+            let mut bcs = read_bc_json(&args.sample_barcodes)?
+                .remove(&chunk_args.sample_name)
+                .unwrap();
+            bcs.sort();
+            BarcodeIndex::from_sorted(bcs)
+        };
         let cell_bc_indicator_vec = bc_index.into_indicator_vec(&sample_cell_bcs);
         write_probe_bc_matrix(
             &args.probe_set,
-            &args.reference_path,
+            reference_path,
             &args.probe_barcode_counts,
             &sample_raw_probe_bc_matrix,
             &bc_index,

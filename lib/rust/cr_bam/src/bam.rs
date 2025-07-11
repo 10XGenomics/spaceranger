@@ -1,13 +1,15 @@
+#![allow(missing_docs)]
 use crate::bam_tags::{
     ExtraFlags, EXTRA_FLAGS_TAG, FEATURE_IDS_TAG, PROC_BC_SEQ_TAG, PROC_UMI_SEQ_TAG,
     RAW_BARCODE_SEQ_TAG, RAW_UMI_SEQ_TAG,
 };
 use crate::constants::{ALN_BC_DISK_CHUNK_SZ, ALN_BC_GIB};
 use barcode::{Barcode, BarcodeContent};
+use metric::TxHasher;
 use rust_htslib::bam::record::{Aux, Cigar, Record};
 use shardio::{ShardReader, SortKey, SHARD_ITER_SZ as SHARD_SZ};
 use std::borrow::Cow;
-use std::hash::{Hash, Hasher};
+use std::hash::Hash;
 use umi::UmiSeq;
 
 // a gibibyte is 1024**3 bytes
@@ -46,7 +48,7 @@ pub trait AuxExt {
     }
 }
 
-impl<'a> AuxExt for Aux<'a> {
+impl AuxExt for Aux<'_> {
     fn integer(&self) -> i32 {
         // From the spec: <https://samtools.github.io/hts-specs/SAMv1.pdf>
         // While all single (i.e., non-array) integer types are stored in SAM
@@ -216,17 +218,10 @@ pub fn get_library_type_metric_prefix(lib_type: &str) -> String {
 /// Marker trait to sort BAM records by their position, used for ShardIO
 pub struct BamPosSort;
 
-// fxhash has issues with the least bytes of byte arrays, use siphash
 fn hash32<T: Hash + ?Sized>(v: &T) -> u32 {
-    let h = hash64(v);
+    let h = TxHasher::hash(v);
     let mask = u32::MAX as u64;
     (h & mask) as u32 ^ ((h >> 32) & mask) as u32
-}
-
-pub fn hash64<T: Hash + ?Sized>(v: &T) -> u64 {
-    let mut s = wyhash::WyHash::with_seed(0);
-    v.hash(&mut s);
-    s.finish()
 }
 
 impl SortKey<Record> for BamPosSort {
@@ -240,7 +235,7 @@ impl SortKey<Record> for BamPosSort {
             // This allows us to avoid decompresssing blocks of reads that
             // are mapped to the genome or feature barcodes
             rec.is_unmapped() && rec.aux(FEATURE_IDS_TAG).is_err(),
-            hash64(rec.qname()),
+            TxHasher::hash(rec.qname()),
             hash32(rec.raw_cigar()),
             rec.flags(),
         ))

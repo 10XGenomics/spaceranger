@@ -13,6 +13,7 @@ import cellranger.preflight as cr_preflight
 import cellranger.spatial.preflight as cr_sp_preflight
 import cellranger.spatial.tiffer as tiffer
 from cellranger.feature_ref import FeatureDefException
+from cellranger.spatial.cytassist_fix import test_for_cytassist_image_fix
 from cellranger.spatial.data_utils import (
     get_all_images_from_tgz_folder,
     get_cytassist_capture_area,
@@ -21,33 +22,34 @@ from cellranger.spatial.data_utils import (
 
 __MRO__ = """
 stage SPACERANGER_PREFLIGHT(
-    in  map[]            sample_def,
-    in  csv              target_set,
-    in  path             reference_path,
-    in  csv              feature_reference,
-    in  int              recovered_cells,
-    in  int              force_cells,
-    in  int              r1_length,
-    in  int              r2_length,
-    in  file[]           tissue_image_paths,
-    in  int              dark_images,
-    in  int              dapi_channel_index,
-    in  path             loupe_alignment_file,
-    in  bool             override_id,
-    in  gpr              gpr_file,
-    in  vlf              hd_layout_file,
-    in  file[]           cytassist_image_paths,
-    in  tgz              cytassist_tgz_path,
-    in  bool             check_cytassist_sizes,
-    in  string           slide_serial_capture_area,
-    in  string           targeting_method,
-    in  float            image_scale,
-    in  string           chemistry,
-    in  ChemistryDef     custom_chemistry_def,
-    in  V1PatternFixArgs v1_pattern_fix,
-    in  path             hd_log_umi_image,
-    in  bool             is_pd,
-    src py               "stages/common/spaceranger_preflight",
+    in  map[]              sample_def,
+    in  csv                target_set,
+    in  path               reference_path,
+    in  csv                feature_reference,
+    in  int                recovered_cells,
+    in  int                force_cells,
+    in  int                r1_length,
+    in  int                r2_length,
+    in  file[]             tissue_image_paths,
+    in  int                dark_images,
+    in  int                dapi_channel_index,
+    in  path               loupe_alignment_file,
+    in  bool               override_id,
+    in  gpr                gpr_file,
+    in  vlf                hd_layout_file,
+    in  file[]             cytassist_image_paths,
+    in  tgz                cytassist_tgz_path,
+    in  bool               check_cytassist_sizes,
+    in  string             slide_serial_capture_area,
+    in  string             targeting_method,
+    in  float              image_scale,
+    in  string             chemistry,
+    in  ChemistryDef       custom_chemistry_def,
+    in  V1PatternFixArgs   v1_pattern_fix,
+    in  SegmentationInputs segmentation_inputs,
+    in  path               hd_log_umi_image,
+    in  bool               is_pd,
+    src py                 "stages/common/spaceranger_preflight",
 ) split (
 ) using (
     mem_gb  = 3,
@@ -87,7 +89,11 @@ def join(args, outs, _chunk_defs, _chunk_outs):
 
 def run_preflight_checks(args):
     full_check = True
-    feature_reference = None
+    segmentation_inputs = (
+        cr_sp_preflight.SegmentationInputs(**dict(args.segmentation_inputs.items()))
+        if args.segmentation_inputs
+        else None
+    )
 
     cr_preflight.check_os()
 
@@ -133,6 +139,17 @@ def run_preflight_checks(args):
                 f"Sample images in the tarball: \n{sample_image_string}\n"
             )
 
+    if cytassist_image_corrected_in_ppln := (
+        cytassist_image_paths
+        and len(cytassist_image_paths) == 1
+        and test_for_cytassist_image_fix(cytassist_image_paths[0])
+    ):
+        martian.log_info("Checking CytAssist image channel correction.")
+        temporary_tiff_dir = martian.make_path("temp_tiff_dir").decode()
+        cytassist_image_paths[0] = tiffer.try_call_tiffer_compatibilty_fixes(
+            cytassist_image_paths[0], temporary_tiff_dir
+        )
+
     is_hd_run = cr_sp_preflight.is_hd_upload(args.chemistry, args.custom_chemistry_def)
     cr_sp_preflight.check_spatial_image_paths(
         args.tissue_image_paths,
@@ -153,7 +170,7 @@ def run_preflight_checks(args):
     cr_preflight.check_targeting_preflights(
         args.target_set,
         args.reference_path,
-        feature_reference,
+        args.feature_reference,
         parse_files=full_check,
         expected_targeting_method=args.targeting_method,
         is_spatial=True,
@@ -173,6 +190,8 @@ def run_preflight_checks(args):
         args.dapi_channel_index,
         image_scale=args.image_scale,
         loupe_alignment_file=args.loupe_alignment_file,
+        segmentation_inputs=segmentation_inputs,
+        cytassist_image_corrected_in_ppln=cytassist_image_corrected_in_ppln,
     )
 
     cr_sp_preflight.check_cytassist_img_valid(

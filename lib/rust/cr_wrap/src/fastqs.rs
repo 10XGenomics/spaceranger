@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use crate::utils::CliPath;
 use anyhow::{anyhow, bail, Result};
 use clap::builder::NonEmptyStringValueParser;

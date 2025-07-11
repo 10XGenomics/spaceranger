@@ -2,15 +2,21 @@
 """Preflight support routines for spatial analyses."""
 from __future__ import annotations
 
+import csv
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
 
 import h5py
 import martian
+import numpy as np
+from packaging.version import Version
+from PIL import Image
 
 import cellranger.spatial.slide as slide
 from cellranger.chemistry import CUSTOM_CHEMISTRY_NAME
+from cellranger.fast_utils import CellId, SquareBinIndex, validate_feature_collection_geojson
 from cellranger.preflight import PreflightException
 from cellranger.spatial.cytassist_constants import (
     CYTA_HD_IMAGE_WIDTH,
@@ -35,7 +41,239 @@ from cellranger.spatial.valis.registration import (
     MAXIMUM_TISSUE_IMAGE_SCALING,
 )
 
-VISIUM_HD_CHEMISTRIES = ["SPATIAL-HD-v1"]
+VISIUM_HD_CHEMISTRIES = ["SPATIAL-HD-v1", "SPATIAL-HD-v1-3P"]
+
+ALLOWED_SEGMENTATION_BARCODE_FIELDNAMES = ["Square_002um", "square_002um"]
+ALLOWED_SEGMENTATION_CELLID_FIELDNAMES = ["Cell_id", "cell_id"]
+
+
+class SlideStats(NamedTuple):
+    nrows: int
+    ncols: int
+    spot_pitch: int
+
+
+VISIUM_HD_SLIDE_STATS = SlideStats(nrows=3350, ncols=3350, spot_pitch=2)
+
+
+@dataclass
+class SegmentationInputs:
+    """Segmentation inputs."""
+
+    user_provided_segmentations: str | None = None
+    square_barcode_to_cell_map: str | None = None
+    instance_mask_tiff: str | None = None
+    instance_mask_npy: str | None = None
+    max_nucleus_diameter_px: int | None = None
+    barcode_assignment_distance_micron: int | None = None
+
+    def count_number_of_user_provided_segmentations(self) -> int:
+        return sum(
+            (
+                self.user_provided_segmentations is not None,
+                self.square_barcode_to_cell_map is not None,
+                self.instance_mask_tiff is not None,
+                self.instance_mask_npy is not None,
+            )
+        )
+
+    def is_valid_user_provided_segmentations(self):
+        """Check if user provided geojson is valid."""
+        if not self.user_provided_segmentations:
+            return
+        try:
+            validate_feature_collection_geojson(self.user_provided_segmentations)
+        except Exception as exc:
+            raise PreflightException(
+                f"Invalid --custom-segmentation-file GeoJson provided. Expecting FeatureCollection objects. Error: {exc}"
+            ) from exc
+
+    def needs_tissue_image(self) -> bool:
+        return any(
+            (
+                self.user_provided_segmentations is not None,
+                self.instance_mask_tiff is not None,
+                self.instance_mask_npy is not None,
+                self.max_nucleus_diameter_px is not None,
+            )
+        )
+
+    def check_inputs_exist(self) -> None:
+        """Raise a PreflightException if any of the provided input files do not exist."""
+        for file in [
+            self.user_provided_segmentations,
+            self.square_barcode_to_cell_map,
+            self.instance_mask_tiff,
+            self.instance_mask_npy,
+        ]:
+            if file is not None and not os.path.isfile(file):
+                raise PreflightException(f"The custom segmentation file at {file} does not exist.")
+            if file is not None and not os.access(file, os.R_OK):
+                raise PreflightException(f"The custom segmentation file at {file} is not readable.")
+
+    def is_valid_square_barcode_to_cell_map(self, nrows, ncols, spot_pitch):
+        """Check if a square barcode to cell map is valid."""
+        if not self.square_barcode_to_cell_map:
+            return
+
+        with open(self.square_barcode_to_cell_map) as csvfile:
+            reader = csv.DictReader(csvfile)
+            if not (fieldnames := reader.fieldnames):
+                raise PreflightException(
+                    "Found CSV with no header. The --custom-segmentation-file CSV must have a header row."
+                )
+
+            possible_bc_fieldnames = [
+                x for x in fieldnames if x in ALLOWED_SEGMENTATION_BARCODE_FIELDNAMES
+            ]
+            if not possible_bc_fieldnames:
+                raise PreflightException(
+                    "No fieldname for 2um squares found in --custom-segmentation-file CSV. "
+                    f"Possible names {','.join(ALLOWED_SEGMENTATION_BARCODE_FIELDNAMES)}"
+                )
+            elif len(possible_bc_fieldnames) > 1:
+                raise PreflightException(
+                    "Found too many possible 2um square fieldnames in --custom-segmentation-file CSV. "
+                    f"Found possible fieldnames {','.join(possible_bc_fieldnames)}"
+                )
+            bc_fieldname = possible_bc_fieldnames[0]
+
+            possible_cellid_fieldnames = [
+                x for x in fieldnames if x in ALLOWED_SEGMENTATION_CELLID_FIELDNAMES
+            ]
+            if not possible_cellid_fieldnames:
+                raise PreflightException(
+                    "No fieldname for cell_id found in --custom-segmentation-file CSV. "
+                    f"Possible names: {','.join(ALLOWED_SEGMENTATION_CELLID_FIELDNAMES)}"
+                )
+            elif len(possible_cellid_fieldnames) > 1:
+                raise PreflightException(
+                    "Found too many possible cell_id fieldnames in --custom-segmentation-file CSV. "
+                    f"Found possible fieldnames: {','.join(possible_cellid_fieldnames)}"
+                )
+            cellid_fieldname = possible_cellid_fieldnames[0]
+
+            first_non_null_cellid = next(
+                (
+                    row[cellid_fieldname]
+                    for row in reader
+                    if row[cellid_fieldname] is not None and row[cellid_fieldname] != ""
+                ),
+                None,
+            )
+            if first_non_null_cellid is None:
+                raise PreflightException(
+                    "Could not find any non-null cell_ids in the --custom-segmentation-file CSV. "
+                )
+            elif isinstance(first_non_null_cellid, int):
+                int_cellid = True
+            elif isinstance(first_non_null_cellid, str):
+                int_cellid = False
+            else:
+                raise PreflightException(
+                    "Cell_ids in the --custom-segmentation-file CSV must be integers or cell_id strings."
+                    f"Found: {first_non_null_cellid}."
+                )
+
+            csvfile.seek(0)
+            reader = csv.DictReader(csvfile)
+            for row in reader:
+                try:
+                    bc = SquareBinIndex(barcode=row[bc_fieldname])
+                except Exception as exc:
+                    raise PreflightException(
+                        f"The --custom-segmentation-file CSV has invalid square barcode ID. Error {exc}"
+                    ) from exc
+                if bc.size_um != spot_pitch:
+                    raise PreflightException(
+                        f"The --custom-segmentation-file CSV should only have {spot_pitch}um barcodes. "
+                        f"Found spot pitch={bc.size_um} in {bc}."
+                    )
+                if not 0 <= bc.col < ncols:
+                    raise PreflightException(
+                        f"The --custom-segmentation-file CSV should have 2um barcodes with col between 0 and {ncols-1}. "
+                        f"Found col={bc.col} in {bc}."
+                    )
+                if not 0 <= bc.row < nrows:
+                    raise PreflightException(
+                        f"The --custom-segmentation-file CSV should have 2um barcodes with row between 0 and {nrows-1}. "
+                        f"Found row={bc.row} in {bc}."
+                    )
+
+                if (cell_id := row[cellid_fieldname]) is not None and cell_id != "":
+                    if int_cellid:
+                        row_cell_id = int(cell_id)
+                    else:
+                        try:
+                            cell = CellId(barcode=cell_id)
+                        except Exception as exc:
+                            raise PreflightException(
+                                f"The --custom-segmentation-file CSV has invalid Cell-IDs. Error {exc}"
+                            ) from exc
+                        row_cell_id = cell.id
+                    if row_cell_id <= 0:
+                        raise PreflightException(
+                            "The cell_ids in the --custom-segmentation-file CSV should be more than 0. "
+                            f"Found {row_cell_id} in {cell_id}."
+                        )
+
+    def check_segmentation_inputs(self, tissue_image_paths):
+        """Apply checks to the segmentation inputs that do not require tissue image sizes."""
+        if (num_segmentation_ips := self.count_number_of_user_provided_segmentations()) > 1:
+            raise PreflightException(
+                f"Only one segmentation file can be provided. Found {num_segmentation_ips}."
+            )
+        self.check_inputs_exist()
+        if self.needs_tissue_image() and not any(tissue_image_paths):
+            raise PreflightException(
+                "Tissue images are required for all --custom-segmentation-file inputs except square barcode to cell ID mapping CSV."
+            )
+        self.is_valid_user_provided_segmentations()
+        self.is_valid_square_barcode_to_cell_map(
+            nrows=VISIUM_HD_SLIDE_STATS.nrows,
+            ncols=VISIUM_HD_SLIDE_STATS.ncols,
+            spot_pitch=VISIUM_HD_SLIDE_STATS.spot_pitch,
+        )
+
+    def check_segmentation_masks_and_get_size(self, tissue_image_sizes):
+        """Apply checks to segmentation mask tiff/npy and return mask size - requires tissue image size."""
+        instance_mask_ht_wdt_size = None
+        if self.instance_mask_tiff is not None:
+            if tissue_image_sizes:
+                tissue_image_size = tissue_image_sizes[0] * tissue_image_sizes[1] + 1
+                Image.MAX_IMAGE_PIXELS = tissue_image_size
+                try:
+                    with Image.open(self.instance_mask_tiff) as mask_img:
+                        instance_mask_ht_wdt_size = mask_img.size[::-1]
+                        mode = mask_img.mode
+                        n_pages = mask_img.n_frames
+                except Image.DecompressionBombError as exc:
+                    raise PreflightException(
+                        "Instance mask of segmentation should have the same shape as tissue image. "
+                        "Could not read instance mask after allocating for tissue image sizes. "
+                    ) from exc
+                if mode not in ["I", "I;16", "I;16B", "I;16L", "I;16N"]:
+                    raise PreflightException(
+                        "Tiff format instance mask should be a 16-bit or 32-bit grayscale image. "
+                        f"Found mode {mode} for --custom-segmentation-file: {self.instance_mask_tiff}."
+                    )
+                if n_pages > 1:
+                    raise PreflightException(
+                        "Tiff format instance mask should be a single page image. "
+                        f"Found {n_pages} pages for --custom-segmentation-file: {self.instance_mask_tiff}."
+                    )
+            else:
+                raise PreflightException("Can not input a segmentation mask without a tissue image")
+        if self.instance_mask_npy is not None:
+            instance_mask_npy = np.load(self.instance_mask_npy, mmap_mode="r")
+            if instance_mask_npy.dtype != np.uint32:
+                raise PreflightException(
+                    f"NPY format instance mask should be of dtype uint32. Found dtype {instance_mask_npy.dtype} "
+                    f"for --custom-segmentation-file: {self.instance_mask_npy}"
+                )
+            instance_mask_ht_wdt_size = instance_mask_npy.shape
+
+        return instance_mask_ht_wdt_size
 
 
 def is_hd_upload(chemistry: str, custom_chemistry_def: dict | None) -> bool:
@@ -279,6 +517,9 @@ def _check_slide_capture_area_ids(
             )
 
         capture_areas = slide.get_capture_areas_from_hd_layout_info_json(hd_layout_data)
+        capture_areas = [
+            CYTASSIST_TIFF_CAPTURE_AREA_TO_PIPELINE_CAPTURE_AREA[area] for area in capture_areas
+        ]
         if cmdline_area_id not in capture_areas:
             raise PreflightException(
                 "You provided a capture area {} for slide ID {}, but this slide design"
@@ -358,7 +599,10 @@ def check_images_consistent(tissue_image_paths):
 
 
 def _check_image_checksums(
-    tissue_image_paths, cytassist_image_paths: list[str], loupe_alignment_file
+    tissue_image_paths,
+    cytassist_image_paths: list[str],
+    loupe_alignment_file,
+    cytassist_image_corrected_in_ppln,
 ):
     """Check that any loupe alignment file matches at least one image file.
 
@@ -377,6 +621,15 @@ def _check_image_checksums(
             raise PreflightException(
                 f"Loupe alignment file {loupe_alignment_file} was not a correctly formatted file"
             ) from ex
+
+        loupe_alignment_json_version = loupe_data.get_loupe_alignment_json_version()
+        if cytassist_image_corrected_in_ppln and (
+            not loupe_alignment_json_version
+            or Version(loupe_alignment_json_version) < Version("1.1.0")
+        ):
+            raise PreflightException(
+                "Visium HD images generated with CytAssist software version 2.1 must be manually aligned using Loupe version 8.1.2 or higher. Please ensure that you are using a compatible Loupe version and contact support@10xgenomics.com for additional assistance."
+            )
 
         fiducial_image_checksum = loupe_data.fiducial_image_checksum()
 
@@ -468,7 +721,7 @@ class AllowedImageTypes(NamedTuple):
         return allowed
 
 
-def check_images_valid(  # pylint: disable=too-many-locals
+def check_images_valid(  # pylint: disable=too-many-locals, too-many-arguments, too-many-positional-arguments, too-many-branches
     tissue_image_paths,
     dark_images,
     chemistry: str,
@@ -476,12 +729,19 @@ def check_images_valid(  # pylint: disable=too-many-locals
     dapi_index: int,
     image_scale: float | None,
     loupe_alignment_file=None,
+    segmentation_inputs: SegmentationInputs | None = None,
+    cytassist_image_corrected_in_ppln=False,
 ):
     """Check that tiffer can open an image and its largest dimension is > 2000px.
 
     This requires more than 1 GB of memory and is run on the run target only.
     """
-    _check_image_checksums(tissue_image_paths, cytassist_image_paths, loupe_alignment_file)
+    _check_image_checksums(
+        tissue_image_paths,
+        cytassist_image_paths,
+        loupe_alignment_file,
+        cytassist_image_corrected_in_ppln=cytassist_image_corrected_in_ppln,
+    )
 
     skip_pages = get_remove_image_pages(loupe_alignment_file)
 
@@ -506,10 +766,13 @@ def check_images_valid(  # pylint: disable=too-many-locals
                     f"--dapi-index was specified as {dapi_index}, but cannot be larger than the number of pages in the --darkimage which was {npages}."
                 )
 
-    whsizes = None
+    if segmentation_inputs is not None:
+        segmentation_inputs.check_segmentation_inputs(tissue_image_paths)
+
+    hwsizes = None
     whprotofile = None
     for path in tissue_image_paths:
-        allowed = AllowedImageTypes.from_dark_images(dark_images)
+        allowed: AllowedImageTypes = AllowedImageTypes.from_dark_images(dark_images)
 
         # call tiffer info to get image metadata
         imageinfo = call_tiffer_info(path)
@@ -549,20 +812,20 @@ def check_images_valid(  # pylint: disable=too-many-locals
                     f"cannot mix color modes and bit depths across pages in image {path}"
                 )
 
-            if whsizes is None:
-                whsizes = (page["width"], page["height"])
+            if hwsizes is None:
+                hwsizes = (page["height"], page["width"])
                 whprotofile = path
-            elif (page["width"], page["height"]) != whsizes:
+            elif (page["height"], page["width"]) != hwsizes:
                 if nfiles > 1:
                     raise PreflightException(
                         "can't mix image sizes between files:\n{} had {} and \n{} has {}".format(
-                            whprotofile, whsizes, path, (page["width"], page["height"])
+                            whprotofile, hwsizes, path, (page["height"], page["width"])
                         )
                     )
                 else:
                     raise PreflightException(
                         "can't mix image sizes between pages in a TIFF image:\n{} has both {} and {}".format(
-                            path, whsizes, (page["width"], page["height"])
+                            path, hwsizes, (page["height"], page["width"])
                         )
                     )
 
@@ -570,6 +833,20 @@ def check_images_valid(  # pylint: disable=too-many-locals
             if max(page["width"], page["height"]) < limit:
                 raise PreflightException(
                     f"Image must have at least one dimension >= {limit} for {slide_name} slides"
+                )
+
+        if segmentation_inputs is not None:
+            instance_mask_size = segmentation_inputs.check_segmentation_masks_and_get_size(
+                tissue_image_sizes=hwsizes
+            )
+        else:
+            instance_mask_size = None
+
+        if instance_mask_size and hwsizes:
+            if instance_mask_size != hwsizes:
+                raise PreflightException(
+                    "Instance mask of segmentation should have the same shape as tissue image. "
+                    f"Tissue image shape: {hwsizes}, Instance mask shape: {instance_mask_size}"
                 )
 
         if image_scale is not None:

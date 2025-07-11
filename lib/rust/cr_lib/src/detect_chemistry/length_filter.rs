@@ -1,3 +1,4 @@
+#![deny(missing_docs)]
 use super::chemistry_filter::{ChemistryFilter, DetectChemistryUnit};
 use super::errors::DetectChemistryErrors;
 use anyhow::Result;
@@ -5,7 +6,7 @@ use cr_types::chemistry::{ChemistryDef, ChemistryName};
 use cr_types::reference::feature_reference::{FeatureConfig, FeatureReferenceFile, FeatureType};
 use fastq_set::read_pair::ReadPair;
 use fastq_set::WhichRead;
-use metric::{SimpleHistogram, TxHashMap, TxHashSet};
+use metric::{Histogram, SimpleHistogram, TxHashMap, TxHashSet};
 use std::fmt;
 
 pub(crate) const WHICH_LEN_READS: [WhichRead; 3] = [WhichRead::R1, WhichRead::R2, WhichRead::I1];
@@ -79,7 +80,9 @@ impl<'a> ChemistryFilter<'a> for LengthFilter<'a> {
         &self,
         mut result: TxHashSet<ChemistryName>,
     ) -> Result<TxHashSet<ChemistryName>, DetectChemistryErrors> {
-        use ChemistryName::{FivePrimePE, FivePrimePEV3, FivePrimeR2, FivePrimeR2V3, VdjPE, VdjR2};
+        use ChemistryName::{
+            FivePrimePE, FivePrimePEV3, FivePrimeR2, FivePrimeR2V3, VdjPE, VdjPEV3, VdjR2, VdjR2V3,
+        };
         if result.contains(&FivePrimePE) {
             result.remove(&FivePrimeR2);
         }
@@ -88,6 +91,9 @@ impl<'a> ChemistryFilter<'a> for LengthFilter<'a> {
         }
         if result.contains(&VdjPE) {
             result.remove(&VdjR2);
+        }
+        if result.contains(&VdjPEV3) {
+            result.remove(&VdjR2V3);
         }
         Ok(result)
     }

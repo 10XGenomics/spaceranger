@@ -1,6 +1,8 @@
+#![allow(missing_docs)]
 use anyhow::{Context, Result};
+use barcode::whitelist::ReqStrand;
 use cr_types::reference::genome_of_chrom::genome_of_chrom;
-use cr_types::{utils, GenomeName, ReqStrand};
+use cr_types::{utils, GenomeName};
 use fastq_set::WhichEnd;
 use martian_filetypes::tabular_file::TsvFileNoHeader;
 use martian_filetypes::FileTypeRead;
@@ -289,7 +291,7 @@ impl TranscriptAnnotator {
         let transcript_info: Vec<StarTranscript> =
             read_star_tab(&reference_path.join("star/transcriptInfo.tab"))?;
         let exon_info: Vec<StarExon> = read_star_tab(&reference_path.join("star/exonInfo.tab"))?;
-        let chrom_starts = cr_types::utils::load_txt(&reference_path.join("star/chrStart.txt"))?;
+        let chrom_starts = utils::load_txt(&reference_path.join("star/chrStart.txt"))?;
         let genome_of_tid = genome_of_chrom(reference_path)?;
         let txome = Transcriptome::from_reference_path(reference_path)?;
         let transcript_index = TranscriptIndex::from_transcriptome(&txome);
@@ -321,7 +323,7 @@ impl TranscriptAnnotator {
         let clipped_read_end = clipped_read_start + cr_bam::bam::alen(read) - 1;
 
         // find maximum index of transcripts that could possibly overlap the read
-        let mut tx_idx = cr_types::utils::bisect(
+        let mut tx_idx = utils::bisect(
             &self.transcript_info,
             clipped_read_end,
             &|tx| tx.start,
@@ -606,17 +608,17 @@ fn find_exons(
     intergenic_trim_bases: i64,
     intronic_trim_bases: i64,
 ) -> Option<(usize, usize)> {
-    let ex_start = cr_types::utils::bisect(
+    let ex_start = utils::bisect(
         &exon_info[first_exon..last_exon + 1],
         read_start,
         &|ex| ex.end,
         utils::BisectDirection::Right,
     ) + first_exon; // find first exon that ends to the right of the read start
-    let ex_end = cr_types::utils::bisect(
+    let ex_end = utils::bisect(
         &exon_info[first_exon..last_exon + 1],
         read_end,
         &|ex| ex.start,
-        cr_types::utils::BisectDirection::Left,
+        utils::BisectDirection::Left,
     ) - 1
         + first_exon; // find first exon that starts to the left of the read end
                       //let ex_start = exon_info.binary_search_by_key(&read_start, |ex| ex.end - 1).unwrap() as u64; // find first exon that ends to the right of the read start
@@ -894,14 +896,6 @@ mod tests {
     use super::*;
     use rust_htslib::bam::record::CigarString;
     use std::collections::HashMap;
-
-    #[allow(dead_code)]
-    struct TranscriptomeTest {
-        chrom_starts: Vec<i64>,
-        transcript_info: Vec<StarTranscript>,
-        exon_info: Vec<StarExon>,
-        transcript_index: TranscriptIndex,
-    }
 
     fn make_test_annotator(params: AnnotationParams) -> TranscriptAnnotator {
         /*

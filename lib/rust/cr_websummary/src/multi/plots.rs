@@ -1,8 +1,9 @@
+#![allow(missing_docs)]
 use crate::{ChartWithHelp, PlotlyChart, RawChartWithHelp, TitleWithHelp};
-use cr_types::TargetingMethod;
+use cr_types::{GenomeName, TargetingMethod};
 use metric::{TxHashMap, TxHashSet};
-use plotly::common::{Anchor, DashType, Line, Mode};
-use plotly::layout::{Axis, HoverMode, Legend, Margin, Shape, ShapeLine, ShapeType};
+use plotly::common::{Anchor, Line, Mode};
+use plotly::layout::{Axis, HoverMode, Legend, Margin};
 use plotly::traces::Scatter;
 use plotly::Layout;
 use regex::Regex;
@@ -10,20 +11,13 @@ use serde::Deserialize;
 use serde_json::Value;
 
 // CONSTANTS / LABELS
-const SATURATION_LINE: f64 = 0.9;
-
-const CMO_JIBES_BIPLOT_TITLE: &str = "Biplots of CMO Count";
-const CMO_JIBES_BIPLOT_HELP_TEXT: &str = "The plot shows the relationships between Cell Multiplexing Oligo (CMO) UMI counts for cells. Each point is a cell and the X and Y axes are UMI counts for a given CMO in the log10 scale. The CMOs on the axes can be changed with the selector. The cells which are not confidently assigned to CMO Tags are indicated. The number of cells has been downsampled to a maximum count of 100,000.";
-
-const CMO_TAGS_ON_TSNE_PLOT_HELP_TEXT: &str = "Shown here are the CMO tag assignments for each cell-barcode. The axes correspond to the 2-dimensional embedding produced by the t-SNE algorithm over multiplexing features. In this space, pairs of cells that are close to each other have more similar Multiplexing Capture profiles than cells that are distant from each other. The display is limited to a random subset of cells.";
-const CMO_TAGS_ON_TSNE_PLOT_TITLE: &str = "t-SNE Projection of Cells by CMO";
 
 const BARCODE_RANK_PLOT_TITLE: &str = "Barcode Rank Plot";
 const BARCODE_RANK_PLOT_HELP_TEXT: &str = "The plot shows filtered UMI counts mapped to each GEM barcode. Barcode-cell associations can be determined by UMI count or expression profile, or removed by Protein Aggregate Detection and Filtering and/or High Occupancy GEM Filtering steps. Therefore, some regions of the graph contain both cell-associated and background-associated barcodes. When present, Gene Expression data is used to identify these barcode populations. The color of the graph is based on the local density of barcodes that are cell-associated in these regions. Hovering over the plot displays the total number and percentage of barcodes in that region called as cells along with the number of UMI counts for those barcodes and barcode rank, ordered in descending order of UMI counts.";
 
 const SEQUENCING_SATURATION_PLOT_X_LABEL: &str = "Mean Reads per Cell";
 const SEQUENCING_SATURATION_PLOT_Y_LABEL: &str = "Sequencing Saturation";
-const LIBRARY_SEQUENCING_SATURATION_PLOT_HELP_TEXT: &str = "This plot shows the Sequencing Saturation metric as a function of downsampled sequencing depth (measured in mean reads per cell), up to the observed sequencing depth. Sequencing Saturation is a measure of the observed library complexity, and approaches 1.0 (100%) when all converted mRNA transcripts (or ligation products in the context of Fixed RNA Profiling libraries) have been sequenced. The slope of the curve near the endpoint can be interpreted as an upper bound to the benefit to be gained from increasing the sequencing depth beyond this point. The dotted line is drawn at a value reasonably approximating the saturation point.";
+const LIBRARY_SEQUENCING_SATURATION_PLOT_HELP_TEXT: &str = "This plot shows the Sequencing Saturation metric as a function of downsampled sequencing depth (measured in mean reads per cell), up to the observed sequencing depth. Sequencing Saturation is a measure of the observed library complexity, and approaches 1.0 (100%) when all converted mRNA transcripts (or ligation products in the context of Flex libraries) have been sequenced. The slope of the curve near the endpoint can be interpreted as an upper bound to the benefit to be gained from increasing the sequencing depth beyond this point.";
 
 const MEDIAN_GENES_PLOT_X_LABEL: &str = "Mean Reads per Cell";
 const MEDIAN_GENES_PLOT_Y_LABEL: &str = "Median Genes per Cell";
@@ -49,51 +43,42 @@ pub fn standard_layout(x_label: &str, y_label: &str) -> Layout {
         )
 }
 
-pub fn sequencing_saturation_layout(x_label: &str, y_label: &str, x_max: f64) -> Layout {
-    standard_layout(x_label, y_label)
-        .y_axis(Axis::new().title(y_label).range(vec![0.0, 1.0]))
-        .shapes(vec![Shape::new()
-            .shape_type(ShapeType::Line)
-            .x0(0)
-            .y0(SATURATION_LINE)
-            .x1(x_max)
-            .y1(SATURATION_LINE)
-            .line(
-                ShapeLine::new()
-                    .color("#999999")
-                    .width(4.0)
-                    .dash(DashType::Dot),
-            )])
+pub fn sequencing_saturation_layout(x_label: &str, y_label: &str) -> Layout {
+    standard_layout(x_label, y_label).y_axis(Axis::new().title(y_label).range(vec![0.0, 1.0]))
 }
 
-pub fn format_jibes_biplots(plot: &Value) -> RawChartWithHelp {
+pub fn format_jibes_biplots(plot: &Value, feature: &str) -> RawChartWithHelp {
     RawChartWithHelp {
         plot: plot.clone(),
         help: TitleWithHelp {
-            help: CMO_JIBES_BIPLOT_HELP_TEXT.to_string(),
-            title: CMO_JIBES_BIPLOT_TITLE.to_string(),
+            title: format!("Biplots of {feature} UMI Counts"),
+            help: format!(
+                "The plot shows the relationships between {feature} UMI counts for cells. Each point is a cell and the X and Y axes are UMI counts for a given {feature} in the log10 scale. The {feature}s on the axes can be changed with the selector. The cells which are not confidently assigned to {feature}s are indicated. The number of cells has been downsampled to a maximum count of 100,000."
+            ),
         },
     }
 }
 
-pub fn format_umi_on_tsne_plot(plot: &Value, library_type: &str, title: &str) -> RawChartWithHelp {
+pub fn format_umi_on_umap_plot(plot: &Value, library_type: &str, title: &str) -> RawChartWithHelp {
     RawChartWithHelp {
         plot: plot.clone(),
         help: TitleWithHelp {
             help: format!(
-                "Shown here are the total {library_type} UMI counts for each cell-barcode. The axes correspond to the 2-dimensional embedding produced by the t-SNE algorithm over the {library_type} features. In this space, pairs of cells that are close to each other have more similar {library_type} profiles than cells that are distant from each other. The display is limited to a random subset of cells."
+                "Shown here are the total {library_type} UMI counts for each cell-barcode. The axes correspond to the 2-dimensional embedding produced by the UMAP algorithm over the {library_type} features. In this space, pairs of cells that are close to each other have more similar {library_type} profiles than cells that are distant from each other. The display is limited to a random subset of cells."
             ),
             title: title.to_string(),
         },
     }
 }
 
-pub fn format_tags_on_tsne_plot(plot: &Value) -> RawChartWithHelp {
+pub fn format_tags_on_umap_plot(plot: &Value, library_type: &str) -> RawChartWithHelp {
     RawChartWithHelp {
         plot: plot.clone(),
         help: TitleWithHelp {
-            help: CMO_TAGS_ON_TSNE_PLOT_HELP_TEXT.to_string(),
-            title: CMO_TAGS_ON_TSNE_PLOT_TITLE.to_string(),
+            help: format!(
+                "Shown here are the tag assignments for each cell-barcode. The axes correspond to the 2-dimensional embedding produced by the UMAP algorithm over {library_type} features. In this space, pairs of cells that are close to each other have more similar {library_type} profiles than cells that are distant from each other. The display is limited to a random subset of cells."
+            ),
+            title: "UMAP Projection of Cells Colored by Tag Assignment".to_string(),
         },
     }
 }
@@ -103,9 +88,9 @@ pub fn format_histogram(plot: &Value, feature: &str) -> RawChartWithHelp {
         plot: plot.clone(),
         help: TitleWithHelp {
             help: format!(
-                "Histogram of {feature} counts per cell, for each {feature}.  The X-axis is the UMI counts in the log scale, while the Y-axis is the number of cells."
+                "Histogram of {feature} UMI counts per cell, for each {feature}.  The X-axis is the UMI counts in the log scale, while the Y-axis is the number of cells."
             ),
-            title: format!("Histogram of {feature} Count"),
+            title: format!("Histogram of {feature} UMI Counts"),
         },
     }
 }
@@ -183,7 +168,6 @@ pub fn library_sequencing_saturation_plot_from_metrics(
     let layout = sequencing_saturation_layout(
         SEQUENCING_SATURATION_PLOT_X_LABEL,
         SEQUENCING_SATURATION_PLOT_Y_LABEL,
-        *x_data.last().unwrap_or(&0.),
     );
     let data = vec![Scatter::new(x_data, y_data)
         .mode(Mode::Lines)
@@ -200,7 +184,7 @@ pub fn library_sequencing_saturation_plot_from_metrics(
 // TODO: Get rid of this and create a simple deserializeable data structure representing this data inside subsample.py and pass that forward
 pub fn sample_median_genes_plot_from_metrics(
     metrics: &TxHashMap<String, Value>,
-    genomes: TxHashSet<String>,
+    genomes: TxHashSet<GenomeName>,
     plot_type: PlotType,
     targeting_method: Option<TargetingMethod>,
 ) -> ChartWithHelp {
@@ -209,7 +193,7 @@ pub fn sample_median_genes_plot_from_metrics(
 
 pub fn library_median_genes_plot_from_metrics(
     metrics: &TxHashMap<String, Value>,
-    genomes: TxHashSet<String>,
+    genomes: TxHashSet<GenomeName>,
     plot_type: PlotType,
     targeting_method: Option<TargetingMethod>,
 ) -> ChartWithHelp {
@@ -218,7 +202,7 @@ pub fn library_median_genes_plot_from_metrics(
 
 fn median_genes_plot_from_metrics(
     metrics: &TxHashMap<String, Value>,
-    genomes: TxHashSet<String>,
+    genomes: TxHashSet<GenomeName>,
     plot_type: PlotType,
     targeting_method: Option<TargetingMethod>,
     is_sample: bool,
@@ -234,15 +218,15 @@ fn median_genes_plot_from_metrics(
             r"^(.+)_raw_rpc_(\d+)_subsampled_filtered_bcs_median_unique_genes_detected_ontarget$",
         )
     };
-    let get_xy_data = move |re: Regex| -> TxHashMap<&str, Vec<(f64, f64)>> {
-        let mut xy_data: TxHashMap<&str, Vec<(f64, f64)>> = TxHashMap::default();
+    let get_xy_data = move |re: Regex| -> TxHashMap<GenomeName, Vec<(f64, f64)>> {
+        let mut xy_data: TxHashMap<GenomeName, Vec<(f64, f64)>> = TxHashMap::default();
 
         for (metric_name, metric_value) in metrics {
             if let Some(cap) = re.captures(metric_name) {
-                let genome = cap.get(1).unwrap().as_str();
+                let genome = GenomeName::from(cap.get(1).unwrap().as_str());
                 // don't want to plot "multi" genome
                 // also skips "ANTIBODY_", "MULTIPLEXING",
-                if !genomes.contains(genome) {
+                if !genomes.contains(&genome) {
                     continue;
                 }
 
@@ -256,7 +240,7 @@ fn median_genes_plot_from_metrics(
     };
 
     fn make_scatter_data(
-        xy_data: TxHashMap<&str, Vec<(f64, f64)>>,
+        xy_data: TxHashMap<GenomeName, Vec<(f64, f64)>>,
         label_suffix: &str,
     ) -> Vec<Scatter<f64, f64>> {
         xy_data

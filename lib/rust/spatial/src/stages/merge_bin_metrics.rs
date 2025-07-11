@@ -1,4 +1,5 @@
 //! Martian stage MergeBinMetrics
+#![allow(missing_docs)]
 
 use anyhow::Result;
 use cr_types::MetricsFile;

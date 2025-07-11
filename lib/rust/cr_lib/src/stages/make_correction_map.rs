@@ -1,4 +1,5 @@
 //! Martian stage MAKE_CORRECTION_MAP
+#![allow(missing_docs)]
 
 use anyhow::Result;
 use barcode::BarcodeConstruct;
@@ -111,7 +112,7 @@ impl MartianStage for MakeCorrectionMap {
 
         let correction_map_builders = chemistry_def.barcode_construct().map_result(|bc| {
             bc.whitelist()
-                .as_source(false)
+                .as_source()
                 .and_then(|src| src.as_whitelist().map(|wl| CorrectionMapBuilder::new(&wl)))
         })?;
 

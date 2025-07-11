@@ -1,5 +1,4 @@
-#![allow(dead_code, unused_variables)]
-
+#![allow(missing_docs)]
 use crate::aligner::BarcodeSummary;
 use crate::testing::diff_metrics;
 use anyhow::{Context, Result};
@@ -295,12 +294,7 @@ pub fn check_bam_file_correctness(actual_bam: &Path, expected_bam: &Path) -> Res
 
 fn check_bam_header_correctness(actual_bam: &Path, expected_bam: &Path) -> Result<()> {
     let tags_to_check = ["@HD", "@SQ", "@RG", "@CO\t10x_bam_to_fastq:R"];
-    let pred = |x: &&str| -> bool {
-        tags_to_check
-            .iter()
-            .map(|tag| x.starts_with(tag))
-            .any(|x| x)
-    };
+    let pred = |x: &&str| -> bool { tags_to_check.iter().any(|tag| x.starts_with(tag)) };
 
     let actual_header = String::from_utf8(
         bam::Reader::from_path(actual_bam)?

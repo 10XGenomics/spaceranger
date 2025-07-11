@@ -1,4 +1,5 @@
 //! high-level louvain implementation
+#![deny(missing_docs)]
 
 use leiden::clustering::{Clustering, SimpleClustering};
 use leiden::louvain::Louvain;
@@ -60,16 +61,16 @@ pub(crate) fn run_louvain(
     let mut louvain = Louvain::new(resolution, seed);
 
     let mut score = cpm(resolution, &network, &clustering);
-    info!("louvain starting cpm score: {:.6}", score);
+    info!("louvain starting cpm score: {score:.6}");
     let now = Instant::now();
     for i in 0.. {
         let updated = louvain.iterate_one_level(&network, &mut clustering);
-        info!("  iteration {}", i);
+        info!("  iteration {i}");
         let new_score = cpm(resolution, &network, &clustering);
-        info!("    cpm score: {:.6}", new_score);
+        info!("    cpm score: {new_score:.6}");
         if !updated || (new_score - score) <= TOLERANCE {
             info!("louvain optimized in {} iterations", i + 1);
-            info!("louvain final cpm score: {:.6}", new_score);
+            info!("louvain final cpm score: {new_score:.6}");
             break;
         }
         score = new_score;
@@ -89,16 +90,16 @@ pub(crate) fn run_louvain_parallel(neighbors: &Array2<u32>, resolution: f64) -> 
     let mut louvain = ParallelLouvain::new(resolution);
 
     let mut score = par_cpm(resolution, &network, &clustering);
-    info!("louvain starting cpm score {:.6}", score);
+    info!("louvain starting cpm score {score:.6}");
     let now = Instant::now();
     for i in 0.. {
         let updated = louvain.iterate_one_level(&network, &mut clustering);
-        info!("  iteration {}", i);
+        info!("  iteration {i}");
         let new_score = par_cpm(resolution, &network, &clustering);
-        info!("    cpm score: {:.6}", new_score);
+        info!("    cpm score: {new_score:.6}");
         if !updated || ((new_score - score) < TOLERANCE) {
             info!("louvain optimized in {} iterations", i + 1);
-            info!("louvain final cpm score: {:.6}", new_score);
+            info!("louvain final cpm score: {new_score:.6}");
             break;
         }
         score = new_score;

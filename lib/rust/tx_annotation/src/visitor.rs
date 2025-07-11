@@ -57,7 +57,7 @@
 //! There are two types of operations the are defined on the graph
 //! 1. **Visit** a node: Every method in the `AnnotatedReadVisitor` trait is a
 //!    visit to one of the nodes in the graph (`visit_*`). Each function is a hook to potentially
-//!    overridde what happens when you visit that node. Each function's default implementation
+//!    override what happens when you visit that node. Each function's default implementation
 //!    recursively visits the children via the corresponding `walk_` method. e.g., the
 //!    `visit_barcode_read_annotations` method by default calls `walk_barcode_read_annotations`.
 //!    Each overridden visit method has full control over what happens with its node, it can do
@@ -68,6 +68,7 @@
 //!    read level. The `walk_` function at the barcode level visits each of the read nodes (by
 //!    calling various `visit_*` functions) and the `walk_` function at the read level visits
 //!    various annotation properties of the read.
+#![deny(missing_docs)]
 
 use crate::mark_dups::DupInfo;
 use crate::read::{AnnotationInfo, ReadAnnotations};

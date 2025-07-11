@@ -7,6 +7,7 @@
 //! This is a shim to accomodate code written from when DETECT_CHEMISTRY only
 //! produced a single output, and ideally should be eliminated from the pipeline
 //! through long-term refactoring.
+#![allow(missing_docs)]
 
 use anyhow::{anyhow, Result};
 use cr_types::chemistry::{ChemistryDef, ChemistryDefs};
@@ -39,7 +40,7 @@ impl MartianMain for ExtractSingleChemistry {
             chemistry_def: if let Some(library_to_extract) = args.library_to_extract {
                 args.chemistry_defs
                     .get(&library_to_extract)
-                    .ok_or_else(|| anyhow!("no chemistry for {} is present", library_to_extract))?
+                    .ok_or_else(|| anyhow!("no chemistry for {library_to_extract} is present"))?
                     .clone()
             } else {
                 args.chemistry_defs.into_values().dedup().exactly_one()?

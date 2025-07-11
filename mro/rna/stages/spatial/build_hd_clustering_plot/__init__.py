@@ -11,7 +11,11 @@ import skimage
 from PIL import Image
 
 from cellranger.analysis.singlegenome import UMAP_NAME, SingleGenomeAnalysis
-from cellranger.spatial.hd_cs_websummary_plt_utils import get_cmap, plot_umap_image
+from cellranger.spatial.hd_cs_websummary_plt_utils import (
+    cluster_color_rgb,
+    plot_umap_image,
+    rgb_to_hex,
+)
 from cellranger.spatial.hd_feature_slice import (
     GENE_EXPRESSION_CLUSTERING,
     GRAPHCLUSTERING_NAME,
@@ -41,39 +45,12 @@ stage BUILD_HD_CLUSTERING_PLOT(
     out json      cluster_plot,
     src py        "stages/spatial/build_hd_clustering_plot",
 ) using (
-    mem_gb   = 10,
+    mem_gb   = 12,
     volatile = strict,
 )
 """
 
 TISSUE_IMAGE_DISPLAY_WIDTH = 400
-
-COLOR_PALETTE_NAME = "turbo"
-
-
-def rgb_to_hex(rgb: list[int]) -> str:
-    """Convert an RGB color to a hex string."""
-    return f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
-
-
-def _color_map_rgb(norm_value: float) -> list[int]:
-    """Get the color for a value in a color map."""
-    color_map = get_cmap(COLOR_PALETTE_NAME)
-    return color_map(norm_value, bytes=True)[:3]
-
-
-def cluster_color_rgb(cluster_num: int, num_clusters: int) -> list[int]:
-    """Get the color for a cluster. Cluster numbers start at 1."""
-    assert 1 <= cluster_num <= num_clusters
-    if num_clusters == 1:
-        return _color_map_rgb(0.5)
-
-    # Sample odd clusters from the left side of the color map and even clusters from the right side
-    # cluster_pos is the position of the cluster in the color map
-    cluster_pos = (cluster_num - 1) * 2
-    cluster_pos = cluster_pos % num_clusters + cluster_pos // num_clusters
-
-    return _color_map_rgb(cluster_pos / (num_clusters - 1))
 
 
 @dataclass
@@ -213,6 +190,7 @@ class AllBinLevelsData:
                                         analysis.differential_expression[clustering_key],
                                         analysis.clusterings[clustering_key],
                                         analysis,
+                                        is_hd=True,
                                     ),
                                 ).data,
                                 cls=ReactComponentEncoder,

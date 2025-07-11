@@ -1,4 +1,5 @@
 //! SetupBinning stage code
+#![allow(missing_docs)]
 
 use crate::square_bin_name::SquareBinName;
 use itertools::Itertools;
@@ -14,6 +15,7 @@ pub struct SetupBinningStageInputs {
     no_secondary_analysis: Option<bool>,
     scales: Vec<u32>,
     custom_bin_size: Option<u32>,
+    disable_segmentation_in: Option<bool>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, MartianStruct)]
 pub struct BinLevelInfo {
@@ -26,6 +28,7 @@ pub struct BinLevelInfo {
 pub struct SetupBinningStageOutputs {
     bin_infos: TxHashMap<SquareBinName, BinLevelInfo>,
     disable_binning: bool,
+    disable_segmentation: bool,
 }
 
 // This is our stage struct
@@ -46,6 +49,7 @@ impl MartianMain for SetupBinning {
         let default_return = Ok(SetupBinningStageOutputs {
             bin_infos: TxHashMap::default(),
             disable_binning: true,
+            disable_segmentation: true,
         });
 
         match args.slide_name {
@@ -85,6 +89,7 @@ impl MartianMain for SetupBinning {
                             })
                             .try_collect()?,
                         disable_binning: false,
+                        disable_segmentation: args.disable_segmentation_in != Some(false),
                     })
                 } else {
                     default_return

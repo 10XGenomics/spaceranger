@@ -1,4 +1,5 @@
 //! MatchVdjOuts stage code
+#![allow(missing_docs)]
 
 use crate::write_contig_proto::ProtoFile;
 use anyhow::Result;

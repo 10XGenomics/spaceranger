@@ -7,8 +7,8 @@ import json
 import shutil
 
 import cellranger.websummary.spatial_build_web_summary as sp_build
-from cellranger.spatial.data_utils import estimate_mem_gb_pandas_csv
 from cellranger.spatial.loupe_util import LoupeParser
+from cellranger.spatial.spatial_pandas_utils import estimate_mem_gb_pandas_csv
 from cellranger.websummary.react_components import ReactComponentEncoder
 from cellranger.websummary.react_summarize import write_html_file
 
@@ -29,7 +29,7 @@ struct SpatialFolder(
 )
 
 stage SPATIAL_REPORTER(
-    in  json[]            summaries,
+    in  json              summary,
     in  string            sample_id,
     in  string            sample_desc,
     in  map<ChemistryDef> chemistry_defs,
@@ -75,6 +75,7 @@ stage SPATIAL_REPORTER(
     in  bool              slide_id_mismatch,
     in  bool              is_visium_hd,
     in  string            itk_error_string,
+    in  bool              grabcut_failed,
     out html              web_summary,
     out json              web_summary_json,
     out json              metrics_summary_json,
@@ -92,7 +93,7 @@ stage SPATIAL_REPORTER(
 
 def split(args):
     mem_gb = max(
-        4.0,
+        6.0,
         LoupeParser.estimate_mem_gb_from_json_file(args.loupe_alignment_file),
         1.0 + estimate_mem_gb_pandas_csv(args.filtered_barcodes),
     )
@@ -105,11 +106,6 @@ def split(args):
 
 
 def join(args, outs, _chunk_defs, _chunk_outs):
-    if args.target_panel_summary is not None:
-        args.summaries.append(args.target_panel_summary)
-    if args.ab_qc_summary is not None:
-        args.summaries.append(args.ab_qc_summary)
-
     ### make a web summary
     web_sum_data = sp_build.create_common_spatial_summaries(
         args=args,

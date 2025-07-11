@@ -1,3 +1,4 @@
+#![deny(missing_docs)]
 use anyhow::{Context, Result};
 use std::fs::File;
 use std::io::BufReader;
@@ -5,13 +6,14 @@ use std::path::Path;
 use tiff::decoder::Decoder;
 use tiff::tags::Tag;
 
-// Custom tags written by the CytAssist software.
+// Custom tags written by the CytAssist software. The source of truth for this is
+// the embedded apps repo.
 const SLIDE_ID_TAG: Tag = Tag::Unknown(65002);
 const CAPTURE_AREA_TAG: Tag = Tag::Unknown(65010);
 
-const CYTA_ERROR: &str = r#"
+const CYTA_ERROR: &str = r"
 Invalid --cytaimage provided. File does not seem to be 
-an unaltered image from the CytAssist instrument."#;
+an unaltered image from the CytAssist instrument.";
 
 #[derive(Debug, PartialEq)]
 pub struct CytassistMetadata {

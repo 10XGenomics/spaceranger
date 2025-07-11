@@ -28,7 +28,11 @@ def main(args, outs):
         args: MRO args
         outs: MRO outs
     """
-    loupe_files = {sample_def[cr_constants.AGG_CLOUPE_FIELD] for sample_def in args.sample_defs}
+    loupe_files = {
+        sample_def[cr_constants.AGG_CLOUPE_FIELD]
+        for sample_def in args.sample_defs
+        if cr_constants.AGG_CLOUPE_FIELD in sample_def
+    }
     joined_files = ",".join(loupe_files)
     verify_call = [
         "crconverter",

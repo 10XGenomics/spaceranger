@@ -1,3 +1,6 @@
+//! multi::cmo_set
+#![allow(missing_docs)]
+
 use anyhow::{bail, Result};
 use cr_types::reference::feature_reference::{FeatureDef, FeatureType};
 use cr_types::types::FeatureBarcodeType;

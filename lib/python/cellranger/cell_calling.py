@@ -18,8 +18,8 @@ from cellranger.analysis.diffexp import adjust_pvalue_bh
 from cellranger.chemistry import (
     CHEMISTRY_DESCRIPTION_FIELD,
     CHEMISTRY_SC3P_LT,
-    CHEMISTRY_SC3P_V3,
     HT_CHEMISTRIES,
+    SC3P_V3_CHEMISTRIES,
     SC3P_V4_CHEMISTRIES,
     SC5P_CHEMISTRIES,
     SC5P_V3_CHEMISTRIES,
@@ -114,7 +114,7 @@ class NonAmbientBarcodeResult(NamedTuple):
 def get_empty_drops_fdr(chemistry_description: str) -> float:
     """Gets the maximum adjusted p-value to call a barcode as non-ambient."""
     # The chips used with V4 have roughly double the GEMs as the older V3 chips
-    chemistries = SC3P_V4_CHEMISTRIES + [CHEMISTRY_SC3P_V3] + SC5P_CHEMISTRIES + HT_CHEMISTRIES
+    chemistries = SC3P_V4_CHEMISTRIES + SC3P_V3_CHEMISTRIES + SC5P_CHEMISTRIES + HT_CHEMISTRIES
     chem_names = [chem[CHEMISTRY_DESCRIPTION_FIELD] for chem in chemistries]
     return 0.001 if chemistry_description in chem_names else 0.01
 
@@ -142,7 +142,7 @@ def get_empty_drops_range(chemistry_description: str, num_probe_bcs: int | None)
             n_partitions = 40000 * num_probe_bcs
     elif num_probe_bcs is not None:
         # Flex
-        n_partitions = 45000 * num_probe_bcs if num_probe_bcs >= 2 else 90000
+        n_partitions = 90000 * num_probe_bcs
     else:
         n_partitions = 90000
     return (n_partitions // 2, n_partitions)
@@ -281,7 +281,7 @@ def find_nonambient_barcodes(
     print(f"Min observed P-value: {min(pvalues_adj)}")
     is_nonambient = pvalues_adj <= max_adj_pvalue
 
-    print(f"Ambient bcs identified by empty drops: {sum(is_nonambient)}")
+    print(f"Non-ambient bcs identified by empty drops: {sum(is_nonambient)}")
 
     return NonAmbientBarcodeResult(
         eval_bcs=eval_bcs,

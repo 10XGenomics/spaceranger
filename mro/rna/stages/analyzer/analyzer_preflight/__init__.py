@@ -115,7 +115,7 @@ def main(args, outs):
     # if we're using the defaults and the matrix doesn't have enough data, skip analysis
     if args.max_clusters is None and total_bcs < analysis_constants.MAX_N_CLUSTERS_DEFAULT:
         martian.log_info(
-            "Feature-barcode matrix is tiny (num_cells = %d) - skipping analysis." % total_bcs
+            f"Feature-barcode matrix is tiny (num_cells = {total_bcs}) - skipping analysis."
         )
         outs.skip = True
         outs.disable_run_pca = True
@@ -124,7 +124,7 @@ def main(args, outs):
         return
     if args.num_principal_comps is None and total_genes <= 1:
         martian.log_info(
-            "Feature-barcode matrix is tiny (num_genes = %d) - skipping analysis." % total_genes
+            f"Feature-barcode matrix is tiny (num_genes = {total_genes}) - skipping analysis."
         )
         outs.skip = True
         outs.disable_run_pca = True
@@ -138,9 +138,9 @@ def main(args, outs):
             martian.exit("Cannot specify both --barcodes and --force-cells in the same run.")
         if args.force_cells > total_bcs:
             martian.exit(
-                "Desired cell count (%d) is greater than the number of barcodes in the matrix (%d). "
+                f"Desired cell count ({args.force_cells}) is greater than "
+                f"the number of barcodes in the matrix ({total_bcs}). "
                 "Try passing in the raw (unfiltered) feature-barcode matrix instead, if available."
-                % (args.force_cells, total_bcs)
             )
         total_bcs = args.force_cells
 

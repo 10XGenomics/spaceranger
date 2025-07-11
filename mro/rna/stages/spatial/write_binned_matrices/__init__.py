@@ -33,7 +33,7 @@ def split(args):
         args.raw_matrix_h5, scale=h5_constants.VIS_HD_MATRIX_MEM_GB_MULTIPLIER
     )
     mem_gb = (
-        2 * int(mem_gb + 1) + 2
+        2 * int(mem_gb + 1) + 6
     )  # twice the memory of raw matrix as we store the raw and filtered matrix
 
     return {

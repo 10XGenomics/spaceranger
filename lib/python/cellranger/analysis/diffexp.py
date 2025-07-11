@@ -161,7 +161,7 @@ def run_differential_expression(
         in_cluster = clusters == cluster
         group_a = np.flatnonzero(in_cluster)
         group_b = np.flatnonzero(np.logical_not(in_cluster))
-        print("Computing DE for cluster %d..." % cluster)
+        print(f"Computing DE for cluster {cluster}...")
         sys.stdout.flush()
 
         de_result = sseq_differential_expression(matrix.m, group_a, group_b, sseq_params)
@@ -200,9 +200,9 @@ def save_differential_expression_csv(
             ]
         elif cluster_names is None:
             diff_expression_header += [
-                "Cluster %d Mean Counts" % (i + 1),
-                "Cluster %d Log2 fold change" % (i + 1),
-                "Cluster %d Adjusted p value" % (i + 1),
+                f"Cluster {i+1} Mean Counts",
+                f"Cluster {i+1} Log2 fold change",
+                f"Cluster {i+1} Adjusted p value",
             ]
         else:
             diff_expression_header += [
@@ -230,9 +230,9 @@ def save_differential_expression_csv_from_features(
     n_clusters = de.data.shape[1] // 3
     for i in range(n_clusters):
         diff_expression_header += [
-            "Cluster %d Mean Counts" % (i + 1),
-            "Cluster %d Log2 fold change" % (i + 1),
-            "Cluster %d Adjusted p value" % (i + 1),
+            f"Cluster {i+1} Mean Counts",
+            f"Cluster {i+1} Log2 fold change",
+            f"Cluster {i+1} Adjusted p value",
         ]
 
     analysis_io.save_matrix_csv(

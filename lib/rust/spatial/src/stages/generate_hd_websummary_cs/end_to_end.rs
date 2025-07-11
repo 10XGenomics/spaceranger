@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use serde::Serialize;
 use tenx_websummary::components::{
     Card, CardWidth, HdEndToEndAlignment, InlineHelp, Title, TwoColumn, WithTitle,
@@ -67,7 +68,7 @@ impl EndToEndAlignment {
 </p>
 "#;
 
-    const IMAGE_ALIGNMENT_TAB_HELP_TEXT: &'static str = r#"
+    const IMAGE_ALIGNMENT_TAB_HELP_TEXT: &'static str = r"
 <p>
     This image shows the 8 µm binned total UMI count overlaid on the high-resolution microscope image. If a high-resolution image is not supplied, the CytAssist image is used.
 </p>
@@ -77,7 +78,7 @@ impl EndToEndAlignment {
 <p>
     Check to confirm that the UMI counts match tissue morphology and expected expression patterns. If there is a mismatch, confirm that the correct FASTQ and image files were used when Space Ranger was run and that sample preparation and library generation guidelines were correctly followed.
 </p>
-"#;
+";
     fn new(alignment: HdEndToEndAlignment, layout: EndToEndLayout) -> Self {
         match layout {
             EndToEndLayout::SummaryTab => Self {

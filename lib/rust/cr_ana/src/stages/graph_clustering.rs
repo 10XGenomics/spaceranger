@@ -1,4 +1,5 @@
 //! Graph-clustering (Louvain) + merge-clusters stage code
+#![allow(missing_docs)]
 
 use crate::io::{csv, h5};
 use crate::louvain::{run_louvain, run_louvain_parallel};
@@ -23,6 +24,7 @@ const RANDOM_SEED: usize = 0xBADC0FFEE0DDF00D;
 const ACTIVE_FEATURE_TYPES: &[FeatureType] = &[
     FeatureType::Gene,
     FeatureType::Barcode(cr_types::FeatureBarcodeType::Antibody),
+    FeatureType::ProteinExpression,
 ];
 
 #[derive(
@@ -83,7 +85,7 @@ pub struct GraphClusteringChunkInputs {
 
 pub struct GraphClusteringStage;
 
-#[make_mro(stage_name = RUN_GRAPH_CLUSTERING_NG, volatile = strict)]
+#[make_mro(stage_name = RUN_GRAPH_CLUSTERING, volatile = strict)]
 impl MartianStage for GraphClusteringStage {
     type StageInputs = GraphClusteringStageInputs;
     type StageOutputs = GraphClusteringStageOutputs;
@@ -141,7 +143,7 @@ impl MartianStage for GraphClusteringStage {
         let (matrix, _) = read_adaptive_csr_matrix(&args.matrix_h5, None, None)?;
         let k = args.compute_k()?;
 
-        info!("computing k-nearest neighbors with k = {}", k);
+        info!("computing k-nearest neighbors with k = {k}");
         let neighbors = knn::<u32>(&proj.view(), k);
 
         info!("running louvain");

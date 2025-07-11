@@ -1,11 +1,12 @@
+#![deny(missing_docs)]
 use crate::align_metrics::{AlignAndCountVisitor, BarcodeMetrics, LibFeatThenBarcodeOrder};
 use crate::aligner::BarcodeSummary;
 use anyhow::Result;
 use cr_types::types::LibraryType;
-use fxhash::FxHashMap;
 use martian_filetypes::LazyWrite;
+use metric::TxHashMap;
+use rand::rngs::SmallRng;
 use rand::Rng;
-use rand_chacha::ChaCha20Rng;
 use shardio::ShardSender;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashSet;
@@ -19,8 +20,8 @@ pub(crate) struct StageVisitor<W>
 where
     W: LazyWrite<ReadAnnotations, BufWriter<File>>,
 {
-    visitors: FxHashMap<LibraryType, AlignAndCountVisitor>,
-    ann_writer: Option<(W, f32, ChaCha20Rng)>,
+    visitors: TxHashMap<LibraryType, AlignAndCountVisitor>,
+    ann_writer: Option<(W, f32, SmallRng)>,
     // Number of reads written to the `ann_writer`
     ann_writer_num_reads: usize,
     metrics_sender: ShardSender<BarcodeMetrics, LibFeatThenBarcodeOrder>,
@@ -36,7 +37,7 @@ where
         target_genes: Option<HashSet<Gene>>,
     ) -> Self {
         StageVisitor {
-            visitors: FxHashMap::default(),
+            visitors: TxHashMap::default(),
             ann_writer: None,
             ann_writer_num_reads: 0,
             metrics_sender,
@@ -49,10 +50,10 @@ where
         target_genes: Option<HashSet<Gene>>,
         ann_writer: W,
         sample_rate: f32,
-        rng: ChaCha20Rng,
+        rng: SmallRng,
     ) -> Self {
         StageVisitor {
-            visitors: FxHashMap::default(),
+            visitors: TxHashMap::default(),
             ann_writer: Some((ann_writer, sample_rate, rng)),
             ann_writer_num_reads: 0,
             metrics_sender,
@@ -89,7 +90,7 @@ where
 {
     fn visit_read_annotation(&mut self, annotation: &ReadAnnotations) {
         if let Some((ref mut writer, rate, rng)) = self.ann_writer.as_mut() {
-            if rng.gen_range(0.0..1.0) < *rate {
+            if rng.random_bool(*rate as f64) {
                 self.ann_writer_num_reads += 1;
                 writer
                     .write_item(annotation)

@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use crate::arc::types::{validate_distance, MAX_CLUSTERS_RANGE};
 use crate::mrp_args::MrpArgs;
 use crate::utils::{validate_id, CliPath};

@@ -1,5 +1,6 @@
 //! Martian stage GET_CHEMISTRY_DEF
 //! Load chemistry def from a chemistry name or a custom chemistry def
+#![allow(missing_docs)]
 
 use anyhow::Result;
 use cr_types::chemistry::{ChemistryDef, ChemistryName};

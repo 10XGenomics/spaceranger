@@ -3,6 +3,7 @@
 //! - <https://openseadragon.github.io/examples/tilesource-dzi/>
 //! - <https://learn.microsoft.com/en-us/previous-versions/windows/silverlight/dotnet-windows-silverlight/cc645077(v=vs.95)>
 //!
+#![allow(missing_docs)]
 
 use anyhow::{bail, Context, Result};
 use image::{Rgb, RgbImage};
@@ -61,17 +62,44 @@ impl BaseDziPath {
     }
 }
 /// Reader for a specific tile in the DZI image
-struct TileReader {
+pub struct TileReader {
     w: usize,
     h: usize,
     tile_size: usize,
     overlap: usize,
     image: RgbImage,
+    raw_bytes: Vec<u8>,
 }
 
 impl TileReader {
+    pub fn raw_bytes(&self) -> &[u8] {
+        &self.raw_bytes
+    }
+    pub fn non_overlapping_image(&self) -> RgbImage {
+        let start_w = if self.w == 0 { 0 } else { self.overlap };
+        let start_h = if self.h == 0 { 0 } else { self.overlap };
+
+        let end_w = (start_w + self.tile_size).min(self.image.width() as usize);
+        let end_h = (start_h + self.tile_size).min(self.image.height() as usize);
+
+        let mut image = RgbImage::new((end_w - start_w) as u32, (end_h - start_h) as u32);
+
+        for y in start_h..end_h {
+            let yt = y - start_h;
+            for x in start_w..end_w {
+                let xt = x - start_w;
+                image.put_pixel(
+                    xt as u32,
+                    yt as u32,
+                    *self.image.get_pixel(x as u32, y as u32),
+                );
+            }
+        }
+        image
+    }
     /// Iterate over the non overlapping pixels in this tile.
-    /// Returns an iterator of (x, y, pixel)
+    /// Returns an iterator of (x, y, pixel) where (x, y) are the coordinates of the pixel in the
+    /// fully tiled image at this level.
     fn iter_non_overlaping(
         &self,
         pixel_range: &PixelRange,
@@ -110,8 +138,6 @@ impl TileReader {
 
 #[derive(Debug)]
 pub struct DziReader {
-    #[allow(dead_code)]
-    info: DziInfo,
     tile_size: usize,
     width: usize,
     height: usize,
@@ -193,7 +219,6 @@ impl DziReader {
 
         Ok(DziReader {
             overlap: info.image.overlap.parse()?,
-            info,
             tile_size,
             tiles_path,
             relative_path,
@@ -206,28 +231,43 @@ impl DziReader {
         pixel / self.tile_size
     }
 
+    pub fn max_level(&self) -> usize {
+        self.max_level
+    }
+
+    pub fn min_level(&self) -> usize {
+        (self.tile_size as f64).log2().ceil() as usize
+    }
+
+    pub fn tile_size(&self) -> usize {
+        self.tile_size
+    }
+
+    pub fn overlap(&self) -> usize {
+        self.overlap
+    }
+
     fn tile_range(&self, Range { start, end }: Range<usize>) -> Range<usize> {
         self.tile_num(start)..(self.tile_num(end) + 1)
     }
 
-    fn read_tile(&self, level: usize, w_tile: usize, h_tile: usize) -> Result<Option<TileReader>> {
+    pub fn read_tile(
+        &self,
+        level: usize,
+        w_tile: usize,
+        h_tile: usize,
+    ) -> Result<Option<TileReader>> {
         let full_relative_path = self
             .relative_path
             .join(level.to_string())
             .join(format!("{w_tile}_{h_tile}.png"));
-        match &self.tiles_path {
+        let raw_bytes = match &self.tiles_path {
             BaseDziPath::Folder(tiles_path) => {
                 let path = tiles_path.join(full_relative_path);
                 if !path.exists() {
-                    Ok(None)
+                    None
                 } else {
-                    Ok(Some(TileReader {
-                        w: w_tile,
-                        h: h_tile,
-                        tile_size: self.tile_size,
-                        overlap: self.overlap,
-                        image: image::ImageReader::open(path)?.decode()?.into_rgb8(),
-                    }))
+                    Some(std::fs::read(path)?)
                 }
             }
             BaseDziPath::ZipFile(zip_path) => {
@@ -236,20 +276,26 @@ impl DziReader {
                 if let Ok(mut zip_file) = zip_file {
                     let mut tile_bytes = vec![];
                     let _ = zip_file.read_to_end(&mut tile_bytes)?;
-                    Ok(Some(TileReader {
-                        w: w_tile,
-                        h: h_tile,
-                        tile_size: self.tile_size,
-                        overlap: self.overlap,
-                        image: image::ImageReader::new(Cursor::new(tile_bytes))
-                            .with_guessed_format()?
-                            .decode()?
-                            .into_rgb8(),
-                    }))
+                    Some(tile_bytes)
                 } else {
-                    Ok(None)
+                    None
                 }
             }
+        };
+
+        match raw_bytes {
+            Some(raw_bytes) => Ok(Some(TileReader {
+                w: w_tile,
+                h: h_tile,
+                tile_size: self.tile_size,
+                overlap: self.overlap,
+                image: image::ImageReader::new(Cursor::new(&raw_bytes))
+                    .with_guessed_format()?
+                    .decode()?
+                    .into_rgb8(),
+                raw_bytes,
+            })),
+            None => Ok(None),
         }
     }
 
@@ -274,5 +320,11 @@ impl DziReader {
         }
 
         Ok(buffer)
+    }
+    pub fn width(&self) -> usize {
+        self.width
+    }
+    pub fn height(&self) -> usize {
+        self.height
     }
 }

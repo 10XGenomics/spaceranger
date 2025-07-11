@@ -4,6 +4,7 @@
 //! Typically in all our assays, the UMI sequence is a random k-mer with a
 //! length of 10 or 12 bases.
 //!
+#![allow(missing_docs)]
 
 use arrayvec::ArrayVec;
 use fastq_set::sseq::SSeqGen;
@@ -17,7 +18,7 @@ const NUM_SPLINT_BASES: usize = 4;
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct SplintToUmiTranslator {
-    sequences: ArrayVec<[SplintSeq; 4]>,
+    sequences: ArrayVec<SplintSeq, 4>,
     max_allowed_hamming_distance: u32,
 }
 
@@ -47,7 +48,7 @@ impl SplintToUmiTranslator {
     }
 
     pub fn translate(&self, query: &[u8]) -> u8 {
-        let hamming_distances: ArrayVec<[u32; 4]> = self
+        let hamming_distances: ArrayVec<u32, 4> = self
             .sequences
             .iter()
             .map(|seq| triple_accel::hamming(seq.as_bytes(), query))

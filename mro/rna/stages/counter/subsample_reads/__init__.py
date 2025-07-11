@@ -45,31 +45,31 @@ def split(args):
     if len(subsamplings) == 0:
         return {"chunks": []}
 
-    # Split the molecule info h5 into equi-RAM chunks
-    chunks = []
-    # Use smaller chunks because this code is a slower than other users of mol_info
-    tgt_chunk_len = cr_constants.NUM_MOLECULE_INFO_ENTRIES_PER_CHUNK // 4
-
     with cr_mc.MoleculeCounter.open(args.molecule_info, "r") as mc:
         num_filtered_barcodes = mc.get_num_filtered_barcodes()
         num_subsamplings = len(subsamplings)
-        mem_gib_chunk = 3 + round(20 * num_filtered_barcodes * num_subsamplings / 1024**3, 1)
+        mem_gib_chunk = 5 + round(100 * num_filtered_barcodes * num_subsamplings / 1024**3, 1)
         mem_gib_join = 1 + round(150 * num_filtered_barcodes * num_subsamplings / 1024**3, 1)
         print(f"{num_filtered_barcodes=},{num_subsamplings=},{mem_gib_chunk=},{mem_gib_join=}")
 
-        for chunk_start, chunk_len in mc.get_chunks(tgt_chunk_len, preserve_boundaries=True):
-            chunks.append(
-                {
-                    "chunk_start": int(chunk_start),
-                    "chunk_len": int(chunk_len),
-                    "subsample_info": subsamplings,
-                    "__mem_gb": mem_gib_chunk,
-                    # cr_ss.run_subsampling requires additional VMEM
-                    "__vmem_gb": 3 + 3 * mem_gib_chunk,
-                }
+        chunks = [
+            {
+                "chunk_start": chunk_start,
+                "chunk_len": chunk_len,
+                "subsample_info": subsamplings,
+                "__mem_gb": mem_gib_chunk,
+                # cr_ss.run_subsampling requires additional VMEM
+                "__vmem_gb": 3 + 3 * mem_gib_chunk,
+            }
+            for chunk_start, chunk_len in mc.get_chunks(
+                cr_constants.NUM_MOLECULE_INFO_ENTRIES_PER_CHUNK, preserve_boundaries=True
             )
+        ]
 
-    return {"chunks": chunks, "join": {"__mem_gb": mem_gib_join}}
+    return {
+        "chunks": chunks,
+        "join": {"__mem_gb": mem_gib_join},
+    }
 
 
 def main(args, outs):

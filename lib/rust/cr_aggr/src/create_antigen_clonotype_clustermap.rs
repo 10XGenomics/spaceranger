@@ -1,4 +1,5 @@
 //! CreateClonotypeClustermap stage code
+#![allow(missing_docs)]
 
 use anyhow::Result;
 use cr_websummary::multi::antigen::{clonotype_specificity_heatmap, AntigenSpecificityRow};

@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use anyhow::{bail, ensure, Result};
 use clap::{self, Parser};
 use ordered_float::NotNan;

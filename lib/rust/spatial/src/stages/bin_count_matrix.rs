@@ -1,12 +1,12 @@
 //! Martian stage BIN_COUNT_MATRIX_PD
+#![allow(missing_docs)]
 
 use anyhow::Result;
 use barcode::binned::SquareBinIndex;
 use barcode::Barcode;
 use cr_bam::constants::{ALN_BC_DISK_CHUNK_SZ, ALN_BC_ITEM_BUFFER_SZ, ALN_BC_SEND_BUFFER_SZ};
 use cr_types::{
-    BarcodeIndex, BarcodeIndexFormat, BarcodeThenFeatureOrder, CountShardFile, FeatureBarcodeCount,
-    H5File,
+    BarcodeIndexFormat, BarcodeThenFeatureOrder, CountShardFile, FeatureBarcodeCount, H5File,
 };
 use hd_feature_slice::FeatureSliceH5;
 use itertools::Itertools;
@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use shardio::{ShardReader, ShardWriter};
 use slide_design::{GridIndex2D, SpotPacking, Transform, VisiumHdSlide};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Deserialize, MartianStruct)]
 pub struct BinCountMatrixStageInputs {
@@ -133,7 +134,7 @@ pub struct BinCountMatrixStageOutputs {
 // This is our stage struct
 pub struct BinCountMatrix;
 
-#[make_mro(mem_gb = 12, volatile = strict, stage_name = BIN_COUNT_MATRIX)]
+#[make_mro(mem_gb = 30, volatile = strict, stage_name = BIN_COUNT_MATRIX)]
 impl MartianMain for BinCountMatrix {
     type StageInputs = BinCountMatrixStageInputs;
     type StageOutputs = BinCountMatrixStageOutputs;
@@ -221,22 +222,24 @@ impl MartianMain for BinCountMatrix {
         sender.finished()?;
         binned_bc_counts.finish()?;
 
-        let binned_barcode_index_file = {
-            // The matrix produced in `MATRIX_COMPUTER` only includes barcodes that
-            // have at least one read. Reading the barcode index ensures that the
-            // binned raw matrices follow the same convention.
-            let binned_barcode_index: BarcodeIndex = args
-                .barcode_index
-                .read()?
-                .sorted_barcodes()
-                .iter()
-                .map(|bc| binned_barcode_of_barcode[bc])
-                .unique()
-                .collect();
-            rover
-                .make_path::<BarcodeIndexFormat>("binned_barcode_index")
-                .with_content(&binned_barcode_index)?
-        };
+        // The matrix produced in `MATRIX_COMPUTER` only includes barcodes that
+        // have at least one read. Reading the barcode index ensures that the
+        // binned raw matrices follow the same convention.
+        let binned_barcode_index_file = args
+            .barcode_index
+            .lazy_reader()?
+            .process_results(|bc_iter| {
+                BarcodeIndexFormat::write(
+                    &rover.make_path::<PathBuf>("binned_barcode_index"),
+                    bc_iter
+                        .map(|bc| binned_barcode_of_barcode[&bc])
+                        // The result of binning sorted barcodes are not sorted or
+                        // unique, thus we need to sort and deduplicate them.
+                        .sorted()
+                        .dedup(),
+                )
+            })??
+            .index;
 
         let filtered_bin_barcodes_file: JsonFile<_> = rover.make_path("filtered_bin_barcodes");
         filtered_bin_barcodes_file.write(

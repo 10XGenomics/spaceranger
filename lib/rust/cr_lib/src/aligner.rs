@@ -1,8 +1,10 @@
+#![allow(missing_docs)]
 use crate::align_homopolymer::count_homopolymer_matches;
 use crate::stages::align_and_count;
 use crate::types::AnnSpillFormat;
 use anyhow::Result;
 use barcode::{Barcode, BarcodeContent};
+use cr_types::chemistry::ChemistryDefsExt;
 use cr_types::constants::ILLUMINA_QUAL_OFFSET;
 use cr_types::probe_set::ProbeSetReference;
 use cr_types::reference::feature_extraction::{FeatureData, FeatureExtractor};
@@ -14,9 +16,10 @@ use cr_types::FeatureBarcodeType;
 use fastq_set::adapter_trimmer::{Adapter, AdapterTrimmer, TrimResult};
 use fastq_set::WhichRead;
 use martian::MartianFileType;
+use metric::TxHasher;
 use orbit::StarAligner;
+use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
-use rand_chacha::ChaCha20Rng;
 use rust_htslib::bam::record::{Aux, Cigar, CigarString, Record};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -215,34 +218,22 @@ pub struct Aligner {
     aligner: Option<StarAligner>,
     extractor: Arc<FeatureExtractor>,
     reference: Arc<FeatureReference>,
-    annotator: Arc<ReadAnnotator>,
+    annotator: Option<Arc<ReadAnnotator>>,
     target_panel_reference: Option<Arc<ProbeSetReference>>,
     read_chunks: Vec<RnaChunk>,
     filter_umis: bool,
     spill_folder: PathBuf,
-    targeted_umi_min_read_count: Option<u64>,
 }
 
 /// Seeds an RNG using a barcode sequence
 ///
 /// used for deterministic random sampling of feature bc reads for txome alignment for PD metric
-fn barcode_seeded_rng(barcode: Barcode) -> ChaCha20Rng {
-    match barcode.content() {
-        BarcodeContent::Sequence(seq) => {
-            let mut pd_seed: [u8; 32] = [0; 32];
-            for (i, b) in seq.iter().enumerate() {
-                if i >= 32 {
-                    break;
-                }
-                pd_seed[i] = *b;
-            }
-            ChaCha20Rng::from_seed(pd_seed)
-        }
-        BarcodeContent::SpatialIndex(index) => {
-            let seed = ((index.row as u64) << 32) + index.col as u64;
-            ChaCha20Rng::seed_from_u64(seed)
-        }
-    }
+fn barcode_seeded_rng(barcode: Barcode) -> SmallRng {
+    SmallRng::seed_from_u64(match barcode.content() {
+        BarcodeContent::Sequence(seq) => TxHasher::hash(seq),
+        BarcodeContent::SpatialIndex(index) => ((index.row as u64) << 32) + index.col as u64,
+        BarcodeContent::CellName(cell_id) => cell_id.id as u64,
+    })
 }
 
 impl Aligner {
@@ -251,25 +242,22 @@ impl Aligner {
         aligner: Option<StarAligner>,
         reference: FeatureReference,
         feature_dist: Vec<f64>,
-        annotator: ReadAnnotator,
+        annotator: Option<ReadAnnotator>,
         read_chunks: Vec<RnaChunk>,
         spill_folder: PathBuf,
-        targeted_umi_min_read_count: Option<u64>,
         target_panel_reference: Option<ProbeSetReference>,
     ) -> Result<Aligner> {
         let reference = Arc::new(reference);
-        let extractor = FeatureExtractor::new(reference.clone(), None, Some(feature_dist))?;
-
+        let extractor = FeatureExtractor::new(reference.clone(), Some(feature_dist))?;
         Ok(Aligner {
             aligner,
             extractor: Arc::new(extractor),
             reference,
-            annotator: Arc::new(annotator),
+            annotator: annotator.map(Arc::new),
             read_chunks,
             filter_umis: true,
             spill_folder,
             target_panel_reference: target_panel_reference.map(Arc::new),
-            targeted_umi_min_read_count,
         })
     }
 
@@ -294,8 +282,9 @@ impl Aligner {
         // First pass through the reads
         for read in reads {
             let read = read?;
-            let pd_align_feature_bc_read =
-                args.is_pd && self.aligner.is_some() && pd_rng.gen_bool(PD_FRAC_FB_READS_TO_ALIGN);
+            let pd_align_feature_bc_read = args.is_pd
+                && self.aligner.is_some()
+                && pd_rng.random_bool(PD_FRAC_FB_READS_TO_ALIGN);
             let ann = self.annotate_read(args, read, pd_align_feature_bc_read);
             dup_builder
                 .entry(ann.read.library_type)
@@ -304,6 +293,7 @@ impl Aligner {
             annotations.push(ann)?;
         }
 
+        let chemistry_name = args.chemistry_defs.primary().name;
         let dup_marker: HashMap<_, _> = dup_builder
             .into_iter()
             .map(|(library_type, builder)| {
@@ -311,11 +301,12 @@ impl Aligner {
                     library_type,
                     builder.build(
                         self.filter_umis,
-                        match library_type.is_fb_type(FeatureBarcodeType::Multiplexing) {
+                        match library_type.is_fb_type(FeatureBarcodeType::Multiplexing)
+                            && !(chemistry_name.is_sc_3p_v4() || chemistry_name.is_sc_5p_v3())
+                        {
                             true => UmiCorrection::Disable,
                             false => UmiCorrection::Enable,
                         },
-                        self.targeted_umi_min_read_count,
                     ),
                 )
             })
@@ -345,7 +336,7 @@ impl Aligner {
         let qual = read.r1_qual();
         let panel_ref = self.target_panel_reference.as_ref().unwrap();
         let mapped_probe = panel_ref.align_probe_read(seq);
-        let recs = if args.no_bam {
+        let recs = if args.no_bam || args.reference_path.is_none() {
             let mut record = Aligner::new_unmapped_records(&read).0;
             if let (true, Some(lhs), Some(rhs)) = (
                 args.is_pd,
@@ -413,6 +404,8 @@ impl Aligner {
                     matched_tso: trim_results.matched_tso(),
                     ..self
                         .annotator
+                        .as_ref()
+                        .unwrap()
                         .annotate_read_pe(read, recs1, recs2, umi_info)
                 }
             }
@@ -453,7 +446,11 @@ impl Aligner {
                 // Annotate the alignments.
                 ReadAnnotations {
                     matched_tso: trim_results.matched_tso(),
-                    ..self.annotator.annotate_read_se(read, read_recs, umi_info)
+                    ..self
+                        .annotator
+                        .as_ref()
+                        .unwrap()
+                        .annotate_read_se(read, read_recs, umi_info)
                 }
             }
         }
@@ -636,7 +633,7 @@ pub struct AnnotationIter<'a> {
     feature_reference: &'a FeatureReference,
     probe_set_reference: Option<&'a Arc<ProbeSetReference>>,
     barcode_subsample_rate: f64,
-    rng: ChaCha20Rng,
+    rng: SmallRng,
 }
 
 impl<'a> AnnotationIter<'a> {
@@ -647,7 +644,7 @@ impl<'a> AnnotationIter<'a> {
         feature_reference: &'a FeatureReference,
         probe_set_reference: Option<&'a Arc<ProbeSetReference>>,
         barcode_subsample_rate: f64,
-        rng: ChaCha20Rng,
+        rng: SmallRng,
     ) -> Self {
         AnnotationIter {
             store,
@@ -661,7 +658,7 @@ impl<'a> AnnotationIter<'a> {
     }
 }
 
-impl<'a> Iterator for AnnotationIter<'a> {
+impl Iterator for AnnotationIter<'_> {
     type Item = Result<ReadAnnotations>;
 
     // next() is the only required method
@@ -669,7 +666,7 @@ impl<'a> Iterator for AnnotationIter<'a> {
         match self.store.next() {
             Some(Ok(mut ann)) => {
                 assert!(ann.dup_info.is_none());
-                ann.dup_info = if ann.read.barcode().is_valid() {
+                ann.dup_info = if ann.read.barcode_is_valid() {
                     self.dup_marker
                         .get_mut(&ann.read.library_type)
                         .unwrap()
@@ -696,8 +693,9 @@ impl<'a> Iterator for AnnotationIter<'a> {
 mod tests {
     use crate::aligner::{barcode_seeded_rng, Aligner};
     use barcode::{Barcode, BcSeq};
+    use metric::TxHasher;
+    use rand::rngs::SmallRng;
     use rand::{Rng, SeedableRng};
-    use rand_chacha::ChaCha20Rng;
     use rust_htslib::bam::record::{Aux, Cigar, CigarString, Record};
 
     #[test]
@@ -705,20 +703,15 @@ mod tests {
     fn test_barcode_seeded_rng() {
         // seed an RNG using a barcode sequence and get 3 random floats from it
         let mut bc_rng = barcode_seeded_rng(Barcode::with_seq(1, BcSeq::from_bytes(b"ACGT"), true));
-        let res1 = bc_rng.gen::<f64>();
-        let res2 = bc_rng.gen::<f64>();
-        let res3 = bc_rng.gen::<f64>();
+        let res1: f64 = bc_rng.random();
+        let res2: f64 = bc_rng.random();
+        let res3: f64 = bc_rng.random();
 
         // build the expected RNG and get 3 floats from it
-        let mut exp_seed = [0u8; 32];
-        exp_seed[0] = b'A';
-        exp_seed[1] = b'C';
-        exp_seed[2] = b'G';
-        exp_seed[3] = b'T';
-        let mut exp_rng: ChaCha20Rng = ChaCha20Rng::from_seed(exp_seed);
-        let exp1 = exp_rng.gen::<f64>();
-        let exp2 = exp_rng.gen::<f64>();
-        let exp3 = exp_rng.gen::<f64>();
+        let mut exp_rng = SmallRng::seed_from_u64(TxHasher::hash(b"ACGT"));
+        let exp1: f64 = exp_rng.random();
+        let exp2: f64 = exp_rng.random();
+        let exp3: f64 = exp_rng.random();
 
         // check that the generated random floats match
         assert_eq!(res1, exp1);

@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+#
+# Copyright (c) 2017 10x Genomics, Inc. All rights reserved.
+#
+# Run SC_RNA_AGGREGATOR_CS with mrp.
+#
+
+# shellcheck source=../rna/_includes
+source "$TENX_SCRIPTDIR/rna/_includes"
+
+DOCOPT_SPEC="$(cat <<EOF
+'$TENX_PRODUCT $TENX_SUBCMD' aggregates the feature/spot count data
+generated from multiple runs of the '$TENX_PRODUCT count' pipeline.
+
+To run this pipeline, supply a CSV that enumerates the paths to the
+molecule_info.h5 and cloupe.cloupe files produced by '$TENX_PRODUCT count'.
+You can optionaly provide the path to the spatial folder to copy images
+and merge tissue position lists.
+
+Please see the following URL for details on the CSV format:
+https://support.10xgenomics.com/spatial-gene-expression/software/overview/welcome
+
+The commands below should be preceded by '$TENX_PRODUCT':
+
+Usage:
+    $TENX_SUBCMD
+        --id=ID
+        --csv=CSV
+        [options]
+    $TENX_SUBCMD <run_id> <mro> [options]
+    $TENX_SUBCMD -h | --help | --version
+
+Arguments:
+    id                  A unique run id and output folder name [a-zA-Z0-9_-]+.
+    csv                 Path of CSV file enumerating '$TENX_PRODUCT count' outputs.
+
+Options:
+# Aggregation
+    $DOCOPT_OPTIONS_SAMPLE_INFO
+    --normalize=<mode>  Library depth normalization mode.
+                            Valid values: mapped, none [default: mapped].
+
+# Martian Runtime
+    $DOCOPT_OPTIONS_MRP_CLUSTER
+EOF
+)"
+
+function implement_process_options {
+    process_options_sample_info
+
+    # --csv
+    if [ -n "$csv" ]; then
+        aggregation_csv=\"$(abspath "$csv")\"
+    fi
+
+    # --normalize
+    if [ -n "$normalize" ]; then
+        normalization_mode="\"$normalize\""
+    fi
+
+
+    pipestance_root="\"$(pwd)\""
+}
+
+function implement_generate_sample_defs {
+    : # noop
+}
+
+function implement_generate_mro {
+    cat <<EOF > "$mro"
+@include "rna/spatial_rna_aggregator_cs.mro"
+
+call SPATIAL_RNA_AGGREGATOR_CS(
+    sample_id = $sample_id,
+    aggregation_csv = $aggregation_csv,
+    sample_desc = $sample_desc,
+    pipestance_root = $pipestance_root,
+    normalization_mode = $normalization_mode,
+)
+EOF
+}
+
+source "$TENX_SCRIPTDIR/tenkit/common/_subcmd_mrp"

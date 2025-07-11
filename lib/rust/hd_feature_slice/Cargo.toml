@@ -1,6 +1,5 @@
 [dependencies]
 colorous = '1'
-num-traits = '0.2'
 
 [dependencies.anyhow]
 workspace = true
@@ -21,13 +20,15 @@ path = '../dzi'
 workspace = true
 
 [dependencies.image]
-default-features = false
-version = '0.25'
+workspace = true
 
 [dependencies.itertools]
 workspace = true
 
 [dependencies.ndarray]
+workspace = true
+
+[dependencies.num-traits]
 workspace = true
 
 [dependencies.serde]
@@ -41,6 +42,9 @@ path = '../slide_design'
 
 [lib]
 test = false
+
+[lints]
+workspace = true
 
 [package]
 authors = ['10x Genomics']

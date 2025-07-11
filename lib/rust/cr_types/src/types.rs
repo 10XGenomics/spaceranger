@@ -1,4 +1,4 @@
-use crate::barcode_index::BarcodeIndex;
+#![allow(missing_docs)]
 use anyhow::{bail, ensure, Context, Result};
 use barcode::{Barcode, BarcodeConstruct, BarcodeFromString, BcSegSeq};
 use fastq_set::filenames::bcl2fastq::SampleNameSpec;
@@ -9,19 +9,19 @@ use martian_derive::{martian_filetype, MartianStruct, MartianType};
 use martian_filetypes::bin_file::BinaryFormat;
 use martian_filetypes::json_file::{JsonFile, JsonFormat};
 use martian_filetypes::FileTypeRead;
-use metric::{AsMetricPrefix, SimpleHistogram, TxHashMap, TxHashSet};
+use metric::{AsMetricPrefix, Histogram, SimpleHistogram, TxHashMap, TxHashSet};
 use serde::de::{IgnoredAny, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_with::{DeserializeFromStr, SerializeDisplay};
+use serde_with::DeserializeFromStr;
 use shardio::SortKey;
 use std::borrow::Cow;
 use std::convert::TryFrom;
-use std::fmt::{self, Formatter};
+use std::fmt::{self, Display, Formatter};
 use std::fs::read_to_string;
 use std::hash::Hash;
 use std::path::PathBuf;
 use std::str::FromStr;
-use strum_macros::{Display, EnumCount, EnumIter, EnumString};
+use strum_macros::{EnumString, IntoStaticStr};
 use umi::UmiType;
 
 // Used to indicate a UMI count does not come from a probe
@@ -41,27 +41,22 @@ pub type BcSegmentCountFormat = BinaryFormat<
     TxHashMap<LibraryType, BarcodeConstruct<SimpleHistogram<BcSegSeq>>>,
 >;
 
-martian_filetype! { BcCountFile, "bcc" }
-pub type BcCountDataType = TxHashMap<LibraryType, SimpleHistogram<Barcode>>;
-pub type BcCountFormat = BinaryFormat<BcCountFile, BcCountDataType>;
-
-martian_filetype! { TotalBcCountFile, "tbcc" }
-pub type TotalBcCountDataType = SimpleHistogram<Barcode>;
-pub type TotalBcCountFormat = BinaryFormat<TotalBcCountFile, TotalBcCountDataType>;
-
 martian_filetype!(FeatureCountFile, "fbc");
 pub type FeatureCountFormat = BinaryFormat<FeatureCountFile, Vec<i64>>;
 
 martian_filetype!(BarcodeSetFile, "blf");
 pub type BarcodeSetFormat = JsonFormat<BarcodeSetFile, TxHashSet<Barcode>>;
 
-martian_filetype!(BarcodeIndexFile, "bi");
-pub type BarcodeIndexFormat = BinaryFormat<BarcodeIndexFile, BarcodeIndex>;
-
 martian_filetype!(_FingerprintFile, "fprint");
 pub type FingerprintFile = JsonFormat<_FingerprintFile, Vec<Fingerprint>>;
 
 // End File Types
+
+/// A feature ID.
+pub type FeatureID = String;
+
+/// A feature name.
+pub type FeatureName = String;
 
 /// A genome name.
 #[derive(
@@ -81,6 +76,7 @@ pub type FingerprintFile = JsonFormat<_FingerprintFile, Vec<Fingerprint>>;
 pub struct GenomeName(String);
 
 impl GenomeName {
+    /// Return this genome name as a string slice.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -110,6 +106,12 @@ impl AsMetricPrefix for GenomeName {
     }
 }
 
+impl AsMartianPrimaryType for GenomeName {
+    fn as_martian_primary_type() -> MartianPrimaryType {
+        MartianPrimaryType::Str
+    }
+}
+
 /// A trait for reads that may have a sample index.
 pub trait HasSampleIndex {
     fn si_seq(&self) -> Option<&[u8]>;
@@ -118,7 +120,7 @@ pub trait HasSampleIndex {
 
 /// Count of the number of UMIs observed for one feature in one barcode.  Corresponds
 /// to a single entry in the feature x barcode matrix.
-#[derive(Serialize, Deserialize, Clone, Copy, Ord, PartialOrd, Eq, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Ord, PartialOrd, Eq, PartialEq)]
 pub struct FeatureBarcodeCount {
     pub barcode: Barcode,
     pub feature_idx: u32,
@@ -128,7 +130,7 @@ pub struct FeatureBarcodeCount {
 /// Sort by barcode and then by feature.
 pub struct BarcodeThenFeatureOrder;
 
-impl shardio::SortKey<FeatureBarcodeCount> for BarcodeThenFeatureOrder {
+impl SortKey<FeatureBarcodeCount> for BarcodeThenFeatureOrder {
     type Key = (Barcode, u32);
 
     fn sort_key(fbc: &FeatureBarcodeCount) -> Cow<'_, Self::Key> {
@@ -210,25 +212,30 @@ pub struct FileOrBytes {
     pub bytes: Option<String>,
 }
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq, Ord, PartialOrd, Copy, Serialize, Deserialize)]
-pub enum ReqStrand {
-    #[serde(rename = "+")]
-    Forward,
-    #[serde(rename = "-")]
-    Reverse,
-}
-
 macro_rules! enum_maker {
     ($(#[$meta:meta])* $name:ident, $( ($field:ident, $lit: literal $(, $alias: literal)*) ),*) => {
-        #[derive(EnumCount, EnumString, EnumIter, Display, Debug, PartialEq, Eq, Hash, Clone, Copy, PartialOrd, Ord, Serialize, Deserialize, MartianType)]
+        #[derive(
+            Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize,
+            EnumString, IntoStaticStr,
+        )]
+        $(#[$meta])*
         pub enum $name {
             $(
-                #[strum(to_string = $lit)]
                 #[serde(rename = $lit)]
-                $(#[serde(alias = $alias)]
-                #[strum(serialize = $alias)])*
+                #[strum(to_string = $lit)]
+                $(
+                    #[serde(alias = $alias)]
+                    #[strum(serialize = $alias)]
+                )*
                 $field,
             )*
+        }
+
+        impl $name {
+            /// Return the string representation of this variant.
+            pub fn as_str(&self) -> &'static str {
+                self.into()
+            }
         }
     };
 }
@@ -245,21 +252,25 @@ pub enum SampleAssignment {
     Assigned(SampleId),
 }
 
+impl SampleAssignment {
+    pub fn as_str(&self) -> &str {
+        match self {
+            SampleAssignment::NonMultiplexed => "non_multiplexed",
+            SampleAssignment::Unassigned => "unassigned",
+            SampleAssignment::Assigned(sample_id) => sample_id.as_str(),
+        }
+    }
+}
+
 impl AsMartianPrimaryType for SampleAssignment {
     fn as_martian_primary_type() -> MartianPrimaryType {
         MartianPrimaryType::Str
     }
 }
 
-impl fmt::Display for SampleAssignment {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = match self {
-            SampleAssignment::NonMultiplexed => "non_multiplexed".to_string(),
-            SampleAssignment::Unassigned => "unassigned".to_string(),
-            SampleAssignment::Assigned(sample_id) => sample_id.to_string(),
-        };
-
-        write!(f, "{s}")
+impl Display for SampleAssignment {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -282,9 +293,9 @@ impl<'de> Deserialize<'de> for SampleAssignment {
         D: Deserializer<'de>,
     {
         struct SampleAssignmentVisitor;
-        impl<'de> Visitor<'de> for SampleAssignmentVisitor {
+        impl Visitor<'_> for SampleAssignmentVisitor {
             type Value = SampleAssignment;
-            fn expecting(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+            fn expecting(&self, f: &mut Formatter<'_>) -> fmt::Result {
                 f.write_str(
                     "A string of either the assigned sample ID, \"unassigned\", or \"non_multiplexed\"",
                 )
@@ -442,17 +453,37 @@ impl BarcodeToSample<'_> {
 
 enum_maker! {
     /// Type of targeting
+    #[derive(MartianType)]
     TargetingMethod,
     (HybridCapture, "hybrid_capture"),
     (TemplatedLigation, "templated_ligation")
 }
 
 enum_maker! {
-    /// Type of multiplexing, CMO or RTL.
-    CellMultiplexingType,
-    (CMO, "CMO"),
+    /// Multiplexing information encoded at the level of reads.
+    ReadLevel,
     (RTL, "RTL"),
     (OH, "OH")
+}
+
+enum_maker! {
+    /// Multiplexing information encoded at the level of cells.
+    CellLevel,
+    (CMO, "CMO"),
+    (Hashtag, "Hashtag")
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum BarcodeMultiplexingType {
+    CellLevel(CellLevel),
+    ReadLevel(ReadLevel),
+}
+
+impl AsMartianPrimaryType for BarcodeMultiplexingType {
+    fn as_martian_primary_type() -> MartianPrimaryType {
+        MartianPrimaryType::Str
+    }
 }
 
 enum_maker! {
@@ -471,6 +502,7 @@ impl Default for VdjChainType {
 }
 
 enum_maker! {
+    #[derive(strum_macros::Display, strum_macros::EnumIter)]
     FeatureBarcodeType,
     (Antibody, "Antibody Capture"),
     (Antigen, "Antigen Capture"),
@@ -533,21 +565,10 @@ impl AsMetricPrefix for FeatureBarcodeType {
 /// An enum which encapsulates both a library type and all the features
 /// associated with it. All the gem wells in a single multi run should have
 /// an identical set of `LibraryType`
-// NOTE: we cannot use serde(untagged) due to incompatibility with bincode.
-// Thus the use of SerializeDisplay and DeserializeFromStr.
 #[derive(
-    Debug,
-    Default,
-    Copy,
-    Clone,
-    PartialOrd,
-    Ord,
-    PartialEq,
-    Eq,
-    Hash,
-    SerializeDisplay,
-    DeserializeFromStr,
+    Debug, Default, Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, DeserializeFromStr,
 )]
+#[serde(into = "&str")]
 pub enum LibraryType {
     #[default]
     GeneExpression,
@@ -556,14 +577,15 @@ pub enum LibraryType {
     Atac,
 }
 
-impl std::fmt::Display for LibraryType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::GeneExpression => write!(f, "{}", Self::GENE_EXPRESSION_STR),
-            Self::FeatureBarcodes(fb) => write!(f, "{fb}"),
-            Self::Vdj(ct) => write!(f, "{ct}"),
-            Self::Atac => write!(f, "{}", Self::ATAC_STR),
-        }
+impl Display for LibraryType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<LibraryType> for &'static str {
+    fn from(library_type: LibraryType) -> &'static str {
+        library_type.as_str()
     }
 }
 
@@ -571,19 +593,19 @@ impl FromStr for LibraryType {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s == Self::GENE_EXPRESSION_STR {
-            return Ok(Self::GeneExpression);
-        }
-        if let Ok(fb) = FeatureBarcodeType::from_str(s) {
-            return Ok(Self::FeatureBarcodes(fb));
-        }
-        if let Ok(ct) = VdjChainType::from_str(s) {
-            return Ok(Self::Vdj(ct));
-        }
-        if s == Self::ATAC_STR {
-            return Ok(Self::Atac);
-        }
-        bail!("unable to parse {s} as LibraryType");
+        Ok(match s {
+            Self::GENE_EXPRESSION_STR => Self::GeneExpression,
+            Self::ATAC_STR => Self::Atac,
+            _ => {
+                if let Ok(fb) = FeatureBarcodeType::from_str(s) {
+                    Self::FeatureBarcodes(fb)
+                } else if let Ok(ct) = VdjChainType::from_str(s) {
+                    Self::Vdj(ct)
+                } else {
+                    bail!("unable to parse {s} as LibraryType");
+                }
+            }
+        })
     }
 }
 
@@ -652,6 +674,16 @@ impl LibraryType {
         match self {
             Self::Vdj(ct) => Some(*ct),
             Self::GeneExpression | Self::FeatureBarcodes(_) | Self::Atac => None,
+        }
+    }
+
+    /// Return the string representation of this library type.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::GeneExpression => Self::GENE_EXPRESSION_STR,
+            Self::Atac => Self::ATAC_STR,
+            Self::FeatureBarcodes(x) => x.as_str(),
+            Self::Vdj(x) => x.as_str(),
         }
     }
 
@@ -761,7 +793,7 @@ pub enum Fingerprint {
         tag_name: SampleBarcodeID,
         /// Sample barcodes that were dynamically translated into this tag.
         translated_tag_names: Vec<SampleBarcodeID>,
-        cell_multiplexing_type: CellMultiplexingType,
+        barcode_multiplexing_type: BarcodeMultiplexingType,
     },
 }
 
@@ -774,13 +806,13 @@ impl Fingerprint {
         gem_well: GemWell,
         tag_name: SampleBarcodeID,
         translated_tag_names: Vec<SampleBarcodeID>,
-        cell_multiplexing_type: CellMultiplexingType,
+        barcode_multiplexing_type: BarcodeMultiplexingType,
     ) -> Self {
         Self::Tagged {
             gem_well,
             tag_name,
             translated_tag_names,
-            cell_multiplexing_type,
+            barcode_multiplexing_type,
         }
     }
 
@@ -810,26 +842,31 @@ impl Fingerprint {
         }
     }
 
-    pub fn cell_multiplexing_type(&self) -> Option<CellMultiplexingType> {
-        match *self {
+    pub fn barcode_multiplexing_type(&self) -> Option<BarcodeMultiplexingType> {
+        match self {
             Fingerprint::Untagged { .. } => None,
             Fingerprint::Tagged {
-                cell_multiplexing_type,
+                barcode_multiplexing_type: cell_multiplexing_type,
                 ..
-            } => Some(cell_multiplexing_type),
+            } => Some(*cell_multiplexing_type),
         }
     }
 
     pub fn is_cmo_multiplexed(&self) -> bool {
-        self.cell_multiplexing_type() == Some(CellMultiplexingType::CMO)
+        self.barcode_multiplexing_type() == Some(BarcodeMultiplexingType::CellLevel(CellLevel::CMO))
+    }
+
+    pub fn is_hashtag_multiplexed(&self) -> bool {
+        self.barcode_multiplexing_type()
+            == Some(BarcodeMultiplexingType::CellLevel(CellLevel::Hashtag))
     }
 
     pub fn is_rtl_multiplexed(&self) -> bool {
-        self.cell_multiplexing_type() == Some(CellMultiplexingType::RTL)
+        self.barcode_multiplexing_type() == Some(BarcodeMultiplexingType::ReadLevel(ReadLevel::RTL))
     }
 
     pub fn is_overhang_multiplexed(&self) -> bool {
-        self.cell_multiplexing_type() == Some(CellMultiplexingType::OH)
+        self.barcode_multiplexing_type() == Some(BarcodeMultiplexingType::ReadLevel(ReadLevel::OH))
     }
 }
 
@@ -847,10 +884,10 @@ pub struct Sample {
 impl Sample {
     /// Returns the cell multiplexing type in use.
     /// Panics if more than one is found, which should be impossible.
-    pub fn cell_multiplexing_type(&self) -> Option<CellMultiplexingType> {
+    pub fn barcode_multiplexing_type(&self) -> Option<BarcodeMultiplexingType> {
         self.fingerprints
             .iter()
-            .map(Fingerprint::cell_multiplexing_type)
+            .map(Fingerprint::barcode_multiplexing_type)
             .dedup()
             .exactly_one()
             .unwrap()
@@ -1045,7 +1082,7 @@ pub struct CrMultiGraph {
 impl CrMultiGraph {
     /// Return true if this analysis is using any form of multiplexing.
     pub fn is_multiplexed(&self) -> bool {
-        self.cell_multiplexing_type().is_some()
+        self.barcode_multiplexing_type().is_some()
     }
 
     /// Return true if one or more libraries is of the specified type.
@@ -1053,38 +1090,59 @@ impl CrMultiGraph {
         self.libraries.iter().any(|lib| lib.library_type == t)
     }
 
+    /// Return an iterator over all the library types in the experiment
+    pub fn library_types(&self) -> impl Iterator<Item = LibraryType> + '_ {
+        self.libraries.iter().map(|lib| lib.library_type)
+    }
+
     /// Return the cell multiplexing type in use, if there is one.
-    pub fn cell_multiplexing_type(&self) -> Option<CellMultiplexingType> {
+    pub fn barcode_multiplexing_type(&self) -> Option<BarcodeMultiplexingType> {
         self.samples
             .iter()
-            .map(Sample::cell_multiplexing_type)
+            .map(Sample::barcode_multiplexing_type)
             .dedup()
             .exactly_one()
             .unwrap()
     }
-}
 
-#[derive(
-    EnumString,
-    Display,
-    Debug,
-    PartialEq,
-    Eq,
-    Hash,
-    Clone,
-    Copy,
-    PartialOrd,
-    Ord,
-    Serialize,
-    Deserialize,
-)]
-pub enum NormalizationMode {
-    #[strum(to_string = "mapped")]
-    MappedReadsPerCell,
-    #[strum(to_string = "none")]
-    None,
-    #[strum(to_string = "reads_per_umi")]
-    ReadsPerUmi,
+    /// Returns if the multiplexing type is read-level or not.
+    pub fn is_read_level_multiplexed(&self) -> bool {
+        matches!(
+            self.barcode_multiplexing_type(),
+            Some(BarcodeMultiplexingType::ReadLevel(_))
+        )
+    }
+
+    /// Returns if the multiplexing type is cell-level or not.
+    pub fn is_cell_level_multiplexed(&self) -> bool {
+        matches!(
+            self.barcode_multiplexing_type(),
+            Some(BarcodeMultiplexingType::CellLevel(_))
+        )
+    }
+
+    /// Returns a map from demux tag name (e.g. OCM barcode ID or probe barcode ID) to sample ID information.
+    pub fn get_tag_name_to_sample_id_map(&self) -> Result<TxHashMap<&str, (&str, &[String])>> {
+        self.samples
+            .iter()
+            .flat_map(|sample| {
+                sample.fingerprints.iter().map(|fingerprint| {
+                    let Fingerprint::Tagged {
+                        tag_name,
+                        translated_tag_names,
+                        ..
+                    } = fingerprint
+                    else {
+                        bail!("found an untagged fingerprint when creating tag name map: {fingerprint:?}");
+                    };
+                    Ok((
+                        tag_name.as_str(),
+                        (sample.sample_id.as_str(), translated_tag_names.as_slice()),
+                    ))
+                })
+            })
+            .collect()
+    }
 }
 
 #[derive(Deserialize, Serialize, Debug, PartialOrd, Ord, PartialEq, Eq)]
@@ -1127,45 +1185,6 @@ impl TryFrom<LibraryInfo> for crate::aggr::LibraryInfo {
         }
     }
 }
-
-// TODO: Enable this when we extend to aggr groups
-// We need to keep track of per sample metadata
-/*
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AggregationReference {
-    pub aggr_id: String,
-
-    /// Samples to include in this aggregation. Each string
-    /// must correspond to a declared sample
-    pub sample_ids: Vec<String>,
-
-    /// algorithm to use for count normalization,
-    pub normalization: NormalizationMode,
-
-    /// Sample metadata column to for creating batch
-    /// labels for chemistry batch correction.
-    /// None disables CBC.
-    pub batch_variable: Option<String>,
-}
-
-// pointer to one group of cells in a sample. If fingerprint is null, take all cells from the GemWell.
-// It is invalid to point to a GemWell with Multiplexing with a fingerprint of None.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SampleReference {
-    fingerprint: Option<Fingerprint>,
-    gem_well: GemWell,
-}
-
-impl SampleReference {
-    pub fn new(fingerprint: Option<Fingerprint>, gem_well: GemWell) -> SampleReference {
-        SampleReference {
-            fingerprint,
-            gem_well,
-        }
-    }
-}
-
-*/
 
 /// The aligner used to align the reads to the reference.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, MartianType, EnumString, Deserialize, Serialize)]
@@ -1280,7 +1299,7 @@ mod py_api_tests {
                 GemWell(1),
                 "CMO500".into(),
                 Vec::default(),
-                CellMultiplexingType::CMO,
+                BarcodeMultiplexingType::CellLevel(CellLevel::CMO),
             ),
         )?;
 
@@ -1291,7 +1310,7 @@ mod py_api_tests {
                 GemWell(2),
                 "CMO500".into(),
                 Vec::default(),
-                CellMultiplexingType::CMO,
+                BarcodeMultiplexingType::CellLevel(CellLevel::CMO),
             ),
         )?;
 
@@ -1302,7 +1321,7 @@ mod py_api_tests {
                 GemWell(1),
                 "CMO501".into(),
                 Vec::default(),
-                CellMultiplexingType::CMO,
+                BarcodeMultiplexingType::CellLevel(CellLevel::CMO),
             ),
         )?;
 
@@ -1313,7 +1332,7 @@ mod py_api_tests {
                 GemWell(2),
                 "CMO501".into(),
                 Vec::default(),
-                CellMultiplexingType::CMO,
+                BarcodeMultiplexingType::CellLevel(CellLevel::CMO),
             ),
         )?;
 

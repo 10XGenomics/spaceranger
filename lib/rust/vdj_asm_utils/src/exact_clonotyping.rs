@@ -1,9 +1,13 @@
+#![allow(missing_docs)]
 use anyhow::{anyhow, Result};
+use barcode::Barcode;
 use itertools::Itertools;
 use martian_filetypes::json_file::JsonFile;
 use martian_filetypes::LazyFileTypeIO;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{HashMap, HashSet};
+use std::str::FromStr;
 use vdj_ann::annotate::ContigAnnotation;
 use vdj_types::{VdjChain, VdjRegion};
 
@@ -13,6 +17,12 @@ pub struct ExactClonotype {
     pub id: String,
     pub identity: Vec<ProductiveContig>,
     pub barcodes: Vec<String>,
+}
+
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct BarcodeContigUMI {
+    pub barcode: Barcode,
+    pub umi: usize,
 }
 
 /// Contig-level information for exact-clonotype grouping.
@@ -80,9 +90,11 @@ pub fn generate_exact_clonotypes(
     let mut prod_contigs_per_bc = HashMap::<String, Vec<ProductiveContig>>::new();
     for ann in all_contigs_json.lazy_reader()? {
         let ann: ContigAnnotation = ann?;
-        let prod_contigs = prod_contigs_per_bc.entry(ann.barcode.clone()).or_default();
-        if let Some(true) = ann.productive {
-            prod_contigs.push(ProductiveContig::new(&ann)?);
+        if ann.is_cell && ann.is_productive() {
+            prod_contigs_per_bc
+                .entry(ann.barcode.clone())
+                .or_default()
+                .push(ProductiveContig::new(&ann)?);
         }
     }
     let mut exact_clonotypes_map: HashMap<Vec<ProductiveContig>, Vec<String>> = Default::default();
@@ -104,4 +116,30 @@ pub fn generate_exact_clonotypes(
         })
         .collect::<Vec<ExactClonotype>>();
     Ok(exact_clonotypes_vec)
+}
+
+pub fn generate_exact_contigs(
+    all_contigs_json: &JsonFile<Vec<ContigAnnotation>>,
+    cell_bcs: HashSet<String>,
+) -> Result<HashMap<ProductiveContig, Vec<BarcodeContigUMI>>> {
+    let mut bcs_per_prodcontig = HashMap::<ProductiveContig, Vec<BarcodeContigUMI>>::new();
+    for ann in all_contigs_json.lazy_reader()? {
+        let ann: ContigAnnotation = ann?;
+        if ann.is_productive() && cell_bcs.contains(&ann.barcode) {
+            bcs_per_prodcontig
+                .entry(ProductiveContig::new(&ann)?)
+                .or_default()
+                .push(BarcodeContigUMI {
+                    barcode: Barcode::from_str(&ann.barcode)?,
+                    umi: ann.umi_count,
+                });
+        }
+    }
+
+    // sort the barcodes associated with each exact contig in descending order of umi counts
+    bcs_per_prodcontig
+        .values_mut()
+        .for_each(|bcs| bcs.sort_by_key(|a| Reverse(a.umi)));
+
+    Ok(bcs_per_prodcontig)
 }

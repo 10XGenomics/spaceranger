@@ -71,6 +71,7 @@ pipeline SPATIAL_RNA_AGGREGATOR_CS(
         tsne_mom_switch_iter     = null,
         product_type             = "sp",
         is_pd                    = false,
+        enable_tsne              = true,
     )
 
     call CLOUPE_PREPROCESS(
@@ -101,6 +102,9 @@ pipeline SPATIAL_RNA_AGGREGATOR_CS(
         spatial_enrichment           = null,
         spatial_deconvolution_path   = null,
         disable_cloupe               = null,
+        matrix_type                  = null,
+        spatial_cell_segment_mask    = null,
+        spatial_cell_segment_geojson = null,
     )
 
     call DECONVOLVE_SPOTS(

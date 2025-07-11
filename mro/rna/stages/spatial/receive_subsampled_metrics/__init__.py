@@ -11,8 +11,8 @@ import polars as pl
 
 import cellranger.websummary.plotly_tools as pltly
 from cellranger.websummary.analysis_tab_aux import (
-    RTL_SEQ_SATURATION_PLOT_HELP,
     SPATIAL_HD_MEAN_GENE_PLOT_HELP_JSON_STRING,
+    VISIUM_HD_RTL_SEQ_SATURATION_PLOT_HELP,
 )
 
 PLOTLY_EXPRESS_TEMPLATE = "none"
@@ -54,11 +54,12 @@ def main(args, outs):
             },
             template=PLOTLY_EXPRESS_TEMPLATE,
         )
+        sat_plot.update_layout(yaxis_range=[0, 1])
 
         sat_plot_dict = json.loads(sat_plot.to_json())
         sat_plot_dict.update({"config": pltly.PLOT_CONFIG})
         titled_saturation_plot = {
-            "title": RTL_SEQ_SATURATION_PLOT_HELP,
+            "title": VISIUM_HD_RTL_SEQ_SATURATION_PLOT_HELP,
             "inner": sat_plot_dict,
         }
     else:

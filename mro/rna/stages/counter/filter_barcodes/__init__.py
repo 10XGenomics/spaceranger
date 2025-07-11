@@ -43,12 +43,10 @@ from cellranger.fast_utils import (  # pylint: disable=no-name-in-module,unused-
     save_filtered_bcs_groups,
 )
 from cellranger.feature.antibody.analysis import FRACTION_CORRECTED_READS, FRACTION_TOTAL_READS
+from cellranger.matrix import CountMatrix
 from cellranger.metrics import BarcodeFilterResults
 from cellranger.read_level_multiplexing import get_overhang_bc_defn, get_sample_tag_barcodes
-from cellranger.reference_paths import get_reference_genomes
 from cellranger.targeted.rtl_multiplexing import get_probe_bc_defn
-from cellranger.targeted.simple_utils import determine_targeting_type_from_csv
-from cellranger.targeted.targeted_constants import TARGETING_METHOD_HC
 
 PROBE_BC_SAMPLE_ID = "id"
 PROBE_BC_SEQS = "sequence"
@@ -102,10 +100,8 @@ stage FILTER_BARCODES(
     in  h5                matrices_h5,
     in  csv               barcode_correction_csv,
     in  bool              is_antibody_only,
-    in  path              reference_path,
     in  int[]             gem_groups,
-    in  CellCalling       config,
-    in  csv               target_set,
+    in  CellCalling       cell_calling_config,
     in  json              multi_graph,
     in  csv               per_barcode_metrics,
     in  bool              is_spatial,
@@ -134,7 +130,7 @@ def split(args):
     chemistry_def = cr_chemistry.get_primary_chemistry_def(args.chemistry_defs)
     chemistry_barcode = chemistry_def["barcode"]
 
-    mem_gb = 2 + cr_matrix.CountMatrix.get_mem_gb_from_matrix_h5(args.matrices_h5, scale=6)
+    mem_gb = 2 + CountMatrix.get_mem_gb_from_matrix_h5(args.matrices_h5, scale=6)
 
     if args.multi_graph is None:
         return {
@@ -192,7 +188,7 @@ def join(args, outs, chunk_defs, chunk_outs):
 
     # high occupancy GEM filtering to mitigate any GEMs that appear overloaded
     # in initial cell calls. Only applies if input has probe bcs and not disabled.
-    config = helpers.CellCalling(args.config)
+    config = helpers.CellCalling(args.cell_calling_config)
     probe_bc_offset, _ = get_probe_bc_defn(chemistry_def["barcode"])
     if probe_bc_offset and not config.disable_high_occupancy_gem_detection:
         (
@@ -207,7 +203,7 @@ def join(args, outs, chunk_defs, chunk_outs):
         high_occupancy_gem_metrics = dataclasses.asdict(HighOccupancyGemSummary())
 
     # Select cell-associated barcodes
-    raw_matrix = cr_matrix.CountMatrix.load_h5_file(args.matrices_h5)
+    raw_matrix = CountMatrix.load_h5_file(args.matrices_h5)
     filtered_matrix = raw_matrix.select_barcodes_by_seq(filtered_bcs)
 
     # If non-spatial targeted ensure all filtered barcodes have nonzero targeted UMI counts
@@ -303,10 +299,7 @@ def join(args, outs, chunk_defs, chunk_outs):
 
     parse_filtered_bcs_method(filtered_metrics_groups, summary)
 
-    genomes = get_reference_genomes(args.reference_path)
-    summary = helpers.combine_initial_metrics(
-        genomes, filtered_metrics_groups, genome_filtered_bcs, summary
-    )
+    summary = helpers.combine_initial_metrics(filtered_metrics_groups, genome_filtered_bcs, summary)
 
     # Add keys in from high occupancy GEM filtering in if it was performed
     summary.update(high_occupancy_gem_metrics)
@@ -349,8 +342,8 @@ def filter_barcodes(args, outs):  # pylint: disable=too-many-branches
     chemistry_def = cr_chemistry.get_primary_chemistry_def(args.chemistry_defs)
     chemistry_description = chemistry_def[cr_chemistry.CHEMISTRY_DESCRIPTION_FIELD]
 
-    # Apply the cell calling config in args.config
-    config = helpers.CellCalling(args.config)
+    # Apply the cell calling config in args.cell_calling_config
+    config = helpers.CellCalling(args.cell_calling_config)
     force_cells = helpers.get_force_cells(
         config.force_cells,
         args.probe_bc_def.get(PROBE_BC_SAMPLE_ID, None) if args.probe_bc_def else None,
@@ -360,17 +353,20 @@ def filter_barcodes(args, outs):  # pylint: disable=too-many-branches
         args.probe_bc_def.get(PROBE_BC_SAMPLE_ID, None) if args.probe_bc_def else None,
     )
 
-    try:
-        correction_data = pd.read_csv(
-            ensure_str(args.barcode_correction_csv), converters={"barcode": ensure_binary}
-        )
-        correction_data["barcode"] = correction_data["barcode"].astype("S")
-        ab_utils.augment_correction_table_with_corrected_reads_fraction(correction_data)
-        ab_utils.augment_correction_table_with_read_fraction(correction_data)
-    except pd.errors.EmptyDataError:
-        correction_data = None  # will circumvent aggregate detection below
+    if args.barcode_correction_csv is None:
+        correction_data = None
+    else:
+        try:
+            correction_data = pd.read_csv(
+                ensure_str(args.barcode_correction_csv), converters={"barcode": ensure_binary}
+            )
+            correction_data["barcode"] = correction_data["barcode"].astype("S")
+            ab_utils.augment_correction_table_with_corrected_reads_fraction(correction_data)
+            ab_utils.augment_correction_table_with_read_fraction(correction_data)
+        except pd.errors.EmptyDataError:
+            correction_data = None  # will circumvent aggregate detection below
 
-    raw_matrix = cr_matrix.CountMatrix.load_h5_file(args.matrices_h5)
+    raw_matrix = CountMatrix.load_h5_file(args.matrices_h5)
     has_cmo_data = raw_matrix.feature_ref.has_feature_type(rna_library.MULTIPLEXING_LIBRARY_TYPE)
 
     # If there is a probe barcode def, restrict to data from this specific sample
@@ -392,13 +388,6 @@ def filter_barcodes(args, outs):  # pylint: disable=too-many-branches
             correction_data, ab_utils.FRACTION_SAMPLE_READS
         )
 
-    is_targeted = raw_matrix.feature_ref.has_target_features()
-    is_rtl = (
-        determine_targeting_type_from_csv(args.target_set) != TARGETING_METHOD_HC
-        if is_targeted
-        else False
-    )
-
     if config.cell_barcodes is not None:
         method = FilterMethod.MANUAL
     elif force_cells is not None:
@@ -407,8 +396,6 @@ def filter_barcodes(args, outs):  # pylint: disable=too-many-branches
         method = get_filter_method_from_string(config.override_mode)
     elif args.is_antibody_only:
         method = FilterMethod.ORDMAG
-    elif is_targeted and not is_rtl:
-        method = FilterMethod.TARGETED
     else:
         method = FilterMethod.ORDMAG_NONAMBIENT
 
@@ -424,18 +411,13 @@ def filter_barcodes(args, outs):  # pylint: disable=too-many-branches
         feature_types = config.override_library_types
 
     # For targeted GEX, retrieve target gene indices for cell calling
-    if is_targeted:
+    if raw_matrix.feature_ref.has_target_features():
         target_features = raw_matrix.feature_ref.get_target_feature_indices()
         assert all(
             x in range(raw_matrix.features_dim) for x in target_features
         ), "Invalid index value found in target_features."
     else:
         target_features = None
-
-    lib_types = raw_matrix.get_library_types()
-    # In case of SC_MULTI determine library_types from input config.csv
-    if args.multi_graph is not None:
-        lib_types = MultiGraph.from_path(args.multi_graph).feature_types()
 
     num_probe_barcodes = len(args.probe_bc_def[PROBE_BC_SEQS]) if args.probe_bc_def else None
     if (
@@ -446,6 +428,11 @@ def filter_barcodes(args, outs):  # pylint: disable=too-many-branches
             for x in [rna_library.ANTIBODY_LIBRARY_TYPE, rna_library.ANTIGEN_LIBRARY_TYPE]
         )
     ):
+        lib_types = (
+            MultiGraph.from_path(args.multi_graph).library_types()
+            if args.multi_graph
+            else raw_matrix.get_library_types()
+        )
         matrix, summary, removed_bcs_df = helpers.remove_antibody_antigen_aggregates(
             correction_data,
             raw_matrix,
@@ -456,7 +443,11 @@ def filter_barcodes(args, outs):  # pylint: disable=too-many-branches
         # report all identified aggregate barcodes, together with their umis,
         # umi corrected reads, fraction of corrected reads, and fraction of total reads
         removed_bcs_df = removed_bcs_df.round(
-            {FRACTION_CORRECTED_READS: 3, FRACTION_TOTAL_READS: 3}
+            {
+                FRACTION_CORRECTED_READS: 3,
+                FRACTION_TOTAL_READS: 3,
+                ab_utils.FRACTION_SAMPLE_READS: 3,
+            }
         )
         if len(removed_bcs_df) != 0:
             removed_bcs_df.to_csv(outs.aggregate_barcodes)
@@ -476,8 +467,6 @@ def filter_barcodes(args, outs):  # pylint: disable=too-many-branches
     )
     summary[total_diversity_key] = matrix.bcs_dim
 
-    genomes = get_reference_genomes(args.reference_path)
-
     # Get per-gem group cell load
     if recovered_cells is not None:
         gg_recovered_cells = int(float(recovered_cells) / float(len(unique_gem_groups)))
@@ -485,6 +474,8 @@ def filter_barcodes(args, outs):  # pylint: disable=too-many-branches
         gg_recovered_cells = None
     else:
         gg_recovered_cells = cr_constants.DEFAULT_RECOVERED_CELLS_PER_GEM_GROUP
+
+    genomes = CountMatrix.get_genomes_from_h5(args.matrices_h5) or ["NONE"]
 
     ### Get the initial cell calls
     probe_barcode_sample_id = args.probe_bc_def[PROBE_BC_SAMPLE_ID] if args.probe_bc_def else None

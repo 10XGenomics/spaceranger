@@ -33,7 +33,9 @@ def bresenham(
     y1: int,
 ) -> list[tuple[int, int]]:
     # pylint: disable=invalid-name
-    """Implementation of bresenham's line algorithm.
+    """Go look up bresenham's line algorithm.
+
+    This is that algorithm.
 
     It gets a set of points in discrete space that make up a line from
     point A to point B.
@@ -80,10 +82,9 @@ def bresenham(
 
 
 def sort_corners(corners: list[np.ndarray]) -> list[np.ndarray]:
-    """This function sorts a set of xy corner coordinates.
+    """This function sorts a set of xy corner coordinates representing.
 
-    These represent the corners of a box in the following order: 
-    top left, top right, bottom right, bottom left.
+    the corners of a box into top left, top right, bottom right, bottom left.
 
     Args:
         List[np.ndarray]: A list of unsorted corners as np arrays, as (x, y).
@@ -105,11 +106,11 @@ def fit_rectangle(points: np.ndarray) -> list[np.ndarray]:
     """Find the smallest bounding rectangle for a set of points.
 
     Returns a set of points representing the corners of the bounding box.
-    We find the convex hull of the points, then make a list of all the angles
-    between neighboring points on the convex hull, then we transform the point
-    set by all of those angles and get the min/max x and y values (bounding
-    box). We choose the bounding box with the minimum area. Finally, corners
-    are sorted.
+    We basically are finding the convex hull of the points, then making a list
+    of all the angles between neighboring points on the convex hull, then we
+    transform the point set by all of those angles and get the min/max x and y
+    values (bounding box). We choose the bounding box with the minimum area.
+    Finally corners are sorted.
 
     Args:
         points: an nx2 matrix of unorganized x, y coordinates that we will try
@@ -462,7 +463,9 @@ def prepare_cytassist_img(
             f"Only support 1 or 2 CytAssist images but {len(cytassist_image_paths)} are passed."
         )
     # Use fiducial image for cropping since the tissue has less contrast
-    (rowmin, rowmax, colmin, colmax), qc_box_img = crop_spacer_dynamic_window(fid_img)
+    (rowmin, rowmax, colmin, colmax), qc_box_img = crop_spacer_dynamic_window(
+        fid_img, max_threshold=64
+    )
     # TODO: generate a warning message if cropping check fails and surface the message.
     # Disable cropping if visium HD
     if is_visium_hd or rowmax - rowmin < min_crop_size:

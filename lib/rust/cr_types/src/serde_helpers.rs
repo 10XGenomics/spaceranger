@@ -1,3 +1,4 @@
+#![deny(missing_docs)]
 use anyhow::Result;
 use serde::de::Visitor;
 use serde::{de, Deserialize, Deserializer};
@@ -38,7 +39,7 @@ impl<'de> Deserialize<'de> for NumberOrStr {
         D: Deserializer<'de>,
     {
         struct NumberOrStrVisitor;
-        impl<'de> Visitor<'de> for NumberOrStrVisitor {
+        impl Visitor<'_> for NumberOrStrVisitor {
             type Value = NumberOrStr;
             fn expecting(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
                 f.write_str("A number or string")

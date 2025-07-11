@@ -1,8 +1,7 @@
+#![deny(missing_docs)]
 use anyhow::Result;
-use libc::{c_char, c_int};
 use regex::Regex;
 use std::borrow::Cow;
-use std::ffi::CStr;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -78,21 +77,9 @@ in your environment.",
     PlatformResult::Ok
 }
 
-fn to_str(s: &[c_char]) -> &str {
-    unsafe {
-        let bytes = CStr::from_ptr(s.as_ptr()).to_bytes();
-        std::str::from_utf8_unchecked(bytes)
-    }
-}
-
 fn check_kernel_version() -> PlatformResult {
-    let mut utsname: libc::utsname = unsafe { std::mem::zeroed() };
-    if unsafe { libc::uname(&mut utsname as *mut libc::utsname) } != 0 {
-        return PlatformResult::Warn(Cow::from(
-            "WARNING: Unable to determine kernel version using uname(2)",
-        ));
-    }
-    let release = to_str(&utsname.release[..]);
+    let uname = rustix::system::uname();
+    let release = uname.release().to_str().unwrap();
     let re = Regex::new(r"\D*(\d+)\.(\d+)").unwrap();
     if let Some(caps) = re.captures(release) {
         let version: Result<Vec<i64>, _> = (1..=2).map(|i| caps[i].parse()).collect();
@@ -113,21 +100,16 @@ in your environment."
     PlatformResult::Ok
 }
 
-// See ${sysroot}/usr/include/bits/confname.h
-const _CS_GNU_LIBC_VERSION: c_int = 2;
-
-extern "C" {
-    fn confstr(name: c_int, buf: *mut c_char, len: libc::size_t) -> libc::size_t;
-}
-
+/// Check whether the GNU libc version is sufficient on Linux and do nothing on macOS.
+#[cfg(not(target_os = "linux"))]
 fn check_libc_version() -> PlatformResult {
-    let libc_version = unsafe {
-        let len = confstr(_CS_GNU_LIBC_VERSION, std::ptr::null_mut(), 0);
-        let mut buf = vec![0; len];
-        let _ = confstr(_CS_GNU_LIBC_VERSION, buf.as_mut_ptr(), len);
-        buf
-    };
-    let libc_version = to_str(&libc_version);
+    PlatformResult::Ok
+}
+#[cfg(target_os = "linux")]
+fn check_libc_version() -> PlatformResult {
+    let libc_version = unsafe { std::ffi::CStr::from_ptr(libc::gnu_get_libc_version()) }
+        .to_str()
+        .unwrap();
     let re = Regex::new(r"\D*(\d+)\.(\d+)").unwrap();
     if let Some(caps) = re.captures(libc_version) {
         let version: Result<Vec<i64>, _> = (1..=2).map(|i| caps[i].parse()).collect();
@@ -149,36 +131,19 @@ in your environment."
 }
 
 fn check_cpu_features() -> PlatformResult {
-    if !is_x86_feature_detected!("sse4.2") {
-        return PlatformResult::Err(Cow::from(
-            "The current CPU does not support sse4.2 instructions, and is no longer supported.
-
-For more information, see
-https://support.10xgenomics.com/os-support.
-
-To continue running this version for now, set TENX_IGNORE_DEPRECATED_OS=1
-in your environment.",
-        ));
-    }
-    if !is_x86_feature_detected!("popcnt") {
-        return PlatformResult::Err(Cow::from(
-            "The current CPU does not support popcnt instructions, and is no longer supported.
-
-For more information, see
-https://support.10xgenomics.com/os-support.
-
-To continue running this version for now, set TENX_IGNORE_DEPRECATED_OS=1
-in your environment.",
-        ));
-    }
     if !is_x86_feature_detected!("avx") {
+        return PlatformResult::Err(Cow::from(
+            "This CPU does not support AVX, which is required. \
+             Set TENX_IGNORE_DEPRECATED_OS=1 in your environment to suppress this error. \
+             For more information, see \
+             https://www.10xgenomics.com/support/software/cell-ranger/downloads/cr-system-requirements",
+        ));
+    }
+    if !is_x86_feature_detected!("avx2") {
         return PlatformResult::Warn(Cow::from(
-            "The current CPU does not support avx instructions.
-
-Future versions of 10X Genomics software will not support CPUs older than Intel Xeon E3 (Sandy Bridge) or AMD Opteron FX (circa 2011).
-
-For more information, see
-https://support.10xgenomics.com/os-support.",
+            "This CPU does not support AVX2, which will be required in the future. \
+             For more information, see \
+             https://www.10xgenomics.com/support/software/cell-ranger/downloads/cr-system-requirements",
         ));
     }
     PlatformResult::Ok

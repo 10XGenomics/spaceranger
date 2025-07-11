@@ -1,7 +1,8 @@
 //!
-//! Dump vega plots into CAS websummary
+//! Dump vega plots into cell annotation websummary
 //! stage GENERATE_CAS_WEBSUMMARY
 //!
+#![allow(missing_docs)]
 use crate::cell_annotation_ws_parameters::{
     generate_cas_bc_mismatch_alert, generate_cas_de_warn_alert, generate_cas_failure_alert,
     generate_cell_type_barcharts_from_json, generate_cell_type_diffexp_from_json,
@@ -31,6 +32,7 @@ struct MetadataStruct {
     display_map_version_used: Option<String>,
     fraction_non_informative_annotations: Option<f64>,
     is_beta_model: Option<bool>,
+    developer: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, MartianStruct)]
@@ -43,7 +45,7 @@ pub struct GenerateCasWebsummaryStageInputs {
     cell_type_bar_chart: Option<JsonFile<Value>>,
     spatial_cell_types_chart: Option<JsonFile<Value>>,
     cell_type_interactive_bar_chart: Option<JsonFile<Value>>,
-    cell_types_violin_plot: Option<JsonFile<Value>>,
+    cell_types_box_plot: Option<JsonFile<Value>>,
     cell_types_umap_plot: Option<JsonFile<Value>>,
     diffexp: Option<JsonFile<DifferentialExpressionTable>>,
     cas_success: Option<bool>,
@@ -65,7 +67,7 @@ pub struct WebSummaryContent {
     disclaimer_banner: Option<InlineHelp>,
     metrics_table: Card<WithTitle<TableMetric>>,
     cell_type_interactive_bar_chart: Option<Card<WithTitle<VegaLitePlot>>>,
-    cell_types_violin_plot: Option<Card<WithTitle<VegaLitePlot>>>,
+    cell_types_box_plot: Option<Card<WithTitle<VegaLitePlot>>>,
     cell_types_umap_plot: Option<Card<WithTitle<VegaLitePlot>>>,
     diffexp_table: Option<Card<WithTitle<DifferentialExpressionTable>>>,
     cell_type_bar_chart: Option<WithTitle<VegaLitePlot>>,
@@ -73,8 +75,7 @@ pub struct WebSummaryContent {
     command_line_card: Option<Card<CommandLine>>,
 }
 
-pub const ANNOTATE_WS_PIPESTANCE_TYPES: [&str; 2] =
-    ["SC_MULTI_CORE_LIBRARY", "CELLRANGER_ANNOTATE_CS"];
+pub const NO_ANNOTATE_WS_PIPESTANCE_TYPES: [&str; 1] = ["SC_MULTI_CORE_SAMPLE"];
 
 impl WebSummaryContent {
     fn from_stage_inputs(
@@ -90,8 +91,8 @@ impl WebSummaryContent {
                 .as_ref()
                 .map(|x| Ok(Card::full_width(generate_cell_type_barcharts_from_json(x)?)))
                 .transpose()?,
-            cell_types_violin_plot: args
-                .cell_types_violin_plot
+            cell_types_box_plot: args
+                .cell_types_box_plot
                 .as_ref()
                 .map(|x| {
                     Ok(Card::full_width(generate_cell_type_violin_plot_from_json(
@@ -115,7 +116,7 @@ impl WebSummaryContent {
                 .map(|x| {
                     Ok(WithTitle {
                         title: Title::new(
-                            "CAS cell types and clusters discovered by unbiased clustering"
+                            "cell annotation cell types and clusters discovered by unbiased clustering"
                                 .to_string(),
                         ),
                         inner: VegaLitePlot {
@@ -167,12 +168,16 @@ impl MartianMain for GenerateCasWebsummary {
         let metadata_metrics = args
             .metadata
             .as_ref()
-            .map(martian_filetypes::FileTypeRead::read)
+            .map(FileTypeRead::read)
             .transpose()?
             .unwrap_or_default();
 
         let cell_annotation_metrics = CellAnnotationMetrics {
             cell_annotation_beta_model: metadata_metrics.is_beta_model != Some(false),
+            cell_annotation_model_developer: metadata_metrics
+                .developer
+                .clone()
+                .unwrap_or_else(|| "Unknown".to_string()),
             cell_annotation_model: args
                 .cell_annotation_model
                 .clone()
@@ -185,10 +190,9 @@ impl MartianMain for GenerateCasWebsummary {
                 .display_map_version_used
                 .unwrap_or_else(|| "NOT FOUND".to_string()),
             cell_annotation_frac_returned_bcs: args.cas_frac_returned_bcs,
-            cell_annotation_fraction_non_informative_annotations: metadata_metrics
-                .fraction_non_informative_annotations,
             cell_annotation_success: args.cas_success,
             cell_annotation_differential_expression: args.disable_differential_expression,
+            pipeline_version: rover.pipelines_version(),
         };
 
         let cell_annotation_cloupe_name = Some(cell_annotation_metrics.get_cloupe_track_name());
@@ -203,7 +207,7 @@ impl MartianMain for GenerateCasWebsummary {
             WebSummaryContent::from_stage_inputs(&args, cell_annotation_metrics, &cmdline)?;
 
         let nav_bar = WsNavBar {
-            pipeline: "Cell Annotation Service".to_string(),
+            pipeline: "Cell Annotation".to_string(),
             id: args.sample_id.unwrap_or_default(),
             description: args.sample_desc.unwrap_or_default(),
         };
@@ -226,9 +230,9 @@ impl MartianMain for GenerateCasWebsummary {
 
         let pipestance_type = args.pipestance_type.unwrap_or_default();
 
-        let summary_output = if ANNOTATE_WS_PIPESTANCE_TYPES
+        let summary_output = if !(NO_ANNOTATE_WS_PIPESTANCE_TYPES
             .iter()
-            .any(|&ps_type| pipestance_type.contains(ps_type))
+            .any(|&ps_type| pipestance_type.contains(ps_type)))
         {
             let html = SinglePageHtml::new(nav_bar, web_summary_content, final_alerts);
             html.generate_html_file_with_build_files(&summary_html, build_files()?)?;

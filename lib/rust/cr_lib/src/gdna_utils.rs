@@ -1,3 +1,4 @@
+#![deny(missing_docs)]
 use crate::fit_piecewise_linear_model::{EstimatedModel, PiecewiseLinearData};
 use crate::probe_barcode_matrix::ProbeCounts;
 use anyhow::Result;
@@ -8,7 +9,7 @@ use cr_types::reference::probe_set_reference::TargetSetFile;
 use cr_types::types::PROBE_IDX_SENTINEL_VALUE;
 use cr_types::utils::calculate_median_of_sorted;
 use cr_types::{CountShardFile, ProbeBarcodeCount};
-use itertools::{process_results, Itertools};
+use itertools::Itertools;
 use metric::{MeanMetric, TxHashMap, TxHashSet};
 use ndarray::prelude::*;
 use ndarray::Array2;
@@ -49,12 +50,10 @@ pub struct MetricsComputed {
 pub fn compute_gdna_metrics(
     mol_info_path: &Path,
     probe_set_path: &TargetSetFile,
-    reference_path: &Path,
-) -> MetricsComputed {
+) -> Result<MetricsComputed> {
     // Reading the probe set reference
     let probe_set_reference: ProbeSetReference =
-        ProbeSetReference::from_path(probe_set_path, reference_path, 1)
-            .expect("ProbeSetReference could not be made from path");
+        ProbeSetReference::from_path(probe_set_path, None, 1)?;
     let probes = &probe_set_reference.sorted_probes();
 
     // Dictionary with number of spliced probes that every gene has
@@ -180,13 +179,13 @@ pub fn compute_gdna_metrics(
         as f64
         / total_number_of_umis as f64;
 
-    MetricsComputed {
+    Ok(MetricsComputed {
         unspliced_counts: data_to_fit.get_unspliced_counts(),
         spliced_counts: data_to_fit.get_spliced_counts(),
         estimated_gdna_per_probe,
         estimated_percentage_of_gdna_umi,
         estimated_model,
-    }
+    })
 }
 
 /// Struct to store spliced and unspliced counts corresponding
@@ -206,7 +205,7 @@ fn collate_probe_metrics(
     probe_barcode_path: &[CountShardFile],
     filtered_barcodes: &TxHashSet<Barcode>,
     probe_set_path: &TargetSetFile,
-    reference_path: &Path,
+    reference_path: Option<&Path>,
 ) -> Result<Vec<ProbeCounts>> {
     // Read in the probe set reference and get them in sorted order - the order of the probe_idx
     let psr: ProbeSetReference = ProbeSetReference::from_path(probe_set_path, reference_path, 1)
@@ -255,6 +254,7 @@ fn collate_probe_metrics(
             ref_sequence_name: probe.ref_sequence_name.clone(),
             ref_sequence_pos: probe.ref_sequence_pos,
             cigar_string: probe.cigar_string.clone(),
+            genome: probe.genome.clone(),
         })
         .collect())
 }
@@ -381,7 +381,7 @@ pub fn get_filtered_per_probe_metrics(
     probe_barcode_counts: &[CountShardFile],
     filtered_barcodes: &TxHashSet<Barcode>,
     probe_set: &TargetSetFile,
-    reference_path: &Path,
+    reference_path: Option<&Path>,
 ) -> Result<Vec<ProbeCounts>> {
     let raw_per_probe_metrics = collate_probe_metrics(
         probe_barcode_counts,
@@ -441,10 +441,9 @@ pub fn compute_gdna_corrected_median_genes_per_spot(
     // Iterate through the count shards
     let probe_barcode_reader: ShardReader<ProbeBarcodeCount> =
         ShardReader::open_set(probe_barcode_counts)?;
-    process_results(probe_barcode_reader.iter()?, |iter| {
-        // group by barcodes. Note that the count-shards are expected to be sorted
-        // by barcode
-        for (barcode, counts) in &iter.group_by(|x| x.barcode) {
+    probe_barcode_reader.iter()?.process_results(|iter| {
+        // group by barcodes. Note that the count-shards are expected to be sorted by barcode
+        for (barcode, counts) in &iter.chunk_by(|x| x.barcode) {
             // If barcode is not a filtered barcode, ignore it.
             if !filtered_barcodes.contains(&barcode) {
                 continue;

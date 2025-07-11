@@ -168,9 +168,7 @@ def run_bcl2fastq(args, outs):
 
         # minimum-trimmed-read-length and mask-short-adapter-reads must be our call (SIs, UMIs)
         min_read_length = min(x["read_length"] for x in read_info)
-        if min_read_length > 8:
-            # ensure min is at sample-index, if extra base grabbed for QC purposes (I8n, for example)
-            min_read_length = 8
+        min_read_length = min(min_read_length, 8)
 
         cmd = [
             "bcl2fastq",
@@ -210,5 +208,4 @@ def run_bcl2fastq(args, outs):
                 f"bcl2fastq exited with an error. You may have specified an invalid command-line option. See the full error here:\n{ensure_str(stderr_path)}"
             )
         elif ret < 0:
-            # subprocess.call returns negative code (on UNIX): bcl2fastq killed by external signal
-            martian.exit("bcl2fastq was killed with signal %d." % ret)
+            martian.exit(f"bcl2fastq was killed with signal {ret}.")

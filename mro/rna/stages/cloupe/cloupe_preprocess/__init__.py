@@ -44,12 +44,16 @@ stage CLOUPE_PREPROCESS(
     in  string   hd_slide_name,
     in  json     loupe_map,
     in  string   product_type,
+    in  json     cells_per_batch,
     in  json     cells_per_sample,
     in  json     cells_per_tag,
     in  json     cells_per_protospacer,
     in  csv      spatial_enrichment,
     in  path     spatial_deconvolution_path,
     in  bool     disable_cloupe,
+    in  str      matrix_type,
+    in  h5       spatial_cell_segment_mask,
+    in  geojson  spatial_cell_segment_geojson,
     out cloupe   output_for_cloupe,
     out json     gem_group_index_json,
     src py       "stages/cloupe/cloupe_preprocess",
@@ -188,6 +192,9 @@ def join(args, outs, _chunk_defs, _chunk_outs):
         spatial_product_type = "Visium" if args.hd_slide_name is None else "Visium-HD"
         call.extend(["--spatial-product-type", spatial_product_type])
 
+    if args.matrix_type:
+        call.extend(["--matrix-type", args.matrix_type])
+
     # assume whole thing if tissue positions present
     if args.tissue_positions:
         if args.dark_images == DARK_IMAGES_CHANNELS:
@@ -214,6 +221,11 @@ def join(args, outs, _chunk_defs, _chunk_outs):
                 spatial_image_type,
             ]
         )
+
+    if args.spatial_cell_segment_mask:
+        call.extend(["--spatial-cell-segment-mask-path", args.spatial_cell_segment_mask])
+    if args.spatial_cell_segment_geojson:
+        call.extend(["--spatial-cell-segment-geojson-path", args.spatial_cell_segment_geojson])
 
     if args.image_page_names:
         call.extend(["--spatial-image-page-names", (",").join(args.image_page_names)])

@@ -1,13 +1,14 @@
 //!
 //! A thin wrapper around orbit used for chemistry detection to distinguish between 3' and 5'
 //!
+#![deny(missing_docs)]
 
 use super::chemistry_filter::{ChemistryFilter, DetectChemistryUnit};
 use super::errors::DetectChemistryErrors;
 use anyhow::Result;
+use barcode::whitelist::ReqStrand;
 use cr_types::chemistry::ChemistryName;
 use cr_types::rna_read::HIGH_CONF_MAPQ;
-use cr_types::ReqStrand;
 use fastq_set::read_pair::{ReadPair, ReadPart, WhichRead};
 use fastq_set::WhichEnd;
 use metric::{set, TxHashSet};
@@ -40,8 +41,8 @@ const MIN_MARGIN: i64 = 2;
 impl MappingStats {
     pub(crate) fn compatible_chemistries(&self) -> TxHashSet<ChemistryName> {
         use ChemistryName::{
-            FivePrimeHT, FivePrimePE, FivePrimePEV3, FivePrimeR2, ThreePrimeV2, ThreePrimeV3,
-            ThreePrimeV3HT, ThreePrimeV3LT,
+            FivePrimeHT, FivePrimePE, FivePrimePEV3, FivePrimeR2, ThreePrimeV2, ThreePrimeV3CS1,
+            ThreePrimeV3HTCS1, ThreePrimeV3HTPolyA, ThreePrimeV3LT, ThreePrimeV3PolyA,
         };
         if (self.conf_mapped_reads < MIN_CONF_MAPPED_READS as i64)
             || ((self.conf_mapped_reads as f64)
@@ -49,7 +50,14 @@ impl MappingStats {
         {
             set![]
         } else if self.sense_reads > MIN_MARGIN * self.antisense_reads {
-            set![ThreePrimeV2, ThreePrimeV3, ThreePrimeV3LT, ThreePrimeV3HT]
+            set![
+                ThreePrimeV2,
+                ThreePrimeV3PolyA,
+                ThreePrimeV3CS1,
+                ThreePrimeV3LT,
+                ThreePrimeV3HTPolyA,
+                ThreePrimeV3HTCS1
+            ]
         } else if self.antisense_reads > MIN_MARGIN * self.sense_reads {
             set![FivePrimeR2, FivePrimePE, FivePrimePEV3, FivePrimeHT]
         } else {

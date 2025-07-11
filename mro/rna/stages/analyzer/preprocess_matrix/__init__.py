@@ -31,6 +31,7 @@ stage PREPROCESS_MATRIX(
     in  bool disable_run_pca,
     in  bool disable_correct_chemistry_batch,
     in  bool skip_multigenome_analysis,
+    in  bool enable_tsne,
     out bool skip_antibody_analysis,
     out bool skip_antigen_analysis,
     out h5   cloupe_matrix_h5,
@@ -130,13 +131,9 @@ def split(args):
     return {"chunks": [], "join": {"__mem_gb": max(matrix_mem_gb, h5_constants.MIN_MEM_GB)}}
 
 
-def main(args, outs):
-    pass
-
-
 def join(args, outs, chunk_defs, chunk_outs):
     outs.skip = args.skip
-    outs.skip_tsne = outs.skip or args.is_visium_hd
+    outs.skip_tsne = (not args.enable_tsne) or outs.skip or args.is_visium_hd
     outs.is_antibody_only = args.is_antibody_only
     outs.disable_run_pca = args.disable_run_pca
     outs.disable_hierarchical_clustering = (
@@ -144,8 +141,14 @@ def join(args, outs, chunk_defs, chunk_outs):
     )
     outs.disable_correct_chemistry_batch = args.disable_correct_chemistry_batch
     outs.skip_multigenome_analysis = args.skip_multigenome_analysis
-    outs.skip_antibody_analysis = False
-    outs.skip_antigen_analysis = False
+    if args.matrix_h5:
+        with LogPerf("select"):
+            library_types = cr_matrix.CountMatrix.load_library_types_from_h5_file(args.matrix_h5)
+        outs.skip_antibody_analysis = rna_library.ANTIBODY_LIBRARY_TYPE not in library_types
+        outs.skip_antigen_analysis = rna_library.ANTIGEN_LIBRARY_TYPE not in library_types
+    else:
+        outs.skip_antibody_analysis = True
+        outs.skip_antigen_analysis = True
     if args.skip:
         return
 
@@ -164,7 +167,6 @@ def join(args, outs, chunk_defs, chunk_outs):
 
     with LogPerf("select"):
         library_type = rna_library.GENE_EXPRESSION_LIBRARY_TYPE
-        library_types = cr_matrix.CountMatrix.load_library_types_from_h5_file(args.matrix_h5)
         is_antibody_only = args.is_antibody_only or (
             rna_library.GENE_EXPRESSION_LIBRARY_TYPE not in library_types
             and rna_library.ANTIBODY_LIBRARY_TYPE in library_types

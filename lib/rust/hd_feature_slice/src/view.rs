@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use crate::scaling::{Normalize, Scaling};
 use image::{DynamicImage, GrayImage, RgbImage, RgbaImage};
 use itertools::{izip, zip_eq};

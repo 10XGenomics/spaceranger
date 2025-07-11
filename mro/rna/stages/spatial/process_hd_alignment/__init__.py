@@ -42,6 +42,7 @@ stage PROCESS_HD_ALIGNMENT(
 
 
 def _write_qc_images(log_umi_img, img, transform_matrix, resampled_out_path, checkerboard_out_path):
+    # skimage.transform.warp uses center-based sub-pixel coordinates
     center_based_transform = convert_transform_corner_to_center(transform_matrix)
     sk_transform = skimage.transform.ProjectiveTransform(matrix=center_based_transform)
     resampled_img = skimage.transform.warp(
@@ -86,6 +87,7 @@ def main(args, outs):
     _write_qc_images(
         log_umi_img,
         cytassist_img,
+        # spot_colrow is center-based and we need a corner-based transform
         transform_spot_colrow_to_cytassist_colrow @ translation_matrix(-0.5, -0.5),
         outs.cytassist_image_on_spots,
         outs.umi_cytassist_checkerboard,
@@ -112,6 +114,7 @@ def main(args, outs):
             normalize_perspective_transform(
                 scale_matrix(scalefactors["regist_target_img_scalef"])
                 @ transform_spot_colrow_to_microscope_colrow
+                # spot_colrow is center-based and we need a corner-based transform
                 @ translation_matrix(-0.5, -0.5),
             ),
             outs.microscope_image_on_spots,

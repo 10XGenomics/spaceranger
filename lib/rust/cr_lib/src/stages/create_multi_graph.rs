@@ -1,6 +1,7 @@
 //! Martian stage CREATE_MULTI_GRAPH
 //! Create the multiplexing sample graph.
 //! This stage requires information from both the multi config CSV and chemistry detection.
+#![allow(missing_docs)]
 use super::detect_chemistry::DetectedProbeBarcodePairingFile;
 use anyhow::Result;
 use cr_types::CrMultiGraph;

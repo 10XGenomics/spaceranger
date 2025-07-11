@@ -49,6 +49,8 @@ def main(args, outs):
         aggregate_tissue_positions = False
 
     for sample_def in sample_defs:
+        if cr_constants.AGG_CLOUPE_FIELD not in sample_def:
+            continue
         loupe_map["loupe_map"][str(gem_id)] = [sample_def[cr_constants.AGG_CLOUPE_FIELD], 1]
         if aggregate_tissue_positions:
             # Aggregate the tissue_positions.csv into one

@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use crate::arc::count::CountMro;
 use crate::env;
 use crate::fastqs::FastqArgs;
@@ -70,6 +71,7 @@ impl TestrunArgs {
             peak_qval: None,
             k_means_max_clusters: None,
             no_bam: false,
+            no_secondary_analysis: false,
         })
     }
 }

@@ -4,10 +4,12 @@
 """Placeholder."""
 
 __MRO__ = """
-stage COMPUTE_CORRECTION_FACTOR(
+stage CHECK_CORRECTION_FACTOR(
     in  V1PatternFixArgs v1_pattern_fix,
     in  h5               filtered_fbm,
     src py               "stages/spatial/check_correction_factor",
+) using (
+    volatile = strict,
 )
 """
 

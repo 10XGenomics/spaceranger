@@ -61,7 +61,7 @@ def _get_barcode_summary_h5_indices(summary_h5: h5.File, barcodes: list[bytes]):
     if len(barcodes) == 0:
         return np.zeros(0, dtype=int)
     max_len = max(len(bc) for bc in barcodes)
-    bc_arr = np.fromiter(barcodes, count=len(barcodes), dtype="S%d" % max_len)
+    bc_arr = np.fromiter(barcodes, count=len(barcodes), dtype=("S", max_len))
     return np.flatnonzero(np.isin(summary_h5["bc_sequence"][:], bc_arr))
 
 

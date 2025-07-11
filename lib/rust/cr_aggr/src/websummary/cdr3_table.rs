@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use crate::websummary::{GenericTable, NamedTable, PrettyMetric, TableRow, TitleWithHelp};
 use serde::Serialize;
 use std::convert::Into;
@@ -72,7 +73,7 @@ impl From<VdjAggrSharedCdr3Row> for TableRow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::websummary::check_eq_json;
+    use cr_vdj::check_eq_json;
 
     #[test]
     fn test_row() {

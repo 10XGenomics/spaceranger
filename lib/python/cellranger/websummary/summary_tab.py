@@ -152,7 +152,11 @@ SEQUENCING_METRIC_KEYS = [
     "read_bases_with_q30_frac",
     "read2_bases_with_q30_frac",
     "umi_bases_with_q30_frac",
+    "umis_per_mm_sq_tissue",  # SD specific
+    "read_per_mm_sq_tissue",  # SD specific
     "square_008um.bins_under_tissue_frac",  # HD specific
+    "square_008um.umis_per_mm_sq_tissue",  # HD specific
+    "square_008um.read_per_mm_sq_tissue",  # HD specific
 ]
 
 TARGETED_SEQUENCING_METRIC_KEYS = [
@@ -167,7 +171,11 @@ TARGETED_SEQUENCING_METRIC_KEYS = [
     "read_bases_with_q30_frac",
     "read2_bases_with_q30_frac",
     "umi_bases_with_q30_frac",
+    "umis_per_mm_sq_tissue",  # SD specific
+    "read_per_mm_sq_tissue",  # SD specific
     "square_008um.bins_under_tissue_frac",  # HD specific
+    "square_008um.umis_per_mm_sq_tissue",  # HD specific
+    "square_008um.read_per_mm_sq_tissue",  # HD specific
 ]
 
 SEQUENCING_ALARM_KEYS = [
@@ -263,11 +271,12 @@ TEMP_LIG_MAPPING_KEYS = [
     "multi_transcriptome_half_mapped_reads_frac",
     "multi_transcriptome_split_mapped_reads_frac",
 ]
+SEGMENTATION_ALARMS = ["num_nuclei_too_large"]
 
 MAPPING_ALARMS = [
     "transcriptome_conf_mapped_reads_frac",
     "antisense_reads_frac",
-]
+] + SEGMENTATION_ALARMS
 
 TARGETED_MAPPING_ALARMS = [
     "multi_transcriptome_targeted_conf_mapped_reads_frac",
@@ -280,7 +289,9 @@ TEMP_LIG_MAPPING_ALARMS = [
     "multi_transcriptome_half_mapped_reads_frac",
     "multi_transcriptome_split_mapped_reads_frac",
 ]
-HD_TEMP_LIG_MAPPING_ALARMS = TEMP_LIG_MAPPING_ALARMS + ["estimated_gdna_content"]
+HD_TEMP_LIG_MAPPING_ALARMS = (
+    TEMP_LIG_MAPPING_ALARMS + ["estimated_gdna_content"] + SEGMENTATION_ALARMS
+)
 
 
 def get_empty_rank_plot():
@@ -425,23 +436,52 @@ def _get_chemistry_description(
         return chemistry_description
 
     if sample_data.targeting_method == TARGETING_METHOD_TL:
+        # covers both fresh/fixed frozen and FFPE products
         # Determine the assay from the chemistry.
-        assay = {
-            "Visium V1 Slide": "FFPE v1",
-            "Visium V2 Slide": "FFPE v1",
-            "Visium V3 Slide": "FFPE v2",
-            "Visium V4 Slide": "FFPE v2",
-            "Visium V5 Slide": "FFPE v2",
-        }.get(chemistry_description, "FFPE")
+        assay_version = {
+            "Visium V1 Slide": "v1",
+            "Visium V2 Slide": "v1",
+            "Visium V3 Slide": "v2",
+            "Visium V4 Slide": "v2",
+            "Visium V5 Slide": "v2",
+            "Visium HD v1": "v1",
+        }.get(chemistry_description)
+        assay_base = {"Visium HD v1": "HD probe-based"}.get(chemistry_description, "Probe-based")
+        assay = f"{assay_base} {assay_version}" if assay_version else assay_base
     elif sample_data.targeting_method == TARGETING_METHOD_HC:
         assay = "Targeted"
     else:
         assay = "3'"
-    return f"{chemistry_description } - {assay}"
+    # FIXME: better to change the description in chemistry_defs.json
+    sanitised_chemistry_description = {
+        "Visium HD v1": "Visium HD H1 Slide",
+        "Visium HD v1 - 3'": "Visium HD H1 Slide",
+    }.get(chemistry_description, chemistry_description)
+    return f"{sanitised_chemistry_description} - {assay}"
+
+
+def _add_throughput_to_chemistry(chemistry_desc: str, sample_data: SampleData) -> str:
+    throughput_inferred = sample_data.summary.get(THROUGHPUT_INFERRED_METRIC)
+
+    chemistry_with_throughput = chemistry_desc
+    if throughput_inferred == HT_THROUGHPUT and chemistry_desc[-2:] not in [
+        LT_THROUGHPUT,
+        MT_THROUGHPUT,
+        HT_THROUGHPUT,
+    ]:
+        chemistry_with_throughput = f"{chemistry_desc} {HT_THROUGHPUT}"
+
+    if (
+        chemistry_desc.endswith(HT_THROUGHPUT)
+        and throughput_inferred
+        and throughput_inferred != HT_THROUGHPUT
+    ):
+        sample_data.summary[INCONSISTENT_THROUGHPUT_METRIC] = HT_THROUGHPUT
+    return chemistry_with_throughput
 
 
 # pylint: disable=too-many-branches
-def pipeline_info_table(
+def pipeline_info_table(  # noqa: PLR0912, pylint: disable=too-many-statements
     sample_data: SampleData,
     sample_properties: SampleProperties,
     pipeline: str,
@@ -466,34 +506,40 @@ def pipeline_info_table(
 
     alarms = []
 
-    throughput_inferred = sample_data.summary.get(THROUGHPUT_INFERRED_METRIC)
-
     # Get the chemistry description for the sample(s)
     if isinstance(sample_properties, AggrCountSampleProperties) and sample_defs:
         chemistry_row = []
         for sample_def in sample_defs:
             chemistry = _get_chemistry_description(sample_data=sample_data, sample_def=sample_def)
             chemistry_row.append([f"Chemistry ({sample_def['library_id']})", chemistry])
+    elif not sample_properties.is_spatial and isinstance(
+        sample_properties, ExtendedCountSampleProperties
+    ):
+        # We may have different chemistries per library; need to collect them.
+        # If chemistry for every library is the same, only produce one line.
+        # Do not do this for spatial.
+        chem_desc_unique = set(
+            chem_def["description"] for chem_def in sample_properties.chemistry_defs.values()
+        )
+        if len(chem_desc_unique) == 1:
+            chemistry_row = [
+                ["Chemistry", _add_throughput_to_chemistry(chem_desc_unique.pop(), sample_data)]
+            ]
+        else:
+            chemistry_row = [
+                [
+                    f"Chemistry ({lib_type})",
+                    _add_throughput_to_chemistry(chem_def["description"], sample_data),
+                ]
+                for (lib_type, chem_def) in sample_properties.chemistry_defs.items()
+            ]
+            # Ensure stable ordering by alphabetized library type.
+            chemistry_row.sort()
     else:
         chemistry = _get_chemistry_description(
             sample_data=sample_data, sample_properties=sample_properties
         )
-
-        chemistry_with_throughput = chemistry
-        if throughput_inferred == HT_THROUGHPUT and chemistry[-2:] not in [
-            LT_THROUGHPUT,
-            MT_THROUGHPUT,
-            HT_THROUGHPUT,
-        ]:
-            chemistry_with_throughput = f"{chemistry} {HT_THROUGHPUT}"
-
-        if (
-            chemistry.endswith(HT_THROUGHPUT)
-            and throughput_inferred
-            and throughput_inferred != HT_THROUGHPUT
-        ):
-            sample_data.summary[INCONSISTENT_THROUGHPUT_METRIC] = HT_THROUGHPUT
-        chemistry_row = [["Chemistry", chemistry_with_throughput]]
+        chemistry_row = [["Chemistry", _add_throughput_to_chemistry(chemistry, sample_data)]]
 
     if pipeline == shared_constants.PIPELINE_AGGR:
         run_identifier = "Run"
@@ -742,6 +788,19 @@ def pipeline_info_table(
             "level": WARNING_THRESHOLD,
         }
         to_return[ALARMS].extend([itk_error_alarm])
+
+    if isinstance(sample_properties, CountSampleProperties) and sample_properties.grabcut_failed:
+        if ALARMS not in to_return:
+            to_return[ALARMS] = []
+        grabcut_failed_alarm = {
+            "formatted_value": None,
+            "title": "Tissue Detection",
+            "message": "CytAssist tissue detection metrics indicate a possible poor detection. "
+            "Review your tissue detection carefully. If tissue detection performs poorly, perform it manually via "
+            "<a href='https://www.10xgenomics.com/support/software/loupe-browser/latest' target='_blank' title='Loupe Browser' rel='noopener noreferrer'>Loupe Browser</a>.",
+            "level": WARNING_THRESHOLD,
+        }
+        to_return[ALARMS].extend([grabcut_failed_alarm])
 
     # If Isotype Normalization was used
     if sample_data.summary.get("ANTIBODY_isotype_normalized") is not None:
@@ -1088,7 +1147,7 @@ def split_table_by_samples(table, table_name):
         for row_name in all_samples:
             row_content = [row_name]
             for metric_name in all_metrics:
-                row_content.append(data[row_name][metric_name])
+                row_content.append(data[row_name].get(metric_name, float("NaN")))
             new_rows.append(row_content)
 
         table[table_name]["table"]["header"] = ["Sample ID"] + all_metrics

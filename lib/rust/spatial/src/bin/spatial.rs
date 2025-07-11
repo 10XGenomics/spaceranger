@@ -1,49 +1,5 @@
-// Warning groups (as of rust 1.55)
-#![deny(
-    future_incompatible,
-    nonstandard_style,
-    rust_2018_compatibility,
-    rust_2021_compatibility,
-    rust_2018_idioms,
-    unused
-)]
-// Other warnings (as of rust 1.55)
-#![deny(
-    asm_sub_register,
-    bad_asm_style,
-    bindings_with_variant_name,
-    clashing_extern_declarations,
-    confusable_idents,
-    const_item_mutation,
-    deprecated,
-    deref_nullptr,
-    drop_bounds,
-    dyn_drop,
-    exported_private_dependencies,
-    function_item_references,
-    improper_ctypes,
-    improper_ctypes_definitions,
-    incomplete_features,
-    inline_no_sanitize,
-    invalid_value,
-    irrefutable_let_patterns,
-    large_assignments,
-    mixed_script_confusables,
-    non_shorthand_field_patterns,
-    no_mangle_generic_items,
-    overlapping_range_endpoints,
-    renamed_and_removed_lints,
-    stable_features,
-    temporary_cstring_as_ptr,
-    trivial_bounds,
-    type_alias_bounds,
-    uncommon_codepoints,
-    unconditional_recursion,
-    unknown_lints,
-    unnameable_test_items,
-    unused_comparisons,
-    while_true
-)]
+//! spatial
+#![deny(missing_docs)]
 
 use anyhow::Result;
 use docopt::Docopt;
@@ -78,14 +34,20 @@ fn main() -> Result<()> {
         .unwrap_or_else(|e| e.exit());
 
     let (stage_registry, mro_registry) = martian_stages![
+        spatial::stages::assign_nuclei::AssignNuclei,
         spatial::stages::bin_count_matrix::BinCountMatrix,
+        spatial::stages::bin_spots_to_cells::BinSpotsToCells,
         spatial::stages::compute_bin_metrics::ComputeBinMetrics,
         spatial::stages::compute_subsampled_bin_metrics::ComputeSubsampledBinMetrics,
-        spatial::stages::write_binned_h5_matrix::WriteBinnedH5Matrix,
-        spatial::stages::setup_binning::SetupBinning,
         spatial::stages::create_hd_feature_slice::CreateHdFeatureSlice,
-        spatial::stages::merge_bin_metrics::MergeBinMetrics,
         spatial::stages::generate_hd_websummary_cs::GenerateHdWebsummaryCs,
+        spatial::stages::generate_segment_websummary::GenerateSegmentWebsummary,
+        spatial::stages::merge_bin_metrics::MergeBinMetrics,
+        spatial::stages::preprocess_instance_mask::PreprocessInstanceMask,
+        spatial::stages::preprocess_nucleus_segmentation_geojson::PreprocessNucleusSegmentationGeojson,
+        spatial::stages::setup_binning::SetupBinning,
+        spatial::stages::write_binned_h5_matrix::WriteBinnedH5Matrix,
+        spatial::stages::write_spatial_barcode_index::WriteSpatialBarcodeIndex,
     ];
 
     if args.cmd_martian {
@@ -93,7 +55,7 @@ fn main() -> Result<()> {
         let adapter = MartianAdapter::new(stage_registry);
 
         // Suppress any logging that would be emitted via crate log.
-        let adapter = adapter.log_level(martian::LevelFilter::Warn);
+        let adapter = adapter.log_level(LevelFilter::Warn);
 
         let retcode = adapter.run(args.arg_adapter);
         std::process::exit(retcode);

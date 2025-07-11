@@ -20,22 +20,15 @@ import cellranger.targeted.simple_utils as tgt_simple_utils
 import tenkit.log_subprocess as tk_subproc
 import tenkit.preflight as tk_preflight
 from cellranger import csv_utils
-from cellranger.chemistry import (
-    CHEMISTRY_DESCRIPTION_FIELD,
-    CHEMISTRY_NAME_FIELD,
-    SC3P_V4_CHEMISTRIES,
-)
 from cellranger.fast_utils import validate_reference
 from cellranger.feature_ref import FeatureDefException
 from cellranger.molecule_counter import (
     LIBRARIES_METRIC,
-    MOLECULE_INFO_TYPE_PERSAMPLE,
     MoleculeCounter,
 )
 from cellranger.reference_paths import get_ref_name_from_genomes, get_reference_genomes
 from cellranger.targeted.targeted_constants import (
     TARGETING_METHOD_FILE_NAMES,
-    TARGETING_METHOD_TL_FILE_FORMAT,
     TargetingMethod,
 )
 from cellranger.targeted.targeted_spatial import SPATIAL_TARGET_DISALLOWED_PANEL_TYPES
@@ -199,7 +192,7 @@ def check_sample_def(sample_defs, feature_ref=None, pipeline=None, is_spatial=Fa
             ):
                 if not any(x.feature_type == library_type for x in feature_ref.feature_defs):
                     raise PreflightException(
-                        "You declared a library with "
+                        "TXRNGR10017: You declared a library with "
                         f"library_type = '{library_type}', but there are no features declared "
                         "with that feature_type in the feature reference.\n"
                         "Check that the 'library_type' field in the libraries csv matches at least "
@@ -211,7 +204,7 @@ def check_sample_def(sample_defs, feature_ref=None, pipeline=None, is_spatial=Fa
             library_type = sample_def.get(rna_library.LIBRARY_TYPE, None)
             if library_type not in (None, rna_library.VDJ_LIBRARY_TYPE):
                 raise PreflightException(
-                    f"You declared a library with library_type = '{library_type}'. "
+                    f"TXRNGR10018: You declared a library with library_type = '{library_type}'. "
                     "For the VDJ pipeline, the library_type field in sample_def must be missing "
                     f"or '{rna_library.VDJ_LIBRARY_TYPE}'"
                 )
@@ -229,12 +222,9 @@ STAR_REQUIRED_FILES = [
 ]
 
 
-def check_refdata(reference_path):
+def check_refdata(reference_path: str):
+    assert reference_path is not None
     hostname = socket.gethostname()
-
-    if reference_path is None:
-        raise PreflightException("Must specify a transcriptome reference path.")
-
     print(f"Checking reference_path ({reference_path}) on {hostname}...", flush=True)
 
     required_files = [cr_constants.REFERENCE_METADATA_FILE, cr_constants.REFERENCE_FASTA_PATH]
@@ -278,10 +268,7 @@ def expand_libraries_csv(csv_path):
 
         for key in row:
             if key is None or row[key] is None:
-                msg = (
-                    "Invalid libraries CSV file: incorrrect number of columns on line number (after excluding comment lines) %d"
-                    % reader.line_num
-                )
+                msg = f"Invalid libraries CSV file: incorrrect number of columns on line number (after excluding comment lines) {reader.line_num}"
                 raise PreflightException(msg)
             row[key] = row[key].strip()
 
@@ -427,19 +414,19 @@ MINIMUM_TARGET_PANEL_GENES_PREFLIGHT = 10
 
 def check_targeting_preflights(
     target_panel: str | None,
-    reference_path: str,
+    reference_path: str | None,
     feature_reference_path: str | None,
     *,
     parse_files: bool,
     expected_targeting_method: str,
     is_spatial: bool,
 ):
-    """_summary_.
+    """Check preflights for the target panel.
 
     Args:
         target_panel (str | None): Target panel csv
-        reference_path (str): Location of the reference
-        feature_reference_path (Optional[str]): Location of the feature reference path
+        reference_path (str | None): Location of the reference
+        feature_reference_path (str | None): Location of the feature reference path
         parse_files (bool): Flag to parse the GTF to verify that the gene is present
         expected_targeting_method (str): Type of targeting method used (Need more details)
         is_spatial (bool): Is this a spatial sample or not?
@@ -447,7 +434,12 @@ def check_targeting_preflights(
     Raises:
         PreflightException: Any Preflight specific Exception
     """
-    if target_panel is None or target_panel == "":
+    if reference_path is None and target_panel is None and feature_reference_path is None:
+        raise PreflightException(
+            "Must specify a transcriptome or probe set or feature reference path."
+        )
+
+    if target_panel is None:
         return
     check_file_properties(target_panel, file_desc="The probe set CSV")
 
@@ -466,8 +458,12 @@ def check_targeting_preflights(
         check_targeting_method(expected_targeting_method, [target_panel])
 
     if parse_files:
-        gene_index = cr_reference.NewGeneIndex.load_from_reference(reference_path)
-        gene_name_to_id = {gene.name: gene.id for gene in gene_index.genes}
+        if reference_path is None:
+            gene_index = None
+            gene_name_to_id = None
+        else:
+            gene_index = cr_reference.NewGeneIndex.load_from_reference(reference_path)
+            gene_name_to_id = {gene.name: gene.id for gene in gene_index.genes}
 
         try:
             target_panel_metadata, target_panel_genes, _ = tgt_simple_utils.parse_target_csv(
@@ -490,7 +486,7 @@ def check_targeting_preflights(
             )
 
         # Ensure that the reference genome of the transcriptome and probe set are identical for RTL only.
-        if TARGETING_METHOD_TL_FILE_FORMAT in target_panel_metadata:
+        if reference_path is not None:
             transcriptome_reference_genome = get_ref_name_from_genomes(
                 get_reference_genomes(reference_path)
             )
@@ -501,7 +497,9 @@ def check_targeting_preflights(
                 )
 
         # Ensure that the reference transcriptome and probe set have at least one gene in common.
-        if all(gene_index.gene_id_to_int(gene_id) is None for gene_id in target_panel_genes):
+        if gene_index is not None and all(
+            gene_index.gene_id_to_int(gene_id) is None for gene_id in target_panel_genes
+        ):
             raise PreflightException(
                 f"There are no gene IDs in common between the reference transcriptome and the {descriptive_name}.",
             )
@@ -512,7 +510,7 @@ def check_targeting_preflights(
                 f'The provided targeted panel type "{panel_type}" is UNSUPPORTED in this product and results may be incorrect.'
             )
 
-        if feature_reference_path is not None:
+        if gene_index is not None and feature_reference_path is not None:
             gene_id_to_index = {gene.id: id(gene) for gene in gene_index.genes}
             target_set_gene_indices = [
                 gene_id_to_index[gene_id]
@@ -529,67 +527,6 @@ def check_targeting_preflights(
                 )
             except FeatureDefException as e:
                 raise PreflightException(str(e)) from e
-
-
-def validate_targeted_compare_mol_info(
-    mol_info_fn, expecting_targeted, required_metrics=[], required_library_metrics=[]
-):
-    if not os.path.exists(mol_info_fn):
-        raise PreflightException(f"The molecule info file {mol_info_fn} does not exist")
-    if not os.access(mol_info_fn, os.R_OK):
-        raise PreflightException(f"The molecule info file {mol_info_fn} is not readable")
-    try:
-        mc = MoleculeCounter.open(mol_info_fn, "r")
-
-        molecule_info_type = mc.get_molecule_info_type()
-        if molecule_info_type == MOLECULE_INFO_TYPE_PERSAMPLE:
-            raise PreflightException(
-                f"The multiplexed sample molecule info file {mol_info_fn} cannot be used with targeted-compare"
-            )
-
-        library_info = mc.get_library_info()
-        gex_lib_is_targeted = [
-            rna_library.has_target_set(lib)
-            for lib in library_info
-            if lib["library_type"] == rna_library.GENE_EXPRESSION_LIBRARY_TYPE
-        ]
-        if len(gex_lib_is_targeted) == 0:
-            raise PreflightException(
-                f"The molecule info file {mol_info_fn} does not have any gene expression libraries."
-            )
-
-        library_metrics = next(iter(mc.get_all_metrics()[LIBRARIES_METRIC].values()))
-        for metric in required_library_metrics:
-            if metric not in library_metrics.keys():
-                raise PreflightException(
-                    f"The molecule info file {mol_info_fn} is too old and is missing the metric {metric}. Please rerun."
-                )
-
-        for metric_key in required_metrics:
-            if mc.get_metric(metric_key) is None:
-                msg = f"The molecule info HDF5 file ({mol_info_fn}) was produced by an older software version."
-                msg += "\nReading these files is unsupported."
-                raise PreflightException(msg)
-
-        if expecting_targeted and (
-            not all(gex_lib_is_targeted) or mc.get_metric("target_panel_hash") is None
-        ):
-            msg = f"The input targeted molecule info file {mol_info_fn} does not come from a targeted analysis run. "
-            msg += f"Please rerun your targeted analysis run using '{cr_env.product()} count --target-panel'."
-            raise PreflightException(msg)
-        if not expecting_targeted and any(gex_lib_is_targeted):
-            msg = f"The input parent molecule info file {mol_info_fn} does not come from a whole transcriptome analysis run. "
-            msg += f"Please rerun your parent analysis run using '{cr_env.product()} count' without a target-panel."
-            raise PreflightException(msg)
-
-        mc.close()
-
-    except OSError as err:
-        raise PreflightException(
-            f"Molecule info file {mol_info_fn} cannot be loaded (may be corrupt)."
-        ) from err
-    except ValueError as err:
-        raise PreflightException(str(err)) from err
 
 
 def check_molecule_info_contains_library_metrics(mol_info_fn, metrics_expected=[]):
@@ -627,28 +564,6 @@ def check_target_features_same(target_sets):
         counter += 1
 
 
-def check_chemistry(chemistry_desc, sample_def):
-    """Checks that the provided chemistry is compatible with features.
-
-    The v4 3-prime chemistry no longer has the CRISPR oligo and so is not compatible.
-    """
-    v4_chem_names = []
-    for chem in SC3P_V4_CHEMISTRIES:
-        v4_chem_names.append(chem[CHEMISTRY_DESCRIPTION_FIELD])
-        v4_chem_names.append(chem[CHEMISTRY_NAME_FIELD])
-
-    def is_crispr(sample):
-        library_type = sample.get("library_type")
-        if library_type is None:
-            return False
-        return library_type == rna_library.CRISPR_LIBRARY_TYPE
-
-    if any(is_crispr(x) for x in sample_def) and chemistry_desc in v4_chem_names:
-        raise PreflightException(
-            f"Provided chemistry {chemistry_desc} is not compatible with CRISPR Guide Capture Libraries."
-        )
-
-
 def check_sample_info(
     sample_def, reference_path, full_check, feature_ref_path=None, is_spatial=False
 ):
@@ -656,7 +571,7 @@ def check_sample_info(
     if feature_ref_path is not None:
         print("Checking feature definition file...", flush=True)
         check_file_properties(feature_ref_path, file_desc="feature reference")
-        if full_check:
+        if full_check and reference_path is not None:
             # This requires loading the reference index and parsing the feature CSV,
             # and we don't want to do that e.g. during local preflight
             feature_ref = try_load_feature_ref(reference_path, feature_ref_path)
@@ -732,7 +647,8 @@ def check_common_preflights(
     force_cells,
 ):
     print("Checking reference...", flush=True)
-    check_refdata(reference_path)
+    if reference_path is not None:
+        check_refdata(reference_path)
 
     if r1_length is not None:
         print("Checking read 1 length...", flush=True)

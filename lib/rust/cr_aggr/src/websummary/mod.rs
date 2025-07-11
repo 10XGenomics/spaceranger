@@ -1,12 +1,13 @@
-// There are a **lot** of metrics which need to be imported here.
+//! cr_aggr::websummary
+#![allow(missing_docs)]
 #![allow(clippy::wildcard_imports)]
+
+use cr_vdj::clonotype_table;
 use cr_websummary::*;
 use serde::Serialize;
 pub mod annotation_card;
 pub mod cdr3_table;
 pub mod cells_card;
-pub mod clonotype_hist;
-pub mod clonotype_table;
 pub mod hero_metrics;
 
 #[derive(Debug, Serialize, PartialEq, Eq, Clone)]
@@ -53,28 +54,13 @@ pub struct VdjAggrWsSummaryTab {
     pub vdj_annotation: annotation_card::VdjAggrAnnotationTable,
     pub vdj_aggr_cells: cells_card::VdjAggrCellsTable,
     pub vdj_shared_cdr3: cdr3_table::VdjAggrSharedCdr3,
-    pub vdj_clonotype_hist: clonotype_hist::ClonotypeHist,
-}
-
-#[cfg(test)]
-pub fn check_eq_json(j1: &str, j2: &str) {
-    pretty_assertions::assert_eq!(
-        serde_json::from_str::<serde_json::value::Value>(j1).unwrap(),
-        serde_json::from_str::<serde_json::value::Value>(j2).unwrap()
-    );
-}
-
-#[cfg(test)]
-fn test_json_roundtrip<T: Serialize + serde::de::DeserializeOwned>(json: &str) -> T {
-    let parsed: T = serde_json::from_str(json).unwrap();
-    let parsed_str = serde_json::to_string(&parsed).unwrap();
-    check_eq_json(&parsed_str, json);
-    parsed
+    pub vdj_clonotype_hist: cr_vdj::clonotype_hist::ClonotypeHist,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cr_vdj::{check_eq_json, test_json_roundtrip};
     use pretty_assertions::assert_eq;
 
     #[test]
@@ -254,8 +240,8 @@ mod tests {
     fn test_pretty_metric() {
         assert_eq!(PrettyMetric::integer(100).0, "100");
         assert_eq!(PrettyMetric::integer(1000).0, "1,000");
-        assert_eq!(PrettyMetric::percent(0.10).0, "10.00%");
-        assert_eq!(PrettyMetric::percent(0.114567).0, "11.46%");
+        assert_eq!(PrettyMetric::percent(0.10).0, "10.0%");
+        assert_eq!(PrettyMetric::percent(0.114567).0, "11.5%");
         assert_eq!(PrettyMetric::decimal(0.114567).0, "0.11");
         assert_eq!(PrettyMetric::decimal(11.4567).0, "11.46");
         assert_eq!(PrettyMetric::decimal(10011.4567).0, "10,011.46");

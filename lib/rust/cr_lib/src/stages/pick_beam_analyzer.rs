@@ -1,4 +1,5 @@
 //! Martian stage PICK_BEAM_ANALYZER
+#![allow(missing_docs)]
 
 use super::compute_antigen_vdj_metrics::AntigenVdjMetricsFormat;
 use crate::utils::hard_link_martianfile;

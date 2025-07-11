@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use crate::reference::feature_reference::FeatureReference;
 use anyhow::{bail, Result};
 use std::collections::HashMap;

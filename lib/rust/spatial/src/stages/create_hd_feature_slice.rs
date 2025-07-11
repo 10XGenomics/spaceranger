@@ -1,4 +1,5 @@
 //! CreateHdFeatureSlice stage code
+#![allow(missing_docs)]
 
 use anyhow::Result;
 use cr_h5::count_matrix::CountMatrixFile;
@@ -50,9 +51,10 @@ impl MartianStage for CreateHdFeatureSlice {
         args: Self::StageInputs,
         _rover: MartianRover,
     ) -> Result<StageDef<Self::ChunkInputs>> {
-        Ok(StageDef::with_join_resource(Resource::with_mem_gb(
-            (4.0 + args.raw_matrix_h5.estimate_mem_gib()? * 2.0).ceil() as isize,
-        )))
+        let mem_gb_estimate = (5.0 + args.raw_matrix_h5.estimate_mem_gib()? * 2.0).ceil() as isize;
+        Ok(StageDef::with_join_resource(
+            Resource::with_mem_gb(mem_gb_estimate).vmem_gb(2 * mem_gb_estimate),
+        ))
     }
 
     fn main(

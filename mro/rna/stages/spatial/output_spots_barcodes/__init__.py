@@ -140,6 +140,7 @@ def join(args, outs, _chunk_defs, _chunk_outs):
     elif args.visium_hd_slide_name:
         outs.final_spot_position_list = None
         outs.tissue_positions = None
+        outs.fraction_bc_outside_image = None
         slide = VisiumHdSlideWrapper(slide_name=args.visium_hd_slide_name)
         tissue_barcodes = [
             f"{SquareBinIndex(row=spot.grid_index.row, col=spot.grid_index.col, size_um=int(slide.spot_pitch()))}-{sbu.GEM_GROUP}"

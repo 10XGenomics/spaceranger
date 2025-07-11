@@ -1,4 +1,5 @@
 //! Martian stage PARSE_AGGR_CSV
+#![allow(missing_docs)]
 
 use crate::errors::{FieldResolutionErrors, ParseAggrCsvErrors};
 use anyhow::{bail, Result};
@@ -330,7 +331,7 @@ impl FieldKind {
     }
 }
 
-const ALLOWED_SPECIAL_CHARS: &str = r#"@%^&* ()-_+=[]|:;'."#;
+const ALLOWED_SPECIAL_CHARS: &str = r"@%^&* ()-_+=[]|:;'.";
 fn validate_text_value(value: &str) -> Result<String> {
     let result = value.to_string();
     for (i, c) in result.chars().enumerate() {
@@ -791,7 +792,7 @@ mod tests {
         format!("{:#}", output.unwrap_err())
     }
 
-    fn error_to_string(err: anyhow::Error) -> String {
+    fn error_to_string(err: Error) -> String {
         format!("{err:#}")
     }
 
@@ -996,11 +997,11 @@ mod tests {
         let csv = "test_resources/parse_aggr_csv/pipes/csvs/missing_h5_file.csv";
         assert_eq!(
             err_string(csv),
-            error_to_string(anyhow::Error::from(ParseAggrCsvErrors::ErrorParsingField {
+            error_to_string(Error::from(ParseAggrCsvErrors::ErrorParsingField {
                 col: MOLECULE_H5_HEADER.to_string(),
                 line: 2,
                 path: PathBuf::from(csv),
-                source: anyhow::Error::from(FieldResolutionErrors::AbsPathDoesntExist {
+                source: Error::from(FieldResolutionErrors::AbsPathDoesntExist {
                     path: PathBuf::from("/no/such/file/molecule_info.h5"),
                 })
             }))
@@ -1012,11 +1013,11 @@ mod tests {
         let csv = "test_resources/parse_aggr_csv/pipes/csvs/vdj_invalid_proto.csv";
         assert_eq!(
             err_string(csv),
-            error_to_string(anyhow::Error::from(ParseAggrCsvErrors::ErrorParsingField {
+            error_to_string(Error::from(ParseAggrCsvErrors::ErrorParsingField {
                 col: VDJ_CONTIG_INFO_HEADER.to_string(),
                 line: 2,
                 path: PathBuf::from(csv),
-                source: anyhow::Error::from(FieldResolutionErrors::RelPathDoesntExist {
+                source: Error::from(FieldResolutionErrors::RelPathDoesntExist {
                     path: PathBuf::from("../invalid/dir/vdj_contig_info.pb"),
                     agg_csv_path: PathBuf::from(csv),
                     pipestance_root: PathBuf::new()

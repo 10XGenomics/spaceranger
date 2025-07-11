@@ -1,15 +1,16 @@
 //! Martian stage CHECK_BARCODES_COMPATIBILITY_VDJ
+#![allow(missing_docs)]
 
 use super::check_barcodes_compatibility::sample_valid_barcodes;
 use anyhow::{ensure, Result};
-use barcode::{BcSegSeq, Whitelist};
+use barcode::BcSegSeq;
 use cr_types::chemistry::{ChemistryDef, ChemistryDefs, ChemistryName};
 use cr_types::sample_def::SampleDef;
 use cr_types::LibraryType;
 use itertools::Itertools;
 use martian::prelude::*;
 use martian_derive::{make_mro, MartianStruct};
-use metric::{Metric, SimpleHistogram, TxHashSet};
+use metric::{Histogram, Metric, SimpleHistogram, TxHashSet};
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 
@@ -40,8 +41,7 @@ pub struct CheckBarcodesCompatibilityVdj;
 fn approx_call_cells(c: &SimpleHistogram<BcSegSeq>) -> TxHashSet<BcSegSeq> {
     let reads_threshold = (CELL_CALLING_THRESH * c.raw_counts().sum::<i64>() as f64).ceil() as u64;
     let mut total_reads = 0;
-    c.distribution()
-        .iter()
+    c.iter()
         .sorted_by_key(|(&barcode, &reads)| (Reverse(reads), barcode))
         .filter_map(|(&barcode, reads)| {
             let is_cell = total_reads < reads_threshold;
@@ -67,12 +67,13 @@ impl MartianMain for CheckBarcodesCompatibilityVdj {
         let allowed_gex_chem = [
             ChemistryName::FivePrimePE,
             ChemistryName::FivePrimePEV3,
+            ChemistryName::FivePrimePEOCMV3,
             ChemistryName::FivePrimeR1,
             ChemistryName::FivePrimeR2,
             ChemistryName::FivePrimeHT,
-            ChemistryName::FivePrimeR2OH,
+            ChemistryName::FivePrimeR2OCM,
             ChemistryName::FivePrimeR2V3,
-            ChemistryName::FivePrimeR2OHV3,
+            ChemistryName::FivePrimeR2OCMV3,
             ChemistryName::Custom,
         ];
 
@@ -93,11 +94,14 @@ impl MartianMain for CheckBarcodesCompatibilityVdj {
         // -----------------------------------------------------------------------------------------
         // Compute barcode histogram
         assert_eq!(
-            gex_chemistry_def.barcode_whitelist(),
-            args.vdj_chemistry_def.barcode_whitelist()
+            gex_chemistry_def.barcode_whitelist_spec(),
+            args.vdj_chemistry_def.barcode_whitelist_spec()
         );
 
-        let wl = Whitelist::construct(gex_chemistry_def.barcode_whitelist(), false)?.gel_bead();
+        let wl = gex_chemistry_def
+            .barcode_whitelist_source()?
+            .gel_bead()
+            .as_whitelist()?;
 
         let mut gex_bc_hist = SimpleHistogram::default();
         let mut vdj_bc_hist = SimpleHistogram::default();
@@ -124,10 +128,11 @@ impl MartianMain for CheckBarcodesCompatibilityVdj {
             (gex_cells.intersection(&vdj_cells).count() as f64) / (vdj_cells.len() as f64);
 
         if args.check_library_compatibility {
+            use LibraryType::GeneExpression;
             ensure!(
                 similarity >= MIN_SIMILARITY,
-                "Barcodes from the [{}] library and the [VDJ] library have \
-                 insufficient overlap. \
+                "TXRNGR10007: Barcodes from the [{GeneExpression}] library and the [VDJ] library \
+                 have insufficient overlap. \
                  This usually indicates the libraries originated from different cells or samples. \
                  This error can usually be fixed by providing correct FASTQ files from the same \
                  sample. If you are certain the input libraries are matched, you can bypass \
@@ -135,7 +140,6 @@ impl MartianMain for CheckBarcodesCompatibilityVdj {
                  [gene-expression] section of your multi config CSV. \
                  If you have questions regarding this error or your results, please contact \
                  support@10xgenomics.com.",
-                LibraryType::Gex
             );
         }
 
@@ -199,7 +203,7 @@ mod barcode_compatibility_tests {
                 library_type: Some(LibraryType::VdjAuto),
                 ..Default::default()
             }],
-            count_chemistry_defs: gex_chem_map(ChemistryName::ThreePrimeV3),
+            count_chemistry_defs: gex_chem_map(ChemistryName::ThreePrimeV3PolyA),
             gex_sample_def: vec![SampleDef {
                 library_type: Some(LibraryType::Gex),
                 ..Default::default()

@@ -10,6 +10,8 @@ from __future__ import annotations
 import collections
 import json
 import os
+from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import h5py
 import numpy as np
@@ -21,6 +23,10 @@ import cellranger.analysis.singlegenome as cr_sg_analysis
 import cellranger.utils as cr_utils
 import cellranger.vdj.utils as vdj_utils
 import cellranger.webshim.constants.gex as gex_constants
+
+if TYPE_CHECKING:
+    from cellranger.analysis.singlegenome import Projection
+
 from cellranger.websummary.sample_properties import (
     AggrCountSampleProperties,
     CountSampleProperties,
@@ -46,7 +52,7 @@ def get_plot_segment(start_index, end_index, sorted_bc, cell_barcodes: set[bytes
 
 
 def generate_counter_barcode_rank_plot_data(
-    cell_barcodes: set[bytes], barcode_summary, key, restrict_barcodes=None
+    cell_barcodes: set[bytes], barcode_summary, key, restrict_barcodes: set[bytes]
 ):
     """A helper function to generate the data required to generate the barcode rank.
 
@@ -65,19 +71,26 @@ def generate_counter_barcode_rank_plot_data(
         - barcode_summary: The barcode summary from the h5.
         - key: Specifies the entry to look up in barcode summary
             for getting the UMI counts
-        - restrict_barcodes: Optional list of cell barcodes to restrict to
+        - restrict_barcodes: Optional set of cell barcodes to restrict to; if
+            empty, include all barcodes.
     Output:
         - sorted_counts: UMI counts sorted in descending order
         - plot_segments: List of BarcodeRankPlotSegment
     """
     if restrict_barcodes:
-        restrict_indices = np.nonzero(np.isin(barcode_summary["bc_sequence"][:], restrict_barcodes))
+        bc_summary_seq = barcode_summary["bc_sequence"][:]
+        # numpy isin has up to 6x memory overhead and can't take advantage of
+        # the fact that we can provide set-based membership.
+        isin = np.full(bc_summary_seq.shape, False)
+        for i, bc in enumerate(bc_summary_seq):
+            if bc in restrict_barcodes:
+                isin[i] = True
+        restrict_indices = np.nonzero(isin)
         counts_per_bc = barcode_summary[key][:][restrict_indices]
-        barcode_sequences = barcode_summary["bc_sequence"][:][restrict_indices]
+        barcode_sequences = bc_summary_seq[restrict_indices]
     else:
         counts_per_bc = barcode_summary[key][:]
         barcode_sequences = barcode_summary["bc_sequence"][:]
-
     srt_order = compute_sort_order(counts_per_bc, barcode_sequences, cell_barcodes)
     sorted_bc = barcode_sequences[srt_order]
     sorted_counts = counts_per_bc[srt_order]
@@ -89,7 +102,13 @@ def generate_counter_barcode_rank_plot_data(
 
 
 class SampleData:
-    def __init__(self, sample_properties, sample_data_paths, plot_preprocess_func):
+    def __init__(
+        self,
+        sample_properties,
+        sample_data_paths,
+        plot_preprocess_func,
+        projections: Sequence[Projection],
+    ):
         if sample_properties:  # Can be None
             assert isinstance(sample_properties, SampleProperties)
         self.summary = load_metrics_summary(sample_data_paths.summary_path)
@@ -97,7 +116,7 @@ class SampleData:
         self.num_cells = self.summary.get("filtered_bcs_transcriptome_union")
 
         self.analyses, self.original_cluster_sizes = load_analyses(
-            sample_data_paths.analysis_path, plot_preprocess_func, sample_properties
+            sample_data_paths.analysis_path, plot_preprocess_func, sample_properties, projections
         )
 
         self.barcode_summary = load_barcode_summary(sample_data_paths.barcode_summary_path)
@@ -126,12 +145,15 @@ class SampleData:
             else None
         )
 
-        self.vdj_barcode_support = (
+        self.vdj_all_contig_annotations = (
             pd.read_csv(
-                ensure_str(sample_data_paths.vdj_barcode_support_path),
+                ensure_str(sample_data_paths.vdj_all_contig_annotations_csv_path),
                 converters={"barcode": ensure_binary},
-            )
-            if sample_data_paths.vdj_barcode_support_path
+            )[["barcode", "umis"]]
+            .groupby("barcode", as_index=False)
+            .sum()
+            if sample_data_paths.vdj_all_contig_annotations_csv_path
+            and os.path.getsize(sample_data_paths.vdj_all_contig_annotations_csv_path) != 0
             else None
         )
 
@@ -194,17 +216,20 @@ class SampleData:
         """
         assert self.cell_barcodes is not None
         return generate_counter_barcode_rank_plot_data(
-            self.cell_barcodes, self.barcode_summary, key
+            self.cell_barcodes,
+            self.barcode_summary,
+            key,
+            restrict_barcodes=set(),
         )
 
     def vdj_barcode_rank_plot_data(self):
         """Generate the data required to generate the barcode rank plot for VDJ."""
         assert self.cell_barcodes is not None
-        counts_per_bc = self.vdj_barcode_support["count"].to_numpy()
+        counts_per_bc = self.vdj_all_contig_annotations["umis"].to_numpy()
         srt_order = compute_sort_order(
-            counts_per_bc, self.vdj_barcode_support["barcode"], self.cell_barcodes
+            counts_per_bc, self.vdj_all_contig_annotations["barcode"], self.cell_barcodes
         )
-        sorted_bc = self.vdj_barcode_support["barcode"].to_numpy()[srt_order]
+        sorted_bc = self.vdj_all_contig_annotations["barcode"].to_numpy()[srt_order]
         sorted_counts = counts_per_bc[srt_order]
         del srt_order
 
@@ -334,16 +359,28 @@ def load_treemap_data(antibody_treemap_path):
         return json.load(f)
 
 
-def load_analyses(base_dir, plot_preprocess_func, sample_properties):
+def load_analyses(
+    base_dir,
+    plot_preprocess_func,
+    sample_properties,
+    projections: Sequence[Projection],
+):
     """Returns (analysis_object, original_cluster_sizes)."""
     if base_dir is None:
         return None, None
+
     if isinstance(sample_properties, CountSampleProperties):
         if len(sample_properties.genomes) == 1:
-            analyses = [cr_sg_analysis.SingleGenomeAnalysis.load_default_format(base_dir, "pca")]
+            analyses = [
+                cr_sg_analysis.SingleGenomeAnalysis.load_default_format(
+                    base_dir, method="pca", projections=projections
+                )
+            ]
         else:
             analyses = [
-                cr_sg_analysis.SingleGenomeAnalysis.load_default_format(base_dir, "pca"),
+                cr_sg_analysis.SingleGenomeAnalysis.load_default_format(
+                    base_dir, method="pca", projections=projections
+                ),
                 cr_mg_analysis.MultiGenomeAnalysis.load_default_format(base_dir),
             ]
 

@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use crate::coo_matrix::CooMatrix;
 use crate::metadata::{MatrixMetadata, Metadata, TransformMatrices};
 use anyhow::Result;
@@ -35,6 +36,13 @@ pub mod group_names {
 
     pub const IMAGES: &str = "images";
     pub const MICROSCOPE_IMAGE: &str = "microscope";
+
+    pub const SECONDARY_ANALYSIS: &str = "secondary_analysis";
+    pub const CLUSTERING: &str = "clustering";
+
+    pub const GRAPHCLUST_SUFFIX: &str = "graphclust";
+    pub const GENE_EXPRESSION_PREFIX: &str = "gene_expression";
+    pub const EIGHT_MICRON_SQUARE_PREFIX: &str = "square_008um";
 }
 
 pub struct FeatureSliceH5Writer {
@@ -168,7 +176,7 @@ impl FeatureSliceH5Writer {
         {
             let grid_index = &grid_index_of_barcode[barcode_idx];
             feature_slices[feature_idx].insert(grid_index, count as u32);
-            if target_set.map_or(true, |trgt_set| trgt_set.is_on_target(feature_idx as u32)) {
+            if target_set.is_none_or(|trgt_set| trgt_set.is_on_target(feature_idx as u32)) {
                 total_umis[[grid_index.row as usize, grid_index.col as usize]] += count as u32;
             }
         }
@@ -218,170 +226,6 @@ impl FeatureSliceH5Writer {
             &mut self.create_image_subgroup(group_name)?,
             MatrixMetadata::image(),
         )?;
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-mod tests {
-    use super::*;
-    use anyhow::ensure;
-    use hdf5::types::FixedAscii;
-    use hdf5::{Container, File, Group};
-    use itertools::Itertools;
-    use pretty_assertions::assert_eq;
-
-    fn compare_feature_slice_files(file1: &Path, file2: &Path) -> Result<()> {
-        let file1 = File::open(file1)?;
-        let file2 = File::open(file2)?;
-        compare_groups(&file1, &file2)?;
-        Ok(())
-    }
-
-    fn read_bytes(c: &Container) -> Result<Vec<u8>> {
-        Ok(match c.dtype()?.to_descriptor().unwrap() {
-            hdf5::types::TypeDescriptor::Float(_) => todo!(),
-            hdf5::types::TypeDescriptor::VarLenUnicode => {
-                c.read_scalar::<VarLenUnicode>()?.as_bytes().to_vec()
-            }
-            hdf5::types::TypeDescriptor::Integer(_) | hdf5::types::TypeDescriptor::Unsigned(_) => {
-                c.read_raw::<u8>()?
-            }
-            hdf5::types::TypeDescriptor::Boolean => todo!(),
-            hdf5::types::TypeDescriptor::Enum(_) => todo!(),
-            hdf5::types::TypeDescriptor::Compound(_) => todo!(),
-            hdf5::types::TypeDescriptor::FixedArray(_, _) => todo!(),
-            hdf5::types::TypeDescriptor::FixedAscii(_) => c
-                .read_raw::<FixedAscii<2048>>()?
-                .iter()
-                .flat_map(FixedAscii::as_bytes)
-                .copied()
-                .collect(),
-            hdf5::types::TypeDescriptor::FixedUnicode(_) => todo!(),
-            hdf5::types::TypeDescriptor::VarLenArray(_) => c
-                .read_raw::<VarLenUnicode>()?
-                .iter()
-                .flat_map(VarLenUnicode::as_bytes)
-                .copied()
-                .collect(),
-            hdf5::types::TypeDescriptor::VarLenAscii => todo!(),
-        })
-    }
-
-    fn compare_container(c1: &Container, c2: &Container) -> Result<()> {
-        ensure!(c1.name() == c2.name(), "Container names do not match");
-        ensure!(
-            c2.shape() == c2.shape(),
-            "Container {} shapes do not match",
-            c1.name()
-        );
-        println!(
-            "Container {} types: {:?} and {:?}",
-            c1.name(),
-            c1.dtype()?.to_descriptor().unwrap(),
-            c2.dtype()?.to_descriptor().unwrap()
-        );
-
-        if c1.name() == "/features/target_sets/Visium Mouse Transcriptome Probe Set v2.0" {
-            return Ok(());
-        }
-
-        let v1 = read_bytes(c1)?;
-        let v2 = read_bytes(c2)?;
-
-        ensure!(v1 == v2, "Container {} values do not match", c1.name());
-
-        Ok(())
-    }
-
-    fn sorted_coo(group: &Group) -> Result<Vec<(usize, usize, u32)>> {
-        Ok(CooMatrix::<u32>::load_from_h5_group(group)?
-            .into_iter()
-            .map(|([r, c], d)| (r, c, d))
-            .sorted()
-            .collect())
-    }
-
-    fn compare_groups(group1: &Group, group2: &Group) -> Result<()> {
-        // Compare the names of the groups
-
-        println!("Comparing {} and {}", group1.name(), group2.name());
-        ensure!(group1.name() == group2.name(), "Group names do not match");
-        // ensure!(group1.len() == group2.len(), "Group lengths do not match");
-
-        // Compare the attributes in the groups
-        for attr_name in group1
-            .attr_names()?
-            .into_iter()
-            .chain(group2.attr_names()?)
-            .unique()
-        {
-            println!("Comparing attribute {attr_name}");
-            let attr1 = group1.attr(&attr_name)?;
-            let attr2 = group2.attr(&attr_name)?;
-
-            if attr_name == attribute_names::METADATA_JSON {
-                let json1: serde_json::Value = serde_json::from_slice(&read_bytes(&attr1)?)?;
-                let json2: serde_json::Value = serde_json::from_slice(&read_bytes(&attr2)?)?;
-                assert_eq!(json1, json2, "Attribute {attr_name} values do not match");
-            } else {
-                compare_container(&attr1, &attr2)?;
-            }
-        }
-
-        println!("Looking at datasets");
-
-        if group1.name() == "/umis/total" {
-            let data1 = sorted_coo(group1)?;
-            let data2 = sorted_coo(group2)?;
-            assert_eq!(data1, data2, "Total UMIs do not match");
-            return Ok(());
-        }
-
-        let member_names: Vec<_> = group1
-            .member_names()?
-            .into_iter()
-            .chain(group2.member_names()?)
-            .unique()
-            .collect();
-
-        // Compare the datasets in the groups
-        for dataset_name in &member_names {
-            println!("Comparing dataset {dataset_name}");
-            let dataset1 = group1.dataset(dataset_name);
-            let dataset2 = group2.dataset(dataset_name);
-            if dataset1.is_err() && dataset2.is_err() {
-                continue;
-            }
-            ensure!(
-                dataset1.is_ok() && dataset2.is_ok(),
-                "Dataset {} does not exist in both groups",
-                dataset_name
-            );
-            let dataset1 = dataset1?;
-            let dataset2 = dataset2?;
-
-            compare_container(&dataset1, &dataset2)?;
-        }
-
-        println!("Looking at subgroups");
-
-        // Compare the subgroups in the groups
-        for subgroup_name in member_names.iter().take(2000) {
-            let subgroup1 = group1.group(subgroup_name);
-            let subgroup2 = group2.group(subgroup_name);
-            if subgroup1.is_err() && subgroup2.is_err() {
-                continue;
-            }
-            ensure!(
-                subgroup1.is_ok() && subgroup2.is_ok(),
-                "Subgroup {} does not exist in both groups",
-                subgroup_name
-            );
-            compare_groups(&subgroup1?, &subgroup2?)?;
-        }
-
         Ok(())
     }
 }

@@ -1,6 +1,5 @@
 [dependencies]
 md5 = '0.7'
-numpy = '0.19'
 
 [dependencies.anyhow]
 workspace = true
@@ -32,13 +31,16 @@ path = '../metric'
 [dependencies.ndarray]
 workspace = true
 
+[dependencies.numpy]
+workspace = true
+
 [dependencies.prost]
 optional = true
-version = '0.13'
+workspace = true
 
 [dependencies.prost-build]
 optional = true
-version = '0.13'
+workspace = true
 
 [dependencies.pyanyhow]
 path = '../pyanyhow'
@@ -65,6 +67,9 @@ tenx_source_available = []
 
 [lib]
 test = false
+
+[lints]
+workspace = true
 
 [package]
 authors = ['10x Genomics']

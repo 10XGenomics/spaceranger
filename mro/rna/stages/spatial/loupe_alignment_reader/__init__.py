@@ -114,7 +114,7 @@ def parse_loupe_json(
         regist_target_scalef = scalefactors_dict.get("regist_target_img_scalef")
         if pipeline_mode.product != Product.CYT:
             martian.throw(
-                "Find Cytassist information in Loupe json but not in Cytassist mode. \
+                "Found Cytassist information in Loupe json but not in Cytassist mode. \
                 Possibly wrong image arguments."
             )
         # The requirement here is that CytAssist image is NOT going to be scaled!

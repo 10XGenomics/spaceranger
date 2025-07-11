@@ -2,20 +2,17 @@
 name = 'spaceranger'
 
 [dependencies]
-csv = '1'
 dirs = '5'
-hex = '0.4'
-sha2 = '0.10'
 shell-escape = '0.1.5'
-terminal_size = '0.3'
-thiserror = '1'
-tiff = '0.9.1'
-url = '2.5.2'
+terminal_size = '0.4'
+url = '2.5.4'
 
 [dependencies.anyhow]
 workspace = true
 
 [dependencies.clap]
+default-features = true
+features = ['derive', 'wrap_help']
 workspace = true
 
 [dependencies.cloud_utils]
@@ -24,7 +21,13 @@ path = '../cloud_utils'
 [dependencies.cr_types]
 path = '../cr_types'
 
+[dependencies.csv]
+workspace = true
+
 [dependencies.fastq_set]
+path = '../fastq_set'
+
+[dependencies.hex]
 workspace = true
 
 [dependencies.itertools]
@@ -36,10 +39,16 @@ workspace = true
 [dependencies.metric]
 path = '../metric'
 
+[dependencies.multi]
+path = '../multi'
+
 [dependencies.ordered-float]
 workspace = true
 
 [dependencies.regex]
+workspace = true
+
+[dependencies.rustix]
 workspace = true
 
 [dependencies.serde]
@@ -48,10 +57,19 @@ workspace = true
 [dependencies.serde_json]
 workspace = true
 
+[dependencies.sha2]
+workspace = true
+
 [dependencies.slide_design]
 path = '../slide_design'
 
 [dependencies.tempfile]
+workspace = true
+
+[dependencies.thiserror]
+workspace = true
+
+[dependencies.tiff]
 workspace = true
 
 [dependencies.vdj_reference]
@@ -59,6 +77,9 @@ path = '../vdj_reference'
 
 [lib]
 test = false
+
+[lints]
+workspace = true
 
 [package]
 authors = ['10x Genomics']

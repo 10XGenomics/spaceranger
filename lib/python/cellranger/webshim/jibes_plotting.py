@@ -55,7 +55,7 @@ def make_color_map(features, jibes_plot=True):
 
 
 def make_histogram_plot(
-    feature_names, feature_counts, color_map, x_axis_lab: str = "Log 10 (1 + Count)"
+    feature_names, feature_counts, color_map, x_axis_lab: str = "Log 10 (1 + UMI Counts)"
 ):
     """Make a histogram plot.
 

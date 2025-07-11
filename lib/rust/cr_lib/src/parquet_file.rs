@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use anyhow::Result;
 use martian::MartianFileType;
 use martian_derive::martian_filetype;
@@ -248,6 +249,7 @@ impl PerReadGapAlignRow {
 pub struct PerUmiGapAlignRow {
     pub barcode: String,
     pub is_valid_barcode: bool,
+    pub sample_id: Option<String>,
     pub umi: String,
     pub left_probe_id: String,
     pub right_probe_id: String,
@@ -305,7 +307,10 @@ pub struct PerBarcodeFilter {
     pub weak_junction: bool,
     pub chimeric: bool,
     pub common_clone: bool,
+    pub gel_bead_contamination: bool,
+    pub gel_bead_indel: Option<bool>,
     pub enclone_fate: Option<String>,
+    pub insert_priming: bool,
 }
 
 impl PerBarcodeFilter {

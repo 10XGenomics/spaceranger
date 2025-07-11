@@ -4,22 +4,9 @@ test = false
 
 [dependencies]
 assert_approx_eq = '1'
-base64 = '0.13'
-bio = '2'
-csv = '1'
-derive_more = '0.99'
-docopt = '1'
-file_diff = '1'
-fxhash = '0.2'
-hostname = '0.4'
-lazy_static = '1'
-ndarray-rand = '0.14'
+base64 = '0.22'
 num = '0.4'
-rand_chacha = '0.3'
-sha2 = '0.10'
 slice-group-by = '0.3'
-tempfile = '3'
-thiserror = '1'
 
 [dependencies.anyhow]
 workspace = true
@@ -33,6 +20,9 @@ path = '../barcode_extensions'
 [dependencies.bazel_utils]
 path = '../bazel_utils'
 
+[dependencies.bio]
+workspace = true
+
 [dependencies.cr_bam]
 path = '../cr_bam'
 
@@ -45,7 +35,19 @@ path = '../cr_types'
 [dependencies.cr_websummary]
 path = '../cr_websummary'
 
+[dependencies.csv]
+workspace = true
+
+[dependencies.derive_more]
+workspace = true
+
+[dependencies.docopt]
+workspace = true
+
 [dependencies.fastq_set]
+path = '../fastq_set'
+
+[dependencies.file_diff]
 workspace = true
 
 [dependencies.flate2]
@@ -54,13 +56,16 @@ workspace = true
 [dependencies.hdf5]
 workspace = true
 
+[dependencies.hostname]
+workspace = true
+
 [dependencies.itertools]
 workspace = true
 
 [dependencies.json_report_derive]
 path = '../json_report_derive'
 
-[dependencies.libc]
+[dependencies.lazy_static]
 workspace = true
 
 [dependencies.log]
@@ -113,17 +118,21 @@ workspace = true
 workspace = true
 
 [dependencies.regex]
-default-features = false
-features = ['std', 'perf']
-version = '1'
+workspace = true
 
 [dependencies.rust-htslib]
+workspace = true
+
+[dependencies.rustix]
 workspace = true
 
 [dependencies.serde]
 workspace = true
 
 [dependencies.serde_json]
+workspace = true
+
+[dependencies.sha2]
 workspace = true
 
 [dependencies.shardio]
@@ -138,8 +147,14 @@ workspace = true
 [dependencies.strum_macros]
 workspace = true
 
+[dependencies.tempfile]
+workspace = true
+
 [dependencies.tenx-websummary]
 features = ['derive', 'image_base64_encode', 'image_proc']
+workspace = true
+
+[dependencies.thiserror]
 workspace = true
 
 [dependencies.transcriptome]
@@ -155,7 +170,7 @@ path = '../umi'
 path = '../vdj_reference'
 
 [dependencies.vdj_types]
-workspace = true
+path = '../vdj_types'
 
 [dependencies.websummary_build]
 path = '../websummary_build'
@@ -168,6 +183,9 @@ tenx_source_available = []
 
 [lib]
 test = false
+
+[lints]
+workspace = true
 
 [package]
 authors = ['10x Genomics']

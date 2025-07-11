@@ -16,9 +16,7 @@ from cellranger.spatial.tissue_regist_qc import (
     float_image_to_ubyte,
     save_tissue_regist_qc_img,
 )
-from cellranger.spatial.transform import (
-    convert_transform_corner_to_center,
-)
+from cellranger.spatial.transform import convert_transform_corner_to_center
 
 __MRO__ = """
 stage SUMMARIZE_REGISTRATION(
@@ -30,6 +28,7 @@ stage SUMMARIZE_REGISTRATION(
     in  json      fm_tissue_registration_metrics,
     in  json      sitk_tissue_registration_metrics,
     in  json      final_transform_json,
+    in  path      loupe_alignment_file,
     out json      tissue_registration_metrics,
     out tiff      resampled_cyta_img,
     out jpg       qc_registered_tissue_image,
@@ -38,6 +37,7 @@ stage SUMMARIZE_REGISTRATION(
     src py        "stages/spatial/summarize_registration",
 ) using (
     mem_gb   = 8,
+    vmem_gb  = 16,
     volatile = strict,
 )
 """
@@ -51,6 +51,7 @@ def main(args, outs):
     cyta_img = io.imread(args.tissue_detection_image).astype(np.uint8)
 
     if args.is_visium_hd and args.fid_perp_tmat:
+        # cv2.warpPerspective uses center-based sub-pixel coordinates
         center_based_perp_tmat = convert_transform_corner_to_center(np.array(args.fid_perp_tmat))
         # shape[::-1] because cv2 uses (width, height) convention
         cyta_img = cv2.warpPerspective(cyta_img, center_based_perp_tmat, cyta_img.shape[::-1])
@@ -93,7 +94,12 @@ def main(args, outs):
             fm_metrics = json.load(f)
         with open(args.sitk_tissue_registration_metrics) as f:
             sitk_metrics = json.load(f)
+        if args.loupe_alignment_file and os.path.exists(args.loupe_alignment_file):
+            uses_loupe_alignment = {"uses_loupe_alignment": True}
+        else:
+            uses_loupe_alignment = {"uses_loupe_alignment": False}
         sitk_metrics.update(fm_metrics)
+        sitk_metrics.update(uses_loupe_alignment)
         with open(outs.tissue_registration_metrics, "w") as f:
             json.dump(sitk_metrics, f)
     else:

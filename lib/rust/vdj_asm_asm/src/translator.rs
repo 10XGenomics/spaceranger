@@ -3,6 +3,7 @@
 //! vector of rna reads. This is likely a patch until the more structured
 //! form of data makes its way deep into the assembler
 //!
+#![deny(missing_docs)]
 use bitflags::bitflags;
 use cr_types::chemistry::ChemistryDef;
 use cr_types::rna_read::RnaRead;
@@ -11,7 +12,7 @@ use fastq_set::metric_utils::ILLUMINA_QUAL_OFFSET;
 use fastq_set::sseq::HammingIterOpt;
 use fastq_set::WhichEnd;
 use itertools::Itertools;
-use metric::SimpleHistogram;
+use metric::{Histogram, SimpleHistogram};
 
 bitflags! {
     struct ReadFlags: u16 {
@@ -174,7 +175,7 @@ pub fn correct_umis(
     let mut umi_sorted_reads = UmiSortedReads::default();
     for (i, (umi, group_reads)) in read_data
         .into_iter()
-        .group_by(|r| r.0.clone())
+        .chunk_by(|r| r.0.clone())
         .into_iter()
         .enumerate()
     {

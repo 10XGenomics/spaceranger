@@ -1,4 +1,6 @@
-/// everything in a MultiConfigCsv
+//! Multi config CSV
+#![allow(missing_docs)]
+
 pub(crate) mod csv;
 pub(crate) mod parse;
 pub mod preflight;
@@ -16,9 +18,12 @@ use crate::config::multiconst::FUNCTIONAL_MAP;
 use crate::config::preflight::check_library_chemistries;
 use crate::config::samplesconst::GLOBAL_MINIMUM_UMIS;
 use anyhow::{anyhow, bail, ensure, Context, Result};
-use barcode::whitelist::BarcodeId;
+use barcode::whitelist::{
+    categorize_rtl_multiplexing_barcode_id, BarcodeId, RTLMultiplexingBarcodeType, ReqStrand,
+};
 use barcode::WhitelistSource;
 use cloud_utils;
+use cr_types::cell_annotation::CellAnnotationModel;
 use cr_types::chemistry::{
     AutoChemistryName, AutoOrRefinedChemistry, ChemistryName, ChemistrySpecs,
 };
@@ -26,11 +31,13 @@ use cr_types::constants::DEFAULT_MIN_CRISPR_UMI_THRESHOLD;
 use cr_types::reference::feature_reference::{
     BeamMode, FeatureConfig, SpecificityControls, MHC_ALLELE, NO_ALLELE,
 };
+use cr_types::reference::probe_set_reference::TargetSetFile;
 use cr_types::sample_def::{FastqMode, SampleDef};
-use cr_types::types::{CellMultiplexingType, CrMultiGraph};
+use cr_types::types::{BarcodeMultiplexingType, CellLevel, CrMultiGraph, ReadLevel};
 use cr_types::{AlignerParam, FeatureBarcodeType, LibraryType, TargetingMethod, VdjChainType};
 use fastq_set::filenames::FastqDef;
-use itertools::{process_results, Itertools};
+use itertools::Itertools;
+use martian::{AsMartianPrimaryType, MartianPrimaryType};
 use martian_derive::martian_filetype;
 use metric::{TxHashMap, TxHashSet};
 use regex::Regex;
@@ -47,8 +54,6 @@ use std::str::FromStr;
 use strum_macros::{Display as EnumDisplay, EnumString};
 
 const MIN_FORCE_CELLS: usize = 10;
-
-const ERROR_INCLUDE_INTRONS_WITH_RTL: &str = "The [gene-expression] section specifies the parameter include-introns, which is not valid for Fixed RNA Profiling chemistries.";
 
 const DEFAULT_OVERHANG_WL: &str = "overhang";
 
@@ -225,7 +230,9 @@ impl FromStr for Percent {
 /// A named collection of chemistries, zero or one per library type.
 /// This concept doesn't escape the configuration parsing stage, thus why it is
 /// declared here instead of with the rest of the chemistries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, EnumDisplay, EnumString)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, EnumDisplay, EnumString,
+)]
 #[strum(ascii_case_insensitive)]
 pub enum ChemistrySet {
     #[serde(rename = "MFRP")]
@@ -234,6 +241,18 @@ pub enum ChemistrySet {
     #[serde(rename = "MFRP-R1")]
     #[strum(to_string = "MFRP-R1")]
     MfrpR1,
+    #[serde(rename = "SC3Pv3")]
+    #[strum(to_string = "SC3Pv3")]
+    ThreePrimeV3,
+    #[serde(rename = "SC3Pv3HT")]
+    #[strum(to_string = "SC3Pv3HT")]
+    ThreePrimeV3HT,
+    #[serde(rename = "SC3Pv4")]
+    #[strum(to_string = "SC3Pv4")]
+    ThreePrimeV4,
+    #[serde(rename = "SC3Pv4OCM")]
+    #[strum(to_string = "SC3Pv4OCM")]
+    ThreePrimeV4OCM,
 }
 
 impl ChemistrySet {
@@ -243,41 +262,88 @@ impl ChemistrySet {
     fn is_rtl(&self) -> Option<bool> {
         match self {
             Self::Mfrp | Self::MfrpR1 => Some(true),
+            Self::ThreePrimeV3
+            | Self::ThreePrimeV3HT
+            | Self::ThreePrimeV4
+            | Self::ThreePrimeV4OCM => Some(false),
         }
     }
 
     fn is_mfrp(&self) -> bool {
         match self {
             Self::Mfrp | Self::MfrpR1 => true,
+            Self::ThreePrimeV3
+            | Self::ThreePrimeV3HT
+            | Self::ThreePrimeV4
+            | Self::ThreePrimeV4OCM => false,
         }
     }
 
     /// Return the specific chemistry for the provided library type.
-    fn chemistry_for_library_type(&self, library_type: LibraryType) -> Result<ChemistryName> {
+    pub fn chemistry_for_library_type(&self, library_type: LibraryType) -> Result<ChemistryName> {
         match self {
             Self::Mfrp => match library_type {
                 LibraryType::Gex => Some(ChemistryName::MFRP_RNA),
                 LibraryType::Antibody => Some(ChemistryName::MFRP_Ab),
                 LibraryType::Crispr => Some(ChemistryName::MFRP_CRISPR),
-                _ => None
+                _ => None,
             },
             Self::MfrpR1 => match library_type {
                 LibraryType::Gex => Some(ChemistryName::MFRP_RNA_R1),
                 LibraryType::Antibody => Some(ChemistryName::MFRP_Ab_R1),
-                _ => None
-            }
-        }.ok_or_else(|| anyhow!("the chemistry set {self} does not include a chemistry for library type {library_type}"))
+                _ => None,
+            },
+            Self::ThreePrimeV3 => match library_type {
+                LibraryType::Gex => Some(ChemistryName::ThreePrimeV3PolyA),
+                LibraryType::Antibody
+                | LibraryType::Crispr
+                | LibraryType::Cellplex
+                | LibraryType::Custom => Some(ChemistryName::ThreePrimeV3CS1),
+                _ => None,
+            },
+            Self::ThreePrimeV3HT => match library_type {
+                LibraryType::Gex => Some(ChemistryName::ThreePrimeV3HTPolyA),
+                LibraryType::Antibody
+                | LibraryType::Crispr
+                | LibraryType::Custom
+                | LibraryType::Cellplex => Some(ChemistryName::ThreePrimeV3HTCS1),
+                _ => None,
+            },
+            Self::ThreePrimeV4 => match library_type {
+                LibraryType::Gex => Some(ChemistryName::ThreePrimeV4PolyA),
+                LibraryType::Antibody | LibraryType::Crispr | LibraryType::Custom => {
+                    Some(ChemistryName::ThreePrimeV4CS1)
+                }
+                _ => None,
+            },
+            Self::ThreePrimeV4OCM => match library_type {
+                LibraryType::Gex => Some(ChemistryName::ThreePrimeV4PolyAOCM),
+                LibraryType::Antibody | LibraryType::Crispr | LibraryType::Custom => {
+                    Some(ChemistryName::ThreePrimeV4CS1OCM)
+                }
+                _ => None,
+            },
+        }
+        .ok_or_else(|| {
+            anyhow!("The chemistry set {self} does not support the library type {library_type}.")
+        })
     }
 }
 
 /// Specify a chemistry.
 /// Can be an auto detection mode, a specific manual chemistry, or a
 /// chemistry set to be unpacked later.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ChemistryParam {
     AutoOrRefined(AutoOrRefinedChemistry),
     Set(ChemistrySet),
+}
+
+impl AsMartianPrimaryType for ChemistryParam {
+    fn as_martian_primary_type() -> MartianPrimaryType {
+        MartianPrimaryType::Str
+    }
 }
 
 impl ChemistryParam {
@@ -301,8 +367,8 @@ impl ChemistryParam {
     }
 }
 
-impl std::fmt::Display for ChemistryParam {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for ChemistryParam {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::AutoOrRefined(chem) => chem.fmt(f),
             Self::Set(set) => set.fmt(f),
@@ -339,27 +405,36 @@ impl FromStr for ParseAutoOrRefinedChemistry {
             // of the chemistries here, but the aliases and case-insensitive
             // behavior are specific to this parsing and it should remain
             // confined to this module.
+
+            // NOTE: if you add or modify options here, you must update the
+            // equivalent matcher in the telemetry configuration.
             "auto" => Auto(Count),
             "custom" => Refined(Custom),
             "threeprime" => Auto(ThreePrime),
             "fiveprime" => Auto(FivePrime),
             "sc3pv1" => Refined(ThreePrimeV1),
             "sc3pv2" => Refined(ThreePrimeV2),
-            "sc3pv3" => Refined(ThreePrimeV3),
-            "sc3pv4" => Refined(ThreePrimeV4),
-            "sc3pv4-oh" => Refined(ThreePrimeV4OH),
+            "sc3pv3-polya" => Refined(ThreePrimeV3PolyA),
+            "sc3pv3-cs1" => Refined(ThreePrimeV3CS1),
+            "sc3pv4-polya" => Refined(ThreePrimeV4PolyA),
+            "sc3pv4-cs1" => Refined(ThreePrimeV4CS1),
+            "sc3pv4-polya-ocm" => Refined(ThreePrimeV4PolyAOCM),
+            "sc3pv4-cs1-ocm" => Refined(ThreePrimeV4CS1OCM),
             // Removed from CS - once disabled for PD, remove this as a valid
             // parse option and move the preflight check here.
             "sc3pv3lt" => Refined(ThreePrimeV3LT),
-            "sc3pv3ht" => Refined(ThreePrimeV3HT),
+            "sc3pv3ht-polya" => Refined(ThreePrimeV3HTPolyA),
+            "sc3pv3ht-cs1" => Refined(ThreePrimeV3HTCS1),
             "sc5p-pe" | "sc5ppe" => Refined(FivePrimePE),
             "sc5p-pe-v3" | "sc5ppev3" => Refined(FivePrimePEV3),
+            "sc5p-pe-ocm-v3" | "sc5ppeocmv3" => Refined(FivePrimePEOCMV3),
             "sc5p-r2" | "sc5pr2" => Refined(FivePrimeR2),
             "sc5p-r2-v3" | "sc5pr2v3" => Refined(FivePrimeR2V3),
-            "sc5p-r2-oh-v3" | "sc5pr2ohv3" => Refined(FivePrimeR2OHV3),
+            "sc5p-r2-ocm-v3" | "sc5pr2ocmv3" => Refined(FivePrimeR2OCMV3),
             "sc5pht" => Refined(FivePrimeHT),
             "sc-fb" | "scfb" => Refined(FeatureBarcodingOnly),
             "sfrp" => Refined(SFRP),
+            "sfrp-no-trim-r2" => Refined(SfrpNoTrimR2),
             "mfrp-rna" => Refined(MFRP_RNA),
             "mfrp-ab" => Refined(MFRP_Ab),
             "mfrp-crispr" => Refined(MFRP_CRISPR),
@@ -369,6 +444,7 @@ impl FromStr for ParseAutoOrRefinedChemistry {
             "mfrp-ab-r1" => Refined(MFRP_Ab_R1),
             "mfrp-ab-r2pos50" => Refined(MFRP_Ab_R2pos50),
             "mfrp-r1-48-uncollapsed" => Refined(MFRP_R1_48_uncollapsed),
+            "mfrp-r1-no-trim-r2" => Refined(MfrpR1NoTrimR2),
             "arc-v1" => Refined(ArcV1),
             _ => bail!("unknown chemistry: {chemistry}"),
         }))
@@ -378,8 +454,8 @@ impl FromStr for ParseAutoOrRefinedChemistry {
 /// The gene-expression parameters in the experiment CSV
 #[derive(Debug, Default, Serialize)]
 pub struct GeneExpressionParams {
-    pub reference_path: PathBuf,
-    pub probe_set: Vec<PathBuf>,
+    pub reference_path: Option<PathBuf>,
+    pub probe_set: Vec<TargetSetFile>,
     pub emptydrops_minimum_umis: Option<usize>,
     pub global_minimum_umis: Option<usize>,
     pub max_mito_percent: Option<f64>,
@@ -399,14 +475,14 @@ pub struct GeneExpressionParams {
     pub min_assignment_confidence: Option<f64>,
     pub barcode_sample_assignment: Option<PathBuf>,
     /// Select which model is used by the cell annotation service. The default string is "default" but will be validated
-    pub cell_annotation_model: Option<String>,
+    pub cell_annotation_model: Option<CellAnnotationModel>,
     pub skip_cell_annotation: bool,
     pub tenx_cloud_token_path: Option<String>,
 }
 
 impl GeneExpressionParams {
     /// Return the probe set.
-    pub fn probe_set(&self) -> &[PathBuf] {
+    pub fn probe_set(&self) -> &[TargetSetFile] {
         &self.probe_set
     }
 
@@ -483,8 +559,8 @@ impl<'a> TryFrom<&Section<'a>> for GeneExpressionParams {
 
     fn try_from(sec: &Section<'a>) -> Result<Self> {
         let ctx = ParseCtx::Hdr(sec.name);
-        let mut reference_path = PathBuf::new();
-        let mut probe_set: Vec<PathBuf> = Vec::new();
+        let mut reference_path: Option<PathBuf> = None;
+        let mut probe_set: Vec<TargetSetFile> = Vec::new();
         let mut filter_probes: Option<bool> = None;
         let mut emptydrops_minimum_umis = None;
         let mut global_minimum_umis = None;
@@ -502,7 +578,7 @@ impl<'a> TryFrom<&Section<'a>> for GeneExpressionParams {
         let mut cmo_set: Option<PathBuf> = None;
         let mut min_assignment_confidence: Option<f64> = None;
         let mut barcode_sample_assignment: Option<PathBuf> = None;
-        let mut cell_annotation_model: Option<String> = None;
+        let mut cell_annotation_model: Option<CellAnnotationModel> = None;
         let mut skip_cell_annotation: bool = false;
         let mut tenx_cloud_token_path: Option<String> = None;
         let mut filter_high_occupancy_gems = true;
@@ -514,16 +590,13 @@ impl<'a> TryFrom<&Section<'a>> for GeneExpressionParams {
             let ctx = ctx.with_col(param.as_str());
             match param.as_str() {
                 "ref" | "reference" | "reference-path" => {
-                    reference_path = row
-                        .get(1)
-                        .ok_or_else(|| {
-                            anyhow!("{ctx} no value provided for '{}'", row[0].fragment())
-                        })?
-                        .parse::<PathBuf>(ctx)?;
+                    if let Some(path) = row.get(1).and_then(empty_is_none) {
+                        reference_path = Some(path.parse::<PathBuf>(ctx)?);
+                    }
                 }
                 "probe-set" => {
                     if let Some(path) = row.get(1).and_then(empty_is_none) {
-                        probe_set.push(path.parse::<PathBuf>(ctx)?);
+                        probe_set.push(TargetSetFile::from(path.parse::<PathBuf>(ctx)?));
                     }
                 }
                 "filter-probes" => {
@@ -622,7 +695,7 @@ impl<'a> TryFrom<&Section<'a>> for GeneExpressionParams {
                 }
                 "cell-annotation-model" => {
                     if let Some(val) = row.get(1).and_then(empty_is_none) {
-                        cell_annotation_model = Some(val.parse::<String>(ctx)?);
+                        cell_annotation_model = Some(val.parse::<CellAnnotationModel>(ctx)?);
                     }
                 }
                 "skip-cell-annotation" => {
@@ -630,7 +703,7 @@ impl<'a> TryFrom<&Section<'a>> for GeneExpressionParams {
                         skip_cell_annotation = val.parse::<Bool>(ctx)?.into();
                     }
                 }
-                "cell-annotation-token-path" => {
+                "tenx-cloud-token-path" => {
                     if let Some(val) = row.get(1).and_then(empty_is_none) {
                         tenx_cloud_token_path = Some(val.parse::<String>(ctx)?);
                     }
@@ -652,10 +725,6 @@ impl<'a> TryFrom<&Section<'a>> for GeneExpressionParams {
             }
         }
 
-        ensure!(
-            !reference_path.as_os_str().is_empty(),
-            "{ctx} reference is missing"
-        );
         ensure!(
             !(expect_cells.is_some() && force_cells.is_some()),
             "{ctx} only one of force-cells or expect-cells is allowed.",
@@ -687,7 +756,10 @@ impl<'a> TryFrom<&Section<'a>> for GeneExpressionParams {
 
         // Disallow setting include-introns for RTL chemistries.
         if chemistry.as_ref().and_then(ChemistryParam::is_rtl) == Some(true) {
-            ensure!(include_introns.is_none(), ERROR_INCLUDE_INTRONS_WITH_RTL);
+            ensure!(
+                include_introns.is_none(),
+                MultiConfigCsvError::FlexIncludeIntrons
+            );
         }
 
         // Filter probes by default.
@@ -801,7 +873,8 @@ impl<'a> TryFrom<&Section<'a>> for FeatureParams {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct VdjParams {
-    pub reference_path: PathBuf,
+    pub reference_path: Option<PathBuf>,
+    pub denovo: Option<bool>,
     pub inner_enrichment_primers: Option<PathBuf>,
     pub r1_length: Option<usize>,
     pub r2_length: Option<usize>,
@@ -817,7 +890,8 @@ impl<'a> TryFrom<&Section<'a>> for VdjParams {
 
     fn try_from(sec: &Section<'a>) -> Result<Self> {
         let ctx = ParseCtx::Hdr(sec.name);
-        let mut reference_path = PathBuf::new();
+        let mut reference_path: Option<PathBuf> = None;
+        let mut denovo = None;
         let mut inner_enrichment_primers: Option<PathBuf> = None;
         let mut r1_length: Option<usize> = None;
         let mut r2_length: Option<usize> = None;
@@ -834,12 +908,14 @@ impl<'a> TryFrom<&Section<'a>> for VdjParams {
             let ctx = ctx.with_col(row[0].fragment());
             match param.as_str() {
                 "ref" | "reference" | "reference-path" => {
-                    reference_path = row
-                        .get(1)
-                        .ok_or_else(|| {
-                            anyhow!("{ctx} no value provided for '{}'", row[0].fragment())
-                        })?
-                        .parse::<PathBuf>(ctx)?;
+                    if let Some(path) = row.get(1).and_then(empty_is_none) {
+                        reference_path = Some(path.parse::<PathBuf>(ctx)?);
+                    }
+                }
+                "denovo" => {
+                    if let Some(val) = row.get(1).and_then(empty_is_none) {
+                        denovo = Some(val.parse::<Bool>(ctx)?.into());
+                    }
                 }
                 "inner-enrichment-primers" => {
                     if let Some(path) = row.get(1).and_then(empty_is_none) {
@@ -892,12 +968,19 @@ impl<'a> TryFrom<&Section<'a>> for VdjParams {
                 }
             }
         }
-        ensure!(
-            !reference_path.as_os_str().is_empty(),
-            "{ctx} reference is missing"
-        );
+        if denovo != Some(true) {
+            ensure!(reference_path.is_some(), "{ctx} reference is missing");
+        }
+        if reference_path.is_none() {
+            ensure!(
+                inner_enrichment_primers.is_some(),
+                "{ctx} requires inner_enrichment_primers to be specified if reference is missing"
+            );
+        }
+
         Ok(VdjParams {
             reference_path,
+            denovo,
             inner_enrichment_primers,
             r1_length,
             r2_length,
@@ -1006,10 +1089,15 @@ impl<'a, 'b, 'c> TryFrom<(ParseCtx<'a, SectionHdr<'b>>, Span<'c>)> for Lanes {
             );
         };
 
-        Ok(Lanes::Lanes(process_results(
-            lanes.into_iter().map(parse_range).flatten_ok(),
-            |iter| iter.sorted().dedup().collect(),
-        )?))
+        Ok(Lanes::Lanes(
+            lanes
+                .into_iter()
+                .map(parse_range)
+                .flatten_ok()
+                .process_results(|iter| iter.sorted())?
+                .dedup()
+                .collect(),
+        ))
     }
 }
 
@@ -1571,6 +1659,7 @@ pub const PROBE_BARCODE_ID_GROUPING: &str = "+";
 pub struct SampleRow {
     pub sample_id: String,
     cmo_ids: Option<Vec<String>>,
+    hashtag_ids: Option<Vec<String>>,
     /// NOTE: these may be +-concatenated groupings. Access via the
     /// sample_barcode_ids method to control how they are unpacked.
     probe_barcode_ids: Option<Vec<String>>,
@@ -1611,14 +1700,17 @@ impl SampleRow {
     ) -> Option<Vec<Vec<&str>>> {
         match (
             self.cmo_ids.as_ref(),
+            self.hashtag_ids.as_ref(),
             self.probe_barcode_ids.as_ref(),
             self.overhang_ids.as_ref(),
         ) {
-            (Some(x), None, None) | (None, None, Some(x)) => {
-                // cmo_ids or overhang_ids
+            (Some(x), None, None, None)
+            | (None, Some(x), None, None)
+            | (None, None, None, Some(x)) => {
+                // cmo_ids or hashtag_ids or overhang_ids
                 Some(x.iter().map(|v| vec![v.as_str()]).collect())
             }
-            (None, Some(x), None) => {
+            (None, None, Some(x), None) => {
                 // probe_barcode_ids
                 Some(
                     x.iter()
@@ -1635,31 +1727,34 @@ impl SampleRow {
                         .collect(),
                 )
             }
-            (None, None, None) => None,
+            (None, None, None, None) => None,
             _ => panic!("found more than one source of sample barcode IDs"),
         }
     }
 
     /// Return the type of cell multiplexing.
-    pub fn cell_multiplexing_type(&self) -> CellMultiplexingType {
+    pub fn barcode_multiplexing_type(&self) -> BarcodeMultiplexingType {
         match (
             self.cmo_ids.is_some(),
+            self.hashtag_ids.is_some(),
             self.probe_barcode_ids.is_some(),
             self.overhang_ids.is_some(),
         ) {
-            (true, false, false) => CellMultiplexingType::CMO,
-            (false, true, false) => CellMultiplexingType::RTL,
-            (false, false, true) => CellMultiplexingType::OH,
+            (true, false, false, false) => BarcodeMultiplexingType::CellLevel(CellLevel::CMO),
+            (false, true, false, false) => BarcodeMultiplexingType::CellLevel(CellLevel::Hashtag),
+            (false, false, true, false) => BarcodeMultiplexingType::ReadLevel(ReadLevel::RTL),
+            (false, false, false, true) => BarcodeMultiplexingType::ReadLevel(ReadLevel::OH),
             _ => unreachable!(),
         }
     }
 
-    /// Return the appropriate column name, either cmo_ids or probe_barcode_ids.
+    /// Return the appropriate column name.
     pub fn sample_barcode_ids_column_name(&self) -> &str {
-        match self.cell_multiplexing_type() {
-            CellMultiplexingType::CMO => samplesconst::CMO_IDS,
-            CellMultiplexingType::RTL => samplesconst::PROBE_BARCODE_IDS,
-            CellMultiplexingType::OH => samplesconst::OH_IDS,
+        match self.barcode_multiplexing_type() {
+            BarcodeMultiplexingType::CellLevel(CellLevel::CMO) => samplesconst::CMO_IDS,
+            BarcodeMultiplexingType::CellLevel(CellLevel::Hashtag) => samplesconst::HASHTAG_IDS,
+            BarcodeMultiplexingType::ReadLevel(ReadLevel::RTL) => samplesconst::PROBE_BARCODE_IDS,
+            BarcodeMultiplexingType::ReadLevel(ReadLevel::OH) => samplesconst::OH_IDS,
         }
     }
 }
@@ -1677,6 +1772,14 @@ impl SamplesCsv {
 
     pub fn has_overhang_ids(&self) -> bool {
         self.0.iter().any(|sample| sample.overhang_ids.is_some())
+    }
+
+    pub fn has_hashtag_ids(&self) -> bool {
+        self.0.iter().any(|sample| sample.hashtag_ids.is_some())
+    }
+
+    pub fn has_cmo_ids(&self) -> bool {
+        self.0.iter().any(|sample| sample.cmo_ids.is_some())
     }
 
     fn has_force_cells(&self) -> bool {
@@ -1759,9 +1862,9 @@ impl SamplesCsv {
     }
 
     pub fn is_rtl_multiplexed(&self) -> bool {
-        self.0
-            .iter()
-            .all(|sample| sample.cell_multiplexing_type() == CellMultiplexingType::RTL)
+        self.0.iter().all(|sample| {
+            sample.barcode_multiplexing_type() == BarcodeMultiplexingType::ReadLevel(ReadLevel::RTL)
+        })
     }
 
     pub fn get_cmo_sample_map(&self) -> TxHashMap<String, String> {
@@ -1777,6 +1880,60 @@ impl SamplesCsv {
             }
         }
         res
+    }
+
+    pub fn get_hashtag_sample_map(&self) -> TxHashMap<String, String> {
+        let mut res = TxHashMap::default();
+        for row in &self.0 {
+            if let Some(ref hashtag_ids) = row.hashtag_ids {
+                for hashtag_id in hashtag_ids {
+                    assert!(
+                        res.insert(hashtag_id.clone(), row.sample_id.clone())
+                            .is_none(),
+                        "hashtag_id {hashtag_id} used for multiple samples"
+                    );
+                }
+            }
+        }
+        res
+    }
+
+    /// Iterate over tuples of sample ID and multiplexing barcode IDs.
+    /// sample_id,BC001+AB001|BC002|AB002
+    /// [(sample_id, [[BC001, AB001], [BC002, AB002]])]
+    fn iter_sample_and_probe_barcodes(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            SampleId,
+            impl Iterator<Item = impl Iterator<Item = BarcodeId> + '_> + '_,
+        ),
+    > + '_ {
+        self.0.iter().map(|row| {
+            (
+                SampleId::from_str(&row.sample_id).unwrap(),
+                row.probe_barcode_ids
+                    .iter()
+                    .flatten()
+                    .map(|x| x.split(PROBE_BARCODE_ID_GROUPING).map(BarcodeId::pack)),
+            )
+        })
+    }
+
+    /// Return all distinct RTLMultiplexingBarcodeType in the probe_id column.
+    fn rtl_multiplexing_barcode_types(
+        &self,
+    ) -> impl Iterator<Item = Option<RTLMultiplexingBarcodeType>> + '_ {
+        self.iter_sample_and_probe_barcodes()
+            .flat_map(|(_, ids)| ids)
+            .flatten()
+            .map(|x| categorize_rtl_multiplexing_barcode_id(x.as_str()))
+            .unique()
+    }
+
+    /// Return whether these multiplexing barcode types need translation.
+    fn has_translated_multiplexing_barcode_types(&self) -> bool {
+        self.rtl_multiplexing_barcode_types().any(|x| x.is_some())
     }
 
     /// Return a mapping from source to translated probe barcode.
@@ -1799,15 +1956,9 @@ impl SamplesCsv {
     fn iter_translated_probe_barcodes(
         &self,
     ) -> impl Iterator<Item = (BarcodeId, impl Iterator<Item = BarcodeId> + '_)> + '_ {
-        self.0
-            .iter()
-            .filter_map(|row| row.probe_barcode_ids.as_ref())
-            .flatten()
-            .filter_map(|bc| {
-                let mut pieces_iter = bc.split(PROBE_BARCODE_ID_GROUPING);
-                pieces_iter
-                    .next()
-                    .map(|target| (BarcodeId::pack(target), pieces_iter.map(BarcodeId::pack)))
+        self.iter_sample_and_probe_barcodes()
+            .flat_map(|(_sample_id, barcode_ids)| {
+                barcode_ids.filter_map(|mut pieces| pieces.next().map(|target| (target, pieces)))
             })
     }
 }
@@ -1821,11 +1972,12 @@ pub enum ProbeBarcodeIterationMode {
     Mapped,
 }
 
-mod samplesconst {
+pub mod samplesconst {
     pub const SAMPLE_ID: &str = "sample_id";
     pub const CMO_IDS: &str = "cmo_ids";
+    pub const HASHTAG_IDS: &str = "hashtag_ids";
     pub const PROBE_BARCODE_IDS: &str = "probe_barcode_ids";
-    pub const OH_IDS: &str = "overhang_ids";
+    pub const OH_IDS: &str = "ocm_barcode_ids";
     pub const _GEM_WELLS: &str = "gem_wells";
     pub const DESCRIPTION: &str = "description";
     pub const EXPECT_CELLS: &str = "expect_cells";
@@ -1837,6 +1989,7 @@ mod samplesconst {
     #[cfg(not(test))]
     pub const SAMP_OPT_HDRS: &[&str] = &[
         CMO_IDS,
+        HASHTAG_IDS,
         OH_IDS,
         PROBE_BARCODE_IDS,
         DESCRIPTION,
@@ -1849,6 +2002,7 @@ mod samplesconst {
     #[cfg(test)]
     pub const SAMP_OPT_HDRS: &[&str] = &[
         CMO_IDS,
+        HASHTAG_IDS,
         PROBE_BARCODE_IDS,
         OH_IDS,
         _GEM_WELLS,
@@ -1866,7 +2020,7 @@ impl<'a> TryFrom<(&TxHashSet<GemWell>, &Section<'a>)> for SamplesCsv {
 
     fn try_from((valid_gws, sec): (&TxHashSet<GemWell>, &Section<'a>)) -> Result<Self> {
         use samplesconst::{
-            CMO_IDS, DESCRIPTION, EMPTYDROPS_MINIMUM_UMIS, EXPECT_CELLS, FORCE_CELLS,
+            CMO_IDS, DESCRIPTION, EMPTYDROPS_MINIMUM_UMIS, EXPECT_CELLS, FORCE_CELLS, HASHTAG_IDS,
             MAX_MITO_FRAC, OH_IDS, PROBE_BARCODE_IDS, SAMPLE_ID, SAMP_OPT_HDRS, SAMP_REQ_HDRS,
             _GEM_WELLS,
         };
@@ -1881,27 +2035,36 @@ impl<'a> TryFrom<(&TxHashSet<GemWell>, &Section<'a>)> for SamplesCsv {
                 .into();
 
             let cmo_ids = parser.find_opt(row, CMO_IDS)?;
+            let hashtag_ids = parser.find_opt(row, HASHTAG_IDS)?;
             let probe_barcode_ids = parser.find_opt(row, PROBE_BARCODE_IDS)?;
             let overhang_ids = parser.find_opt(row, OH_IDS)?;
-            let sample_barcode_ids = cmo_ids.or(probe_barcode_ids).or(overhang_ids);
-            let cell_multiplexing_type = match (cmo_ids, probe_barcode_ids, overhang_ids) {
-                (Some(_), None, None) => CellMultiplexingType::CMO,
-                (None, Some(_), None) => CellMultiplexingType::RTL,
-                (None, None, Some(_)) => CellMultiplexingType::OH,
-                (None, None, None) => {
+            let sample_barcode_ids = cmo_ids
+                .or(hashtag_ids)
+                .or(probe_barcode_ids)
+                .or(overhang_ids);
+            let barcode_multiplexing_type = match (
+                cmo_ids,
+                hashtag_ids,
+                probe_barcode_ids,
+                overhang_ids,
+            ) {
+                (Some(_), None, None, None) => BarcodeMultiplexingType::CellLevel(CellLevel::CMO),
+                (None, Some(_), None, None) => {
+                    BarcodeMultiplexingType::CellLevel(CellLevel::Hashtag)
+                }
+                (None, None, Some(_), None) => BarcodeMultiplexingType::ReadLevel(ReadLevel::RTL),
+                (None, None, None, Some(_)) => BarcodeMultiplexingType::ReadLevel(ReadLevel::OH),
+                (None, None, None, None) => {
                     bail!(
-                        "{ctx} requires either {CMO_IDS} or {PROBE_BARCODE_IDS} or {OH_IDS} column \
+                        "{ctx} requires either {CMO_IDS} or {HASHTAG_IDS} or {PROBE_BARCODE_IDS} or {OH_IDS} column \
                          to be specified"
                     )
                 }
-                (Some(_), Some(_), _) => {
-                    bail!("{ctx} has mutually exclusive columns {CMO_IDS} and {PROBE_BARCODE_IDS}")
-                }
-                (None, Some(_), Some(_)) => {
-                    bail!("{ctx} has mutually exclusive columns {PROBE_BARCODE_IDS} and {OH_IDS}")
-                }
-                (Some(_), None, Some(_)) => {
-                    bail!("{ctx} has mutually exclusive columns {CMO_IDS} and {OH_IDS}")
+                (_, _, _, _) => {
+                    bail!(
+                        "{ctx} has more than one of the following mutually exclusive columns: \
+                    {CMO_IDS}, {HASHTAG_IDS}, {PROBE_BARCODE_IDS} and/or {OH_IDS}"
+                    )
                 }
             };
             let expect_cells = parser.find_opt(row, EXPECT_CELLS)?;
@@ -1921,55 +2084,65 @@ impl<'a> TryFrom<(&TxHashSet<GemWell>, &Section<'a>)> for SamplesCsv {
                      without the required {PROBE_BARCODE_IDS} column",
                 );
             };
-            let sample_barcode_column_name = match cell_multiplexing_type {
-                CellMultiplexingType::CMO => CMO_IDS,
-                CellMultiplexingType::RTL => PROBE_BARCODE_IDS,
-                CellMultiplexingType::OH => OH_IDS,
+            let sample_barcode_column_name = match barcode_multiplexing_type {
+                BarcodeMultiplexingType::CellLevel(CellLevel::CMO) => CMO_IDS,
+                BarcodeMultiplexingType::CellLevel(CellLevel::Hashtag) => HASHTAG_IDS,
+                BarcodeMultiplexingType::ReadLevel(ReadLevel::RTL) => PROBE_BARCODE_IDS,
+                BarcodeMultiplexingType::ReadLevel(ReadLevel::OH) => OH_IDS,
             };
 
-            let sample_barcode_ids: Option<Vec<_>> = if let Some(sample_barcode_ids) =
-                sample_barcode_ids.and_then(empty_is_none)
-            {
-                let Ok(sample_barcode_ids_in) = parse_vec(sample_barcode_ids.clone()) else {
-                    bail!(
-                        "{ctx} has invalid {} '{}' at line: {}, col: {}",
-                        sample_barcode_column_name,
-                        sample_barcode_ids.fragment(),
-                        sample_barcode_ids.location_line(),
-                        sample_barcode_ids.get_utf8_column(),
-                    )
-                };
+            let sample_barcode_ids: Option<Vec<_>> =
+                if let Some(sample_barcode_ids) = sample_barcode_ids.and_then(empty_is_none) {
+                    let Ok(sample_barcode_ids_in) = parse_vec(sample_barcode_ids.clone()) else {
+                        bail!(
+                            "{ctx} has invalid {} '{}' at line: {}, col: {}",
+                            sample_barcode_column_name,
+                            sample_barcode_ids.fragment(),
+                            sample_barcode_ids.location_line(),
+                            sample_barcode_ids.get_utf8_column(),
+                        )
+                    };
 
-                let sample_barcode_ids_iter = sample_barcode_ids_in
-                    .into_iter()
-                    .map(parse_prefixed_range)
-                    .flatten_ok()
-                    .map(|multiplexing_id| {
-                        let multiplexing_id = multiplexing_id?;
-                        match cell_multiplexing_type {
-                            CellMultiplexingType::RTL => validate_probe_barcode_id(multiplexing_id),
-                            CellMultiplexingType::CMO => {
-                                multiplexing_id.parse::<Ident>().map(|_| multiplexing_id)
+                    let sample_barcode_ids_iter = sample_barcode_ids_in
+                        .into_iter()
+                        .map(parse_prefixed_range)
+                        .flatten_ok()
+                        .map(|multiplexing_id| {
+                            let multiplexing_id = multiplexing_id?;
+                            match barcode_multiplexing_type {
+                                BarcodeMultiplexingType::ReadLevel(ReadLevel::RTL) => {
+                                    validate_probe_barcode_id(multiplexing_id)
+                                }
+                                BarcodeMultiplexingType::CellLevel(CellLevel::CMO) => {
+                                    multiplexing_id.parse::<Ident>().map(|_| multiplexing_id)
+                                }
+                                BarcodeMultiplexingType::CellLevel(CellLevel::Hashtag) => {
+                                    multiplexing_id.parse::<Ident>().map(|_| multiplexing_id)
+                                }
+                                BarcodeMultiplexingType::ReadLevel(ReadLevel::OH) => {
+                                    Ok(multiplexing_id)
+                                }
                             }
-                            CellMultiplexingType::OH => Ok(multiplexing_id),
-                        }
-                        .with_context(|| {
-                            format!(
-                                "{ctx} has invalid {} '{}' at line: {}, col: {}",
-                                sample_barcode_column_name,
-                                sample_barcode_ids.fragment(),
-                                sample_barcode_ids.location_line(),
-                                sample_barcode_ids.get_utf8_column(),
-                            )
-                        })
-                    });
+                            .with_context(|| {
+                                format!(
+                                    "{ctx} has invalid {} '{}' at line: {}, col: {}",
+                                    sample_barcode_column_name,
+                                    sample_barcode_ids.fragment(),
+                                    sample_barcode_ids.location_line(),
+                                    sample_barcode_ids.get_utf8_column(),
+                                )
+                            })
+                        });
 
-                Some(process_results(sample_barcode_ids_iter, |iter| {
-                    iter.sorted().dedup().collect()
-                })?)
-            } else {
-                None
-            };
+                    Some(
+                        sample_barcode_ids_iter
+                            .process_results(|iter| iter.sorted())?
+                            .dedup()
+                            .collect(),
+                    )
+                } else {
+                    None
+                };
 
             let gem_wells_frag = None;
             let gem_wells = gem_wells_frag
@@ -2049,10 +2222,11 @@ impl<'a> TryFrom<(&TxHashSet<GemWell>, &Section<'a>)> for SamplesCsv {
                  All entries must be non-empty.",
             );
 
-            data.push(match cell_multiplexing_type {
-                CellMultiplexingType::CMO => SampleRow {
+            data.push(match barcode_multiplexing_type {
+                BarcodeMultiplexingType::CellLevel(CellLevel::CMO) => SampleRow {
                     sample_id,
                     cmo_ids: sample_barcode_ids,
+                    hashtag_ids: None,
                     probe_barcode_ids: None,
                     overhang_ids: None,
                     description,
@@ -2062,9 +2236,23 @@ impl<'a> TryFrom<(&TxHashSet<GemWell>, &Section<'a>)> for SamplesCsv {
                     global_minimum_umis,
                     max_mito_percent,
                 },
-                CellMultiplexingType::RTL => SampleRow {
+                BarcodeMultiplexingType::CellLevel(CellLevel::Hashtag) => SampleRow {
                     sample_id,
                     cmo_ids: None,
+                    hashtag_ids: sample_barcode_ids,
+                    probe_barcode_ids: None,
+                    overhang_ids: None,
+                    description,
+                    force_cells: None,
+                    expect_cells: None,
+                    emptydrops_minimum_umis,
+                    global_minimum_umis,
+                    max_mito_percent,
+                },
+                BarcodeMultiplexingType::ReadLevel(ReadLevel::RTL) => SampleRow {
+                    sample_id,
+                    cmo_ids: None,
+                    hashtag_ids: None,
                     probe_barcode_ids: sample_barcode_ids,
                     overhang_ids: None,
                     description,
@@ -2074,9 +2262,10 @@ impl<'a> TryFrom<(&TxHashSet<GemWell>, &Section<'a>)> for SamplesCsv {
                     global_minimum_umis,
                     max_mito_percent,
                 },
-                CellMultiplexingType::OH => SampleRow {
+                BarcodeMultiplexingType::ReadLevel(ReadLevel::OH) => SampleRow {
                     sample_id,
                     cmo_ids: None,
+                    hashtag_ids: None,
                     probe_barcode_ids: None,
                     overhang_ids: sample_barcode_ids,
                     description,
@@ -2115,7 +2304,7 @@ fn validate_probe_barcode_id(bcid: String) -> Result<String> {
 
 /// Returns the set of default overhang IDs
 fn get_default_overhang_set() -> TxHashSet<BarcodeId> {
-    WhitelistSource::named(DEFAULT_OVERHANG_WL, true)
+    WhitelistSource::named(DEFAULT_OVERHANG_WL, true, ReqStrand::Forward)
         .unwrap()
         .get_ids()
         .unwrap()
@@ -2272,6 +2461,7 @@ pub fn create_feature_config(
     antigen_specificity_csv: Option<&AntigenSpecificityCsv>,
     functional_map_csv: Option<&FunctionalMapCsv>,
     beam_mode: Option<BeamMode>,
+    samples_csv: Option<&SamplesCsv>,
 ) -> Option<FeatureConfig> {
     let specificity_controls = create_specificity_controls(antigen_specificity_csv);
 
@@ -2296,11 +2486,28 @@ pub fn create_feature_config(
         None
     };
 
-    if specificity_controls.is_some() || functional_map_csv.is_some() {
+    let hashtag_ids: Option<Vec<String>> = samples_csv.and_then(|samples| {
+        if samples.has_hashtag_ids() {
+            Some(
+                samples
+                    .0
+                    .iter()
+                    .filter_map(|s| s.sample_barcode_ids(ProbeBarcodeIterationMode::All))
+                    .flatten()
+                    .map(ToString::to_string)
+                    .collect(),
+            )
+        } else {
+            None
+        }
+    });
+
+    if specificity_controls.is_some() || functional_map_csv.is_some() || hashtag_ids.is_some() {
         Some(FeatureConfig {
             specificity_controls,
             beam_mode,
             functional_map,
+            hashtag_ids,
         })
     } else {
         None
@@ -2402,7 +2609,7 @@ pub struct MultiConfigCsv {
 /// A representation of a `cellranger multi` configuration
 impl MultiConfigCsv {
     /// Load a MultiConfigCsv from a path
-    fn from_csv(path: impl AsRef<Path>) -> Result<Self> {
+    pub fn from_csv(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         MultiConfigCsv::from_reader(
             BufReader::new(File::open(path).with_context(|| path.display().to_string())?),
@@ -2511,7 +2718,7 @@ impl MultiConfigCsv {
                                     .get(sample_barcode_id)
                                     .map(|bcs| bcs.iter().map(ToString::to_string).collect())
                                     .unwrap_or_default(),
-                                sample.cell_multiplexing_type(),
+                                sample.barcode_multiplexing_type(),
                             ),
                         )?;
                     }
@@ -2574,6 +2781,13 @@ impl MultiConfigCsv {
             .as_ref()
             .is_some_and(GeneExpressionParams::is_rtl)
             || self.is_rtl_multiplexed()
+    }
+
+    /// Return whether these multiplexing barcode types need translation.
+    pub fn has_translated_multiplexing_barcode_types(&self) -> bool {
+        self.samples
+            .as_ref()
+            .is_some_and(SamplesCsv::has_translated_multiplexing_barcode_types)
     }
 
     /// Return the mapping of chemistry specs, derived from a combination of
@@ -2664,6 +2878,30 @@ macro_rules! setter_validate_gws {
     };
 }
 
+#[derive(thiserror::Error, Debug, PartialEq)]
+pub enum MultiConfigCsvError {
+    #[error(
+        "Conflicting chemistry specifications: presence of Flex libraries is implied by the \
+         presence of probe-barcode-ids but all libraries have specified non-Flex chemistries."
+    )]
+    ConflictingFlexChemistry,
+    #[error(
+        "A reference transcriptome is required to analyze a non-Flex Gene Expression library."
+    )]
+    MissingRefPathForGex,
+    #[error(
+        "[{}] section is missing `probe-set` a required parameter for Flex",
+        multiconst::GENE_EXPRESSION
+    )]
+    FlexMissingProbeSet,
+    #[error(
+        "The [{}] section specifies the parameter include-introns, which is not valid for Flex \
+         chemistries.",
+        multiconst::GENE_EXPRESSION
+    )]
+    FlexIncludeIntrons,
+}
+
 impl MultiConfigCsvBuilder {
     fn new() -> Self {
         Self::default()
@@ -2707,7 +2945,7 @@ impl MultiConfigCsvBuilder {
         let MultiConfigCsvBuilder {
             gene_expression: gene_expression_owned,
             feature,
-            vdj,
+            vdj: vdj_owned,
             libraries,
             samples: samples_owned,
             gem_wells,
@@ -2723,6 +2961,7 @@ impl MultiConfigCsvBuilder {
         };
 
         let gene_expression = gene_expression_owned.as_ref();
+        let vdj = vdj_owned.as_ref();
         let samples = samples_owned.as_ref();
         let gex_section_chemistry = gene_expression.and_then(|x| x.chemistry);
         let library_chemistries = libraries.chemistry_specs();
@@ -2743,11 +2982,23 @@ impl MultiConfigCsvBuilder {
             .collect();
 
         let has_probe_barcode_ids = samples.is_some_and(SamplesCsv::has_probe_barcode_ids);
-        let is_rtl = has_probe_barcode_ids
-            || any_source_chemistries
-                .iter()
-                .any(|x| x.is_rtl() == Some(true));
-
+        let chem_rtls: TxHashSet<_> = any_source_chemistries
+            .iter()
+            .map(ChemistryParam::is_rtl)
+            .collect();
+        // If any chemistry is RTL or if probe barcode IDs are provided then rtl_is_implied is true.
+        let rtl_is_implied = has_probe_barcode_ids || chem_rtls.contains(&Some(true));
+        // If all chemistries are specified as not RTL, then no_rtl_is_implied is true.
+        let no_rtl_is_implied = chem_rtls
+            .iter()
+            .exactly_one()
+            .map_or(false, |x| *x == Some(false));
+        let is_rtl = match (rtl_is_implied, no_rtl_is_implied) {
+            (false, false) => None, // Could be RTL, because at least one chemistry is unspecified
+            (false, true) => Some(false), // Not RTL because all chemistries are not RTL
+            (true, false) => Some(true), // RTL because has_probe_barcode_ids
+            (true, true) => bail!(MultiConfigCsvError::ConflictingFlexChemistry),
+        };
         if libraries.has_gene_expression() {
             ensure!(
                 gene_expression.is_some(),
@@ -2771,6 +3022,18 @@ impl MultiConfigCsvBuilder {
                 "failed to parse CSV: [{}] section omitted but VDJ libraries provided",
                 multiconst::VDJ,
             );
+
+            if libraries.has_library_type(LibraryType::Vdj(VdjChainType::Auto)) {
+                ensure!(
+                    vdj.unwrap().reference_path.is_some(),
+                    "failed to parse CSV: if [{}] reference is omitted, then the feature-types in the [{}] section are required to be specified as: {}, {} or {}",
+                    multiconst::VDJ,
+                    multiconst::LIBRARIES,
+                    LibraryType::Vdj(VdjChainType::VdjT),
+                    LibraryType::Vdj(VdjChainType::VdjB),
+                    LibraryType::Vdj(VdjChainType::VdjTGD),
+                );
+            }
         }
 
         if libraries.has_multiplexing() {
@@ -2779,6 +3042,17 @@ impl MultiConfigCsvBuilder {
                 "failed to parse CSV: [{}] section omitted \
                  but Multiplexing Capture libraries provided",
                 multiconst::SAMPLES,
+            );
+        }
+
+        let has_hashtag_ids = samples.is_some_and(SamplesCsv::has_hashtag_ids);
+        if has_hashtag_ids {
+            ensure!(
+                libraries.has_gene_expression() && libraries.has_antibody_capture(),
+                "failed to parse CSV: [{}] section specified {} parameter \
+                 which require both Gene Expression and Antibody Capture libraries.",
+                multiconst::SAMPLES,
+                samplesconst::HASHTAG_IDS,
             );
         }
 
@@ -2795,7 +3069,7 @@ impl MultiConfigCsvBuilder {
                 libraries.has_feature_barcode(),
                 "failed to parse CSV: [{}] section is provided \
                  but no feature barcode libraries provided",
-                multiconst::FUNCTIONAL_MAP,
+                FUNCTIONAL_MAP,
             );
         }
 
@@ -2841,7 +3115,7 @@ impl MultiConfigCsvBuilder {
             ensure!(
                 !gene_expression.is_some_and(GeneExpressionParams::has_expect_or_force_cells),
                 "failed to parse CSV: specified `{}` as the `chemistry` and \
-                 cell calling parameters in {} section. For multiplex Fixed RNA Profiling libraries \
+                 cell calling parameters in {} section. For multiplex Flex libraries \
                  `expect-cells` or `force-cells' parameter is valid only in [{}] section.",
                 mfrp_chem,
                 multiconst::GENE_EXPRESSION,
@@ -2849,21 +3123,26 @@ impl MultiConfigCsvBuilder {
             );
         }
 
-        if is_rtl {
+        if libraries.has_gene_expression() && is_rtl == Some(false) {
+            ensure!(
+                gene_expression.is_some_and(|x| x.reference_path.is_some()),
+                MultiConfigCsvError::MissingRefPathForGex,
+            );
+        }
+
+        if is_rtl == Some(true) {
             if libraries.has_gene_expression() {
                 ensure!(
                     gene_expression.is_some_and(GeneExpressionParams::has_probe_set),
-                    "failed to parse CSV: [{}] section is missing `probe-set` a required \
-                     parameter for Fixed RNA Profiling",
-                    multiconst::GENE_EXPRESSION,
+                    MultiConfigCsvError::FlexMissingProbeSet,
                 );
             }
 
             // Disallow setting include-introns for RTL chemistries.
             ensure!(
-                gene_expression.map_or(true, |x| x.include_introns
-                    == multiconst::DEFAULT_INCLUDE_INTRONS),
-                ERROR_INCLUDE_INTRONS_WITH_RTL,
+                gene_expression
+                    .is_none_or(|x| x.include_introns == multiconst::DEFAULT_INCLUDE_INTRONS),
+                MultiConfigCsvError::FlexIncludeIntrons,
             );
         }
 
@@ -2874,8 +3153,8 @@ impl MultiConfigCsvBuilder {
                     .iter()
                     .all(|chem| chem.is_rtl() != Some(false)),
                 "failed to parse CSV: [{}] section manually specifies a \
-                 non-Fixed RNA Profiling chemistry but [{}] section has a {} column. \
-                 The {} column may only be specified with Fixed RNA Profiling chemistries",
+                 non-Flex chemistry but [{}] section has a {} column. \
+                 The {} column may only be specified with Flex chemistries",
                 multiconst::GENE_EXPRESSION,
                 multiconst::SAMPLES,
                 samplesconst::PROBE_BARCODE_IDS,
@@ -2887,10 +3166,9 @@ impl MultiConfigCsvBuilder {
             !(gene_expression.is_some_and(GeneExpressionParams::has_expect_or_force_cells)
                 && has_probe_barcode_ids),
             "failed to parse CSV: [{}] section has a {} column indicating multiplex \
-             Fixed RNA Profiling chemistry, however a cell calling parameter is specified \
+             Flex chemistry, however a cell calling parameter is specified \
              in [{}] section. The parameters `expect-cells` or `force-cells' are valid \
-             in [{}] section for singleplex Fixed RNA Profiling and in [{}] section \
-             for multiplex Fixed RNA Profiling.",
+             in [{}] section for singleplex Flex and in [{}] section for multiplex Flex.",
             multiconst::SAMPLES,
             samplesconst::PROBE_BARCODE_IDS,
             multiconst::GENE_EXPRESSION,
@@ -2919,7 +3197,7 @@ impl MultiConfigCsvBuilder {
         Ok(MultiConfigCsv {
             gene_expression: gene_expression_owned,
             feature,
-            vdj,
+            vdj: vdj_owned,
             libraries,
             samples: samples_owned,
             gem_wells,
@@ -2937,12 +3215,13 @@ mod tests {
     use anyhow::Result;
     use barcode::whitelist::BarcodeId;
     use cr_types::chemistry::{AutoOrRefinedChemistry, ChemistryName};
-    use cr_types::LibraryType;
+    use cr_types::reference::probe_set_reference::TargetSetFile;
+    use cr_types::{BarcodeMultiplexingType, CellLevel, Fingerprint, GemWell, LibraryType};
     use insta::{assert_debug_snapshot, assert_json_snapshot, assert_snapshot};
     use itertools::Itertools;
     use metric::TxHashMap;
     use std::collections::HashMap;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     // initialize insta test harness
     #[ctor::ctor]
@@ -2964,8 +3243,79 @@ mod tests {
     }
 
     #[test]
+    fn test_gex_without_transcriptome_no_chem() {
+        let csv = "
+            [gene-expression]
+            create-bam,false
+            [libraries]
+            fastq_id,fastqs,feature_types
+            gex,/path/to/fastqs,Gene Expression"
+            .as_bytes();
+        MultiConfigCsv::from_reader(csv, XtraData::new("")).unwrap();
+    }
+
+    #[test]
+    fn test_gex_without_transcriptome_sfrp_chem() {
+        let csv = "
+            [gene-expression]
+            create-bam,false
+            [libraries]
+            fastq_id,fastqs,feature_types,chemistry
+            gex,/path/to/fastqs,Gene Expression,SFRP"
+            .as_bytes();
+        let exp_err = super::MultiConfigCsvError::FlexMissingProbeSet;
+        let act_err = MultiConfigCsv::from_reader(csv, XtraData::new(""))
+            .unwrap_err()
+            .downcast::<super::MultiConfigCsvError>()
+            .unwrap();
+        assert_eq!(act_err, exp_err);
+    }
+
+    #[test]
+    fn test_gex_without_transcriptome_3pv3_chem() {
+        let csv = "
+            [gene-expression]
+            create-bam,false
+            chemistry,SC3Pv3
+            [libraries]
+            fastq_id,fastqs,feature_types
+            gex,/path/to/fastqs,Gene Expression"
+            .as_bytes();
+        let exp_err = super::MultiConfigCsvError::MissingRefPathForGex;
+        let act_err = MultiConfigCsv::from_reader(csv, XtraData::new(""))
+            .unwrap_err()
+            .downcast::<super::MultiConfigCsvError>()
+            .unwrap();
+        assert_eq!(act_err, exp_err);
+    }
+
+    #[test]
+    fn test_conflicting_rtl_chem() {
+        let csv = "
+            [gene-expression]
+            create-bam,false
+            chemistry,SC3Pv3
+
+            [libraries]
+            fastq_id,fastqs,feature_types
+            gex,/path/to/fastqs,Gene Expression
+
+            [samples]
+            sample_id,probe_barcode_ids
+            whoami,BC1
+            "
+        .as_bytes();
+        let exp_err = super::MultiConfigCsvError::ConflictingFlexChemistry;
+        let act_err = MultiConfigCsv::from_reader(csv, XtraData::new(""))
+            .unwrap_err()
+            .downcast::<super::MultiConfigCsvError>()
+            .unwrap();
+        assert_eq!(act_err, exp_err);
+    }
+
+    #[test]
     fn load_simple_external_cmos() -> Result<()> {
-        let csv = r#"
+        let csv = r"
 [gene-expression]
 ref,/path/to/gex/ref
 chemistry,
@@ -2990,7 +3340,7 @@ whoami,cmo_2,1-1,hidad!,
 [gem-wells]
 gem_well,force_cells,expect_cells,vdj_force_cells,
 1,,,
-"#;
+";
         let xtra = XtraData::new("tests::load_simple_external_cmos");
         let exp = MultiConfigCsv::from_reader(csv.as_bytes(), xtra)?;
         println!("{exp:?}");
@@ -2999,7 +3349,7 @@ gem_well,force_cells,expect_cells,vdj_force_cells,
 
     #[test]
     fn load_simple_external_probe_bcs() -> Result<()> {
-        let csv = r#"
+        let csv = r"
 [gene-expression]
 ref,/path/to/gex/ref
 probe-set,/path/to/probe_set
@@ -3013,7 +3363,7 @@ mycmo,/path/to/fastqs,1,Multiplexing Capture,,,
 [samples]
 sample_id,probe_barcode_ids,gem_wells,description,force_cells,expect_cells,
 whoami,BC1,,hidad!,,100
-"#;
+";
         let xtra = XtraData::new("tests::load_simple_external_probe_bcs");
         let exp = MultiConfigCsv::from_reader(csv.as_bytes(), xtra)?;
         println!("{exp:?}");
@@ -3022,7 +3372,7 @@ whoami,BC1,,hidad!,,100
 
     #[test]
     fn load_include_introns_default() -> Result<()> {
-        let csv = r#"
+        let csv = r"
 [gene-expression]
 ref,/path/to/gex/ref
 probe-set,/path/to/probe_set
@@ -3036,12 +3386,12 @@ mycmo,/path/to/fastqs,1,Multiplexing Capture,,,
 [samples]
 sample_id,probe_barcode_ids,gem_wells,description,force_cells,expect_cells,
 whoami,BC1,,hidad!,,100
-"#;
+";
         let xtra = XtraData::new("tests::load_introns_for_rtl");
         let exp = MultiConfigCsv::from_reader(csv.as_bytes(), xtra)?;
         assert!(exp.gene_expression.unwrap().include_introns);
 
-        let csv_with_introns = r#"
+        let csv_with_introns = r"
 [gene-expression]
 ref,/path/to/gex/ref
 chemistry,
@@ -3066,11 +3416,11 @@ whoami,cmo_2,1-1,hidad!,
 [gem-wells]
 gem_well,force_cells,expect_cells,vdj_force_cells,
 1,,,
-"#;
+";
         let xtra2 = XtraData::new("tests::include_introns");
         let exp2 = MultiConfigCsv::from_reader(csv_with_introns.as_bytes(), xtra2)?;
         assert!(exp2.gene_expression.unwrap().include_introns);
-        let csv_with_no_introns = r#"
+        let csv_with_no_introns = r"
 [gene-expression]
 ref,/path/to/gex/ref
 include-introns,false
@@ -3095,7 +3445,7 @@ whoami,cmo_2,1-1,hidad!,
 [gem-wells]
 gem_well,force_cells,expect_cells,vdj_force_cells,
 1,,,
-"#;
+";
         let xtra3 = XtraData::new("tests::no_include_introns");
         let exp3 = MultiConfigCsv::from_reader(csv_with_no_introns.as_bytes(), xtra3)?;
         assert!(!exp3.gene_expression.unwrap().include_introns);
@@ -3145,7 +3495,7 @@ gem_well,force_cells,expect_cells,vdj_force_cells,
 
     #[test]
     fn invalid_sample_id_chars() {
-        let csv = r#"
+        let csv = r"
 [gene-expression]
 ref,GRCh38-2020-A-chr21
 create-bam,true
@@ -3158,7 +3508,7 @@ pbmc_1k_protein_v3_antibody,../dui_tests/test_resources/cellranger-count/pbmc_1k
 [samples]
 sample_id,cmo_ids,gem_wells,description
 IAmABad*SampleId,CMO1,1,some cells
-"#;
+";
         let xtra = XtraData::new("tests::invalid_sample_id_chars");
         let res = MultiConfigCsv::from_reader(csv.as_bytes(), xtra);
         assert_snapshot!(res.unwrap_err());
@@ -3166,7 +3516,7 @@ IAmABad*SampleId,CMO1,1,some cells
 
     #[test]
     fn invalid_sample_id_chars_2() {
-        let csv = r#"
+        let csv = r"
 [gene-expression]
 ref,GRCh38-2020-A-chr21
 create-bam,true
@@ -3179,7 +3529,7 @@ pbmc_1k_protein_v3_antibody,../dui_tests/test_resources/cellranger-count/pbmc_1k
 [samples]
 sample_id,cmo_ids,gem_wells,description
 IAmABad#SampleId,CMO1,1,some cells
-"#;
+";
         let xtra = XtraData::new("tests::invalid_sample_id_chars_2");
         let res = MultiConfigCsv::from_reader(csv.as_bytes(), xtra);
         assert_snapshot!(res.unwrap_err());
@@ -3187,7 +3537,7 @@ IAmABad#SampleId,CMO1,1,some cells
 
     #[test]
     fn too_long_sample_id() {
-        let csv = r#"
+        let csv = r"
 [gene-expression]
 ref,GRCh38-2020-A-chr21
 create-bam,true
@@ -3200,7 +3550,7 @@ pbmc_1k_protein_v3_antibody,../dui_tests/test_resources/cellranger-count/pbmc_1k
 [samples]
 sample_id,cmo_ids,gem_wells,description
 IAmToooooooooooooooooooooooooooooooooooooooooooooooooooooooooLong,CMO1,1,some cells
-"#;
+";
         let xtra = XtraData::new("tests::too_long_sample_id");
         let res = MultiConfigCsv::from_reader(csv.as_bytes(), xtra);
         assert_snapshot!(res.unwrap_err());
@@ -3208,7 +3558,7 @@ IAmToooooooooooooooooooooooooooooooooooooooooooooooooooooooooLong,CMO1,1,some ce
 
     #[test]
     fn load_trailing_whitespace() -> Result<()> {
-        let csv = r#"
+        let csv = r"
 [gene-expression]
 ref,GRCh38-2020-A-chr21
 chemistry,SC5P-R2
@@ -3225,7 +3575,7 @@ pbmc_1k_protein_v3_antibody,../dui_tests/test_resources/cellranger-count/pbmc_1k
 [samples]
 sample_id,cmo_ids,gem_wells,description
 HUMAN_T,CMO1,1,some cells
-"#;
+";
         let xtra = XtraData::new("tests::load_trailing_whitespace");
         let exp = MultiConfigCsv::from_reader(csv.as_bytes(), xtra)?;
         println!("{exp:?}");
@@ -3234,7 +3584,7 @@ HUMAN_T,CMO1,1,some cells
 
     #[test]
     fn test_check_library_compatibility() -> Result<()> {
-        let csv = r#"
+        let csv = r"
 [gene-expression]
 check_library_compatibility,false
 reference,GRCh38-2020-A-chr21
@@ -3246,12 +3596,12 @@ ref,test/feature/cmo_features.csv
 [libraries]
 fastq_id,fastqs,lanes,physical_library_id,feature_types
 bamtofastq,fastqs/cellranger/multi/VDJ_GEX_small_multi/small_gex_fastqs_chr21_new,any,gex_1,gene expression
-"#;
+";
         let xtra = XtraData::new("tests::test_check_library_compatibility");
         let exp = MultiConfigCsv::from_reader(csv.as_bytes(), xtra)?;
         println!("{exp:?}");
         assert!(!exp.gene_expression.unwrap().check_library_compatibility);
-        let csv2 = r#"
+        let csv2 = r"
 [gene-expression]
 reference,GRCh38-2020-A-chr21
 create-bam,true
@@ -3263,11 +3613,11 @@ ref,test/feature/cmo_features.csv
 fastq_id,fastqs,lanes,physical_library_id,feature_types
 bamtofastq,fastqs/cellranger/multi/VDJ_GEX_small_multi/small_gex_fastqs_chr21_new,any,gex_1,gene expression
 
-"#;
+";
         let xtra2 = XtraData::new("tests::test_check_library_compatibility");
         let exp2 = MultiConfigCsv::from_reader(csv2.as_bytes(), xtra2)?;
         assert!(exp2.gene_expression.unwrap().check_library_compatibility);
-        let csv3 = r#"
+        let csv3 = r"
 [gene-expression]
 ref,GRCh38-2020-A-chr21
 check-library-compatibility,false
@@ -3284,7 +3634,7 @@ fastq_id,fastqs,lanes,physical_library_id,feature_types,subsample_rate
 vdj_t,fastqs/cellranger/multi/vdj_t_tiny,any,lib2,vdj-t,
 vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,lib4,vdj-b,
 FB_fastqs_id,path/to/FB_fastqs,1|2,any,Antibody Capture,
-"#;
+";
         let xtra3 = XtraData::new("tests::test_check_library_compatibility");
         let exp3 = MultiConfigCsv::from_reader(csv3.as_bytes(), xtra3)?;
         assert!(!exp3.gene_expression.unwrap().check_library_compatibility);
@@ -3293,7 +3643,7 @@ FB_fastqs_id,path/to/FB_fastqs,1|2,any,Antibody Capture,
 
     #[test]
     fn no_physical_library_id() -> Result<()> {
-        let csv = r#"
+        let csv = r"
 [gene-expression]
 reference-path,/path/to/gex/ref
 r1-length,28
@@ -3320,7 +3670,7 @@ fastq_path,sample_indices,lanes,feature_types,gem_well,subsample_rate,
 [samples]
 sample_id,cmo_ids
 sample,CMO1
-"#;
+";
         let xtra = XtraData::new("tests::no_physical_library_id");
         let exp = MultiConfigCsv::from_reader(csv.as_bytes(), xtra)?;
         println!("{exp:?}");
@@ -3329,7 +3679,7 @@ sample,CMO1
 
     #[test]
     fn test_vdj_typo() -> Result<()> {
-        let csv = r#"
+        let csv = r"
 [gene-expression]
 ref,GRCh38-2020-A-chr21
 chemistry,SC5P-R2
@@ -3343,7 +3693,7 @@ fastq_id,fastqs,lanes,physical_library_id,feature_types,subsample_rate
 bamtofastq,fastqs/cellranger/multi/targeted_tiny,any,lib1,gene expression,
 vdj_t,fastqs/cellranger/multi/vdj_t_tiny,any,lib2,vdj-t,
 vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,lib4,vdj-b,
-"#;
+";
         let xtra = XtraData::new("test::test_vdj_typo");
         let exp = MultiConfigCsv::from_reader(csv.as_bytes(), xtra)?;
         println!("{exp:?}");
@@ -3353,7 +3703,7 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,lib4,vdj-b,
     /// Ensure that extra commas in the multi CSV are handled nicely
     #[test]
     fn test_extra_commas() -> Result<()> {
-        let csv = r#"
+        let csv = r"
 # this is a comment,,,
 [gene-expression],,,
 reference,/home/labs/bioservices/services/expression_references/refdata-gex-mm10-2020-A,,
@@ -3370,7 +3720,7 @@ reference,/home/labs/abramson/Collaboration/Shir_cite-seq/Shir_feature_ref.csv,,
 fastq_id,fastqs,lanes,feature_types
 A_36_cDNA,/home/labs/abramson/Collaboration/Shir_cite-seq/210106_A00929_0240_AHY77NDRXX/HY77NDRXX/outs/fastq_path/,any,gene expression
 A_36_Ab,/home/labs/abramson/Collaboration/Shir_cite-seq/210106_A00929_0240_AHY77NDRXX/HY77NDRXX/outs/fastq_path/,any,antibody capture
-"#;
+";
 
         let xtra = XtraData::new("test::extra_commas");
         let exp = MultiConfigCsv::from_reader(csv.as_bytes(), xtra)?;
@@ -3380,7 +3730,7 @@ A_36_Ab,/home/labs/abramson/Collaboration/Shir_cite-seq/210106_A00929_0240_AHY77
 
     #[test]
     fn test_autogen_phys_lib_id_two_vdj_libs() {
-        let csv = r#"
+        let csv = r"
 [vdj]
 ref,vdj/vdj_GRCh38_alts_ensembl-4.0.0
 
@@ -3388,7 +3738,7 @@ ref,vdj/vdj_GRCh38_alts_ensembl-4.0.0
 fastq_id,fastqs,lanes,physical_library_id,feature_types,subsample_rate
 vdj_t,fastqs/cellranger/multi/vdj_t_tiny,any,,vdj,
 vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
-"#;
+";
         let xtra = XtraData::new("test::test_autogen_phys_lib_id_two_vdj_libs");
         let res = MultiConfigCsv::from_reader(csv.as_bytes(), xtra);
         assert_snapshot!(res.unwrap_err());
@@ -3397,7 +3747,7 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
     /// Ensure that antigen capture is accompanied with a VDJ library
     #[test]
     fn test_antigen_requires_vdj() -> Result<()> {
-        let csv = r#"
+        let csv = r"
     [gene-expression]
     ref,mm10-2020-A-chr19
     create-bam,true
@@ -3409,7 +3759,7 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
     fastq_id,fastqs,lanes,physical_library_id,feature_types,subsample_rate
     tiny_gex,fastqs/cellranger/multi/1245140_gex_vdj_beam_ab/gex,any,gex,gene expression,0.5
     tiny_an_b,fastqs/cellranger/multi/1245140_gex_vdj_beam_ab/an_b,any,ab,antigen capture,0.5
-    "#;
+    ";
 
         let xtra = XtraData::new("test::antigen_required_vdj");
         let res = MultiConfigCsv::from_reader(csv.as_bytes(), xtra);
@@ -3419,7 +3769,7 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
 
     #[test]
     fn test_antigen_specificity_requires_ag() -> Result<()> {
-        let csv = r#"
+        let csv = r"
     [gene-expression]
     ref,mm10-2020-A-chr19
     create-bam,true
@@ -3434,7 +3784,7 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
     [libraries]
     fastq_id,fastqs,lanes,physical_library_id,feature_types,subsample_rate
     tiny_gex,fastqs/cellranger/multi/1245140_gex_vdj_beam_ab/gex,any,gex,gene expression,0.5
-    "#;
+    ";
 
         let xtra = XtraData::new("test::antigen_specificity_requires_ag");
         let res = MultiConfigCsv::from_reader(csv.as_bytes(), xtra);
@@ -3444,7 +3794,7 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
 
     #[test]
     fn test_antigen_specificity_multiple_control_ids() -> Result<()> {
-        let csv = r#"
+        let csv = r"
     [gene-expression]
     ref,mm10-2020-A-chr19
     create-bam,true
@@ -3460,7 +3810,7 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
     [libraries]
     fastq_id,fastqs,lanes,physical_library_id,feature_types,subsample_rate
     tiny_gex,fastqs/cellranger/multi/1245140_gex_vdj_beam_ab/gex,any,gex,gene expression,0.5
-    "#;
+    ";
 
         let xtra = XtraData::new("test::antigen_specificity_multiple_control_ids");
         let res = MultiConfigCsv::from_reader(csv.as_bytes(), xtra);
@@ -3470,7 +3820,7 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
 
     #[test]
     fn test_antigen_specificity_missing_allele() -> Result<()> {
-        let csv = r#"
+        let csv = r"
     [gene-expression]
     ref,mm10-2020-A-chr19
     create-bam,true
@@ -3486,7 +3836,7 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
     [libraries]
     fastq_id,fastqs,lanes,physical_library_id,feature_types,subsample_rate
     tiny_gex,fastqs/cellranger/multi/1245140_gex_vdj_beam_ab/gex,any,gex,gene expression,0.5
-    "#;
+    ";
 
         let xtra = XtraData::new("test::antigen_specificity_missing_allele");
         let res = MultiConfigCsv::from_reader(csv.as_bytes(), xtra);
@@ -3496,7 +3846,7 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
 
     #[test]
     fn test_invalid_mhc_allele_character() -> Result<()> {
-        let csv = r#"
+        let csv = r"
     [gene-expression]
     ref,mm10-2020-A-chr19
     create-bam,true
@@ -3516,7 +3866,7 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
     tiny_gex,fastqs/cellranger/multi/1245140_gex_vdj_beam_ab/gex,any,gex,gene expression,0.5
     tiny_vdj,fastqs/cellranger/multi/1245140_gex_vdj_beam_ab/vdj,any,vdj,vdj,0.5
     tiny_an_b,fastqs/cellranger/multi/1245140_gex_vdj_beam_ab/an_b,any,ab,antigen capture,0.5
-    "#;
+    ";
 
         let xtra = XtraData::new("test::invalid_mhc_allele_character");
         let res = MultiConfigCsv::from_reader(csv.as_bytes(), xtra);
@@ -3526,7 +3876,7 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
 
     #[test]
     fn test_functional_map_requires_feature() -> Result<()> {
-        let csv = r#"
+        let csv = r"
     [gene-expression]
     ref,mm10-2020-A-chr19
     create-bam,true
@@ -3539,7 +3889,7 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
     [libraries]
     fastq_id,fastqs,lanes,physical_library_id,feature_types,subsample_rate
     tiny_gex,fastqs/cellranger/multi/1245140_gex_vdj_beam_ab/gex,any,gex,gene expression,0.5
-    "#;
+    ";
 
         let xtra = XtraData::new("test::test_functional_map_requires_feature");
         let res = MultiConfigCsv::from_reader(csv.as_bytes(), xtra);
@@ -3550,7 +3900,7 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
     #[test]
     fn test_invalid_functional_map_value() -> Result<()> {
         // Duplicate feature ids
-        let csv = r#"
+        let csv = r"
     [gene-expression]
     ref,mm10-2020-A-chr19
     create-bam,true
@@ -3571,14 +3921,14 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
     tiny_gex,fastqs/cellranger/multi/1245140_gex_vdj_beam_ab/gex,any,gex,gene expression,0.5
     tiny_vdj,fastqs/cellranger/multi/1245140_gex_vdj_beam_ab/vdj,any,vdj,vdj,0.5
     tiny_an_b,fastqs/cellranger/multi/1245140_gex_vdj_beam_ab/an_b,any,ab,antigen capture,0.5
-    "#;
+    ";
 
         let xtra = XtraData::new("test::test_invalid_functional_map_value");
         let res = MultiConfigCsv::from_reader(csv.as_bytes(), xtra);
         assert_snapshot!(res.unwrap_err());
 
         // Duplicate functional name
-        let csv = r#"
+        let csv = r"
     [gene-expression]
     ref,mm10-2020-A-chr19
     create-bam,true
@@ -3599,7 +3949,7 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
     tiny_gex,fastqs/cellranger/multi/1245140_gex_vdj_beam_ab/gex,any,gex,gene expression,0.5
     tiny_vdj,fastqs/cellranger/multi/1245140_gex_vdj_beam_ab/vdj,any,vdj,vdj,0.5
     tiny_an_b,fastqs/cellranger/multi/1245140_gex_vdj_beam_ab/an_b,any,ab,antigen capture,0.5
-    "#;
+    ";
 
         let xtra = XtraData::new("test::test_invalid_functional_map_value");
         let res = MultiConfigCsv::from_reader(csv.as_bytes(), xtra);
@@ -3610,7 +3960,7 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
 
     #[test]
     fn test_blank_lines() -> Result<()> {
-        let csv = r#"
+        let csv = r"
     [gene-expression]
     ref,mm10-2020-A-chr19
     create-bam,true
@@ -3628,7 +3978,7 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
     sample1,1
 
     sample2,2
-    "#;
+    ";
 
         let xtra = XtraData::new("test::blank_lines");
         let res = MultiConfigCsv::from_reader(csv.as_bytes(), xtra)?;
@@ -3636,8 +3986,11 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
         let gex = res
             .gene_expression
             .expect("gene expression section not present");
-        assert_eq!(gex.probe_set, vec![Path::new("/path/to/probe_set")]);
-        assert_eq!(&gex.reference_path, Path::new("mm10-2020-A-chr19"));
+        assert_eq!(
+            gex.probe_set,
+            vec![TargetSetFile::from("/path/to/probe_set")]
+        );
+        assert_eq!(gex.reference_path, Some(PathBuf::from("mm10-2020-A-chr19")));
 
         let lib_count = res.libraries.0.len();
         assert_eq!(lib_count, 2, "expected 2 libraries, found {lib_count}");
@@ -3650,7 +4003,7 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
 
     #[test]
     fn test_multiple_probe_sets() -> Result<()> {
-        let csv = r#"
+        let csv = r"
     [gene-expression]
     ref,mm10-2020-A-chr19
     create-bam,true
@@ -3668,7 +4021,7 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
     sample1,1
 
     sample2,2
-    "#;
+    ";
 
         let xtra = XtraData::new("test::blank_lines");
         let res = MultiConfigCsv::from_reader(csv.as_bytes(), xtra)?;
@@ -3679,11 +4032,14 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
         assert_eq!(
             gex.probe_set,
             vec![
-                Path::new("/path/to/probe_set1"),
-                Path::new("/path/to/probe_set2")
+                TargetSetFile::from("/path/to/probe_set1"),
+                TargetSetFile::from("/path/to/probe_set2"),
             ]
         );
-        assert_eq!(&gex.reference_path, Path::new("mm10-2020-A-chr19"));
+        assert_eq!(
+            gex.reference_path.as_deref(),
+            Some(Path::new("mm10-2020-A-chr19"))
+        );
 
         let lib_count = res.libraries.0.len();
         assert_eq!(lib_count, 2, "expected 2 libraries, found {lib_count}");
@@ -3696,7 +4052,7 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
 
     #[test]
     fn test_emptydrops_per_sample() -> Result<()> {
-        let csv = r#"
+        let csv = r"
     [gene-expression]
     ref,mm10-2020-A-chr19
     create-bam,true
@@ -3710,7 +4066,7 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
     sample_id,cmo_ids,emptydrops_minimum_umis
     sample1,1,100
     sample2,2,200
-    "#;
+    ";
 
         let xtra = XtraData::new("test::");
         let res = MultiConfigCsv::from_reader(csv.as_bytes(), xtra)?;
@@ -3728,7 +4084,7 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
 
     #[test]
     fn test_emptydrops_present() -> Result<()> {
-        let csv = r#"
+        let csv = r"
     [gene-expression]
     ref,mm10-2020-A-chr19
     emptydrops-minimum-umis,75
@@ -3737,7 +4093,7 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
     [libraries]
     fastq_id,fastqs,lanes,physical_library_id,feature_types,subsample_rate
     tiny_gex,fastqs/cellranger/multi/1245140_gex_vdj_beam_ab/gex,any,gex,gene expression,0.5
-    "#;
+    ";
 
         let xtra = XtraData::new("test::");
         let res = MultiConfigCsv::from_reader(csv.as_bytes(), xtra)?;
@@ -3761,7 +4117,7 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
 
     #[test]
     fn test_unpack_probe_barcode_ids() -> Result<()> {
-        let csv = r#"
+        let csv = r"
     [gene-expression]
     ref,mm10-2020-A-chr19
     probe-set,/path/to/probe_set
@@ -3775,7 +4131,7 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
     sample_id,probe_barcode_ids
     sample1,BC1|BC2+BC3
     sample2,BC4|BC5+BC6+BC7
-    "#;
+    ";
 
         let xtra = XtraData::new("test::");
         let res = MultiConfigCsv::from_reader(csv.as_bytes(), xtra)?;
@@ -3833,7 +4189,7 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
 
     #[test]
     fn test_no_translated_probe_barcodes() -> Result<()> {
-        let csv = r#"
+        let csv = r"
     [gene-expression]
     ref,mm10-2020-A-chr19
     probe-set,/path/to/probe_set
@@ -3847,7 +4203,7 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
     sample_id,probe_barcode_ids
     sample1,BC1|BC2
     sample2,BC3
-    "#;
+    ";
 
         let xtra = XtraData::new("test::");
         let res = MultiConfigCsv::from_reader(csv.as_bytes(), xtra)?;
@@ -3861,7 +4217,7 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
 
     #[test]
     fn test_multi_graph_detected_probe_barcode_pairing() -> Result<()> {
-        let csv = r#"
+        let csv = r"
     [gene-expression]
     ref,mm10-2020-A-chr19
     probe-set,/path/to/probe_set
@@ -3875,7 +4231,7 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
     sample_id,probe_barcode_ids
     sample1,BC1|BC2
     sample2,BC3
-    "#;
+    ";
 
         let xtra = XtraData::new("test::");
         let res = MultiConfigCsv::from_reader(csv.as_bytes(), xtra)?;
@@ -3891,7 +4247,7 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
     #[test]
     fn test_cannot_mix_gex_and_lib_chemistry() {
         assert_parse_fails(
-            r#"
+            r"
             [gene-expression]
             ref,mm10-2020-A-chr19
             chemistry,mfrp
@@ -3900,7 +4256,7 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
             [libraries]
             fastq_id,fastqs,lanes,physical_library_id,feature_types,chemistry
             mygex,/path/to/fastqs,any,gex,gene expression,mfrp-rna
-            "#,
+            ",
             "failed to parse CSV: chemistry specified in both the [gene-expression] and [libraries] sections",
         );
     }
@@ -3908,7 +4264,7 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
     #[test]
     fn test_cannot_use_auto_lib_chem() {
         assert_parse_fails(
-            r#"
+            r"
             [gene-expression]
             ref,mm10-2020-A-chr19
             create-bam,true
@@ -3916,7 +4272,7 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
             [libraries]
             fastq_id,fastqs,lanes,physical_library_id,feature_types,chemistry
             mygex,/path/to/fastqs,any,gex,gene expression,auto
-            "#,
+            ",
             "[libraries] Specifying auto chemistries at the library level is not supported: (auto).",
         );
     }
@@ -3924,7 +4280,7 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
     #[test]
     fn test_cannot_provide_partial_lib_chems() {
         assert_parse_fails(
-            r#"
+            r"
             [gene-expression]
             ref,mm10-2020-A-chr19
             create-bam,true
@@ -3933,7 +4289,7 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
             fastq_id,fastqs,lanes,physical_library_id,feature_types,chemistry
             mygex,/path/to/fastqs1,any,gex,gene expression,mfrp-rna
             myab,/path/to/fastqs2,any,ab,antibody capture,
-            "#,
+            ",
             "[libraries] A chemistry name must be provided for all libraries or none.",
         );
     }
@@ -3941,7 +4297,7 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
     #[test]
     fn test_only_flex_chems_in_libs() {
         assert_parse_fails(
-            r#"
+            r"
             [gene-expression]
             ref,mm10-2020-A-chr19
             create-bam,true
@@ -3950,7 +4306,7 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
             fastq_id,fastqs,lanes,physical_library_id,feature_types,chemistry
             mygex,/path/to/fastqs1,any,gex,gene expression,SC3Pv1
             myab,/path/to/fastqs2,any,ab,antibody capture,SC3Pv1
-            "#,
+            ",
             "[libraries] Only Flex assays may specify chemistry at the per-library level; invalid chemistries: SC3Pv1",
         );
     }
@@ -3958,7 +4314,7 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
     #[test]
     fn test_no_conflicting_chems_for_lib_type() {
         assert_parse_fails(
-            r#"
+            r"
             [gene-expression]
             ref,mm10-2020-A-chr19
             create-bam,true
@@ -3967,7 +4323,7 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
             fastq_id,fastqs,lanes,physical_library_id,feature_types,chemistry
             mygex,/path/to/fastqs1,any,gex,gene expression,MFRP-RNA
             mygex1,/path/to/fastqs2,any,gex,gene expression,SFRP
-            "#,
+            ",
             "[libraries] Conflicting chemistry for Gene Expression libraries (MFRP-RNA, SFRP); manual chemistry must be the same for all libraries of the same type.",
         );
     }
@@ -4053,7 +4409,7 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
 
     #[test]
     fn test_use_mfrp_chemistry_set() -> Result<()> {
-        let csv = r#"
+        let csv = r"
     [gene-expression]
     ref,mm10-2020-A-chr19
     probe-set,/path/to/probe_set
@@ -4072,7 +4428,7 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
     sample_id,probe_barcode_ids
     sample1,BC1|BC2
     sample2,BC3
-    "#;
+    ";
 
         let res = MultiConfigCsv::from_reader(csv.as_bytes(), XtraData::new("test::"))?;
         assert_eq!(
@@ -4096,5 +4452,95 @@ vdj_ig,fastqs/cellranger/multi/vdj_ig_tiny,any,,vdj,
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn test_hashtag_id_missing_gex_lib() {
+        let csv = r"
+        [gene-expression]
+        ref,GRCh38-2020
+        create-bam,true
+
+        [feature]
+        ref,path/to/feature_ref.csv
+
+        [libraries]
+        fastq_id,fastqs,physical_library_id,feature_types
+        myab,/path/to/fastqs,ab,antibody capture
+
+        [samples]
+        sample_id, hashtag_ids, description
+        1,CD4|CD8a,t_cells
+        2,CD19, b_cells
+        ";
+
+        assert_snapshot!(
+            MultiConfigCsv::from_reader(csv.as_bytes(), XtraData::new("test::")).unwrap_err()
+        );
+    }
+
+    #[test]
+    fn test_multi_graph_hashtag_fingerprint() -> Result<()> {
+        let csv = r"
+    [gene-expression]
+    ref,GRCh38-2020
+    create-bam,true
+
+    [feature]
+    ref,path/to/feature_ref.csv
+
+    [libraries]
+    fastq_id,fastqs,physical_library_id,feature_types
+    myab,/path/to/fastqs,ab,antibody capture
+    myab,/path/to/other/fastqs,gex,gene expression
+
+    [samples]
+    sample_id, hashtag_ids, description
+    1,CD4|CD8a,t_cells
+    2,CD19, b_cells
+    ";
+
+        let xtra = XtraData::new("test::");
+        let res = MultiConfigCsv::from_reader(csv.as_bytes(), xtra)?;
+        let sample1_fprint = vec![
+            Fingerprint::Tagged {
+                gem_well: GemWell(1),
+                tag_name: "CD4".to_owned(),
+                barcode_multiplexing_type: BarcodeMultiplexingType::CellLevel(CellLevel::Hashtag),
+                translated_tag_names: vec![],
+            },
+            Fingerprint::Tagged {
+                gem_well: GemWell(1),
+                tag_name: "CD8a".to_owned(),
+                barcode_multiplexing_type: BarcodeMultiplexingType::CellLevel(CellLevel::Hashtag),
+                translated_tag_names: vec![],
+            },
+        ];
+        let mgraph_fprint = res
+            .to_multi_graph("sample_id", "sample_desc", None)?
+            .samples
+            .first()
+            .unwrap()
+            .fingerprints
+            .clone();
+        assert_eq!(sample1_fprint, mgraph_fprint);
+        Ok(())
+    }
+
+    #[test]
+    fn test_vdj_denovo_missing_chaintype() {
+        let csv = r"
+        [vdj]
+        denovo, true
+        inner-enrichment-primers,path/to/primers.txt
+
+        [libraries]
+        fastq_id,fastqs,physical_library_id,feature_types
+        myvdj,/path/to/fastqs,vdj,VDJ
+        ";
+
+        assert_snapshot!(
+            MultiConfigCsv::from_reader(csv.as_bytes(), XtraData::new("test::")).unwrap_err()
+        );
     }
 }

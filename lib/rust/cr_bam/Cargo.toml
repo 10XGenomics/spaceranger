@@ -1,9 +1,12 @@
 [dependencies]
-bitflags = '2'
-wyhash = '0.5'
-
 [dependencies.barcode]
 path = '../barcode'
+
+[dependencies.bitflags]
+workspace = true
+
+[dependencies.metric]
+path = '../metric'
 
 [dependencies.rust-htslib]
 workspace = true
@@ -16,6 +19,9 @@ path = '../umi'
 
 [lib]
 test = false
+
+[lints]
+workspace = true
 
 [package]
 authors = ['10x Genomics']

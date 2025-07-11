@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import NamedTuple
 
 import cv2
@@ -12,9 +11,16 @@ import SimpleITK as sitk
 from skimage import exposure, measure
 
 from cellranger.spatial import tissue_regist_qc
+from cellranger.spatial.bounding_box import BoundingBox
 from cellranger.spatial.tissue_detection import get_mask
-from cellranger.spatial.transform import reflection_matrix
+from cellranger.spatial.transform import (
+    contains_reflection,
+    convert_transform_corner_to_center,
+    reflection_matrix,
+)
 
+INIT_TRANSFORM_LIST_KEY = "init_transform_list"
+INIT_METHOD_USED_KEY = "init_method_used"
 FEATURE_MATCHING = "feature_matching"
 CENTROID_ALIGNMENT = "centroid_alignment"
 TARGET_IMG_MIN_SIZE_UM = 4000  # Half width of the fiducial box
@@ -73,24 +79,6 @@ def largest_region_prop(mask: np.ndarray) -> tuple[float, float, float, tuple[in
     return (p.area, p.centroid, p.orientation, p.bbox)
 
 
-@dataclass
-class BoundingBox:
-    """Bounding box in row/col indices."""
-
-    minr: int
-    minc: int
-    maxr: int
-    maxc: int
-
-    @property
-    def shape(self) -> tuple[int, int]:
-        return (self.maxr - self.minr, self.maxc - self.minc)
-
-    @property
-    def slice(self) -> slice:
-        return np.s_[self.minr : self.maxr, self.minc : self.maxc]
-
-
 def estimate_tissue_position(
     raw_img: np.ndarray,
     qc_image_path: str | bytes | None = None,
@@ -110,7 +98,7 @@ def estimate_tissue_position(
     # Use a higher clip_limit for tissue detection
     down_im = adjust_image_contrast(down_im, method="adaptive", clip_limit=0.02, invert=False)
     down_im = cv2.convertScaleAbs(down_im)
-    mask, _, qc_image, _ = get_mask(down_im, plot=True)
+    mask, _, qc_image, _, _ = get_mask(down_im, plot=True)
     area, centroid, _, bbox = largest_region_prop(mask)
     area = area / down_im_scale**2
     bbox = tuple((np.array(bbox) / down_im_scale).astype(int))
@@ -234,12 +222,32 @@ def multires_registration(
     registration_method.SetSmoothingSigmasPerLevel(smoothingSigmas=params.smooth_sigma)
     registration_method.SmoothingSigmasAreSpecifiedInPhysicalUnitsOn()
 
+    return perform_registration(registration_method, fixed_image, moving_image, initial_transform)
+
+
+def perform_registration(
+    registration_method: sitk.ImageRegistrationMethod,
+    fixed_image: sitk.Image,
+    moving_image: sitk.Image,
+    initial_transform: sitk.Transform,
+) -> tuple[sitk.Transform, float, str]:
+    """Perform the registration and handle exceptions.
+
+    Args:
+        registration_method (sitk.ImageRegistrationMethod): The registration method to use.
+        fixed_image (sitk.Image): The fixed image for registration.
+        moving_image (sitk.Image): The moving image for registration.
+        initial_transform (sitk.Transform): The initial transform.
+
+    Returns:
+        tuple[sitk.Transform, float, str]: The final transform, metric value, and optimizer stop condition.
+    """
     try:
         init_metric = registration_method.MetricEvaluate(
             sitk.Cast(fixed_image, sitk.sitkFloat32), sitk.Cast(moving_image, sitk.sitkFloat32)
         )
     except RuntimeError as err:
-        print(f"ITK initalisation failed with initial transform {initial_transform}\n")
+        print(f"ITK initialization failed with initial transform {initial_transform}\n")
         print(f"error message: {err}\n")
         optimizer_stop_condition = f"{ITK_ERROR_PREFIX} in initialization with initial transform {initial_transform}.\nError message: {err}"
         return (initial_transform, np.inf, optimizer_stop_condition)
@@ -264,7 +272,7 @@ def multires_registration(
 
 def register_from_init_transform(
     microscope_img: np.ndarray,
-    cyt_img: np.ndarray,
+    cyta_img: np.ndarray,
     init_transform_mat: np.ndarray,
     learning_rate: float = 10.0,
     init_image_debug_path: str | bytes | None = None,
@@ -272,16 +280,33 @@ def register_from_init_transform(
     """Register with an initial estimate of the transform."""
     sitk.ProcessObject.SetGlobalDefaultNumberOfThreads(1)
 
-    # Affine transform to accommodate reflection
-    init_transform = matrix_to_sitk_transform(init_transform_mat, cyt_img.shape[:2]).GetInverse()
+    # Prepare if initial transform contains reflection over either x or y axis
+    # If no reflection exists, this code block has no effect
+    refl_mat = reflection_matrix(contains_reflection(init_transform_mat), False, cyta_img.shape)
+    inv_refl_mat = np.linalg.inv(refl_mat)
+    # Reflect the reflected initial transform to remove reflection
+    init_transform_mat = init_transform_mat @ refl_mat
+    # Apply the opposite to the source image so the effect cancels out with the previous step
+    cyta_img = cv2.warpPerspective(
+        cyta_img,
+        # Warping uses center-based coordinates, while transform calculations use corner-based
+        convert_transform_corner_to_center(inv_refl_mat),
+        cyta_img.shape[::-1],
+    )
+
+    # Here the initial transformation is strictly a similarity transform without reflection
+    init_transform = matrix_to_sitk_similarity2d(init_transform_mat, cyta_img.shape).GetInverse()
 
     if init_image_debug_path is not None:
         tissue_regist_qc.save_init_image(
-            sitk_transform_to_matrix(init_transform), microscope_img, cyt_img, init_image_debug_path
+            sitk_transform_to_matrix(init_transform),
+            microscope_img,
+            cyta_img,
+            init_image_debug_path,
         )
 
     fix_img_itk = sitk.GetImageFromArray(microscope_img)
-    mv_img_itk = sitk.GetImageFromArray(cyt_img)
+    mv_img_itk = sitk.GetImageFromArray(cyta_img)
 
     final_transform, final_metric, stop_description = multires_registration(
         fix_img_itk,
@@ -301,8 +326,10 @@ def register_from_init_transform(
     )
 
     transform = sitk.CompositeTransform(final_transform).GetNthTransform(0)
-    transform = sitk.AffineTransform(transform).GetInverse()
+    transform = sitk.Similarity2DTransform(transform).GetInverse()
     transform = sitk_transform_to_matrix(transform)
+    # Finally, add back the reflection
+    transform = transform @ inv_refl_mat
     return (transform, final_metric, stop_description)
 
 
@@ -312,22 +339,22 @@ def sitk_transform_to_matrix(transform) -> np.ndarray:
     trans = np.array(transform.GetTranslation())
     mat = np.array(transform.GetMatrix()).reshape(2, 2)
     offset = center + trans - np.matmul(mat, center)
-    transform_mat = np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1]]).astype(np.float32)
+    transform_mat = np.eye(3)
     transform_mat[:2, :2] = mat
     transform_mat[:2, 2] = offset
     return transform_mat
 
 
-def matrix_to_sitk_transform(
+def matrix_to_sitk_similarity2d(
     transform_mat: np.ndarray, src_img_shape_rc: tuple[int, int]
 ) -> sitk.Transform:
-    """Convert a matrix to an ITK transform."""
-    assert transform_mat.shape == (3, 3)
+    """Convert a matrix to an ITK similarity 2D transform."""
+    assert not contains_reflection(transform_mat)
     mat = transform_mat[:2, :2]
     center = [src_img_shape_rc[1] / 2, src_img_shape_rc[0] / 2]
     offset = transform_mat[:2, 2]
     trans = offset - center + np.matmul(mat, center)
-    sitk_transform = sitk.AffineTransform(2)
+    sitk_transform = sitk.Similarity2DTransform()
     sitk_transform.SetMatrix(mat.flatten())
     sitk_transform.SetCenter(center)
     sitk_transform.SetTranslation(trans)

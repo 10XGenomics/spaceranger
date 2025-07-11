@@ -3,13 +3,14 @@ name = 'spatial'
 test = false
 
 [dependencies]
-docopt = '1'
-
 [dependencies.anyhow]
 workspace = true
 
 [dependencies.barcode]
 path = '../barcode'
+
+[dependencies.bio]
+workspace = true
 
 [dependencies.cr_bam]
 path = '../cr_bam'
@@ -25,6 +26,12 @@ path = '../cr_types'
 
 [dependencies.cr_websummary]
 path = '../cr_websummary'
+
+[dependencies.docopt]
+workspace = true
+
+[dependencies.geo]
+workspace = true
 
 [dependencies.hd_feature_slice]
 path = '../hd_feature_slice'
@@ -44,6 +51,12 @@ workspace = true
 [dependencies.metric]
 path = '../metric'
 
+[dependencies.ndarray]
+workspace = true
+
+[dependencies.ndarray-npy]
+workspace = true
+
 [dependencies.parquet]
 workspace = true
 
@@ -53,8 +66,11 @@ workspace = true
 [dependencies.rand]
 workspace = true
 
-[dependencies.rand_pcg]
+[dependencies.rand_distr]
 workspace = true
+
+[dependencies.roi]
+path = '../roi'
 
 [dependencies.serde]
 workspace = true
@@ -75,11 +91,20 @@ workspace = true
 features = ['derive', 'image_base64_encode', 'image_proc']
 workspace = true
 
+[dependencies.thousands]
+workspace = true
+
+[dependencies.tiff]
+workspace = true
+
 [dependencies.websummary_build]
 path = '../websummary_build'
 
 [lib]
 test = false
+
+[lints]
+workspace = true
 
 [package]
 authors = ['10x Genomics']

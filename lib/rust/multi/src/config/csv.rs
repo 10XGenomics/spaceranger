@@ -1,13 +1,12 @@
+#![deny(missing_docs)]
 use super::parse::ParseCtx;
 use super::scsv::{Section, Span, XtraData};
 use anyhow::{anyhow, bail, Context, Result};
 use itertools::Itertools;
 use nom_locate::LocatedSpan;
 use std::collections::HashMap;
-use std::convert::TryFrom;
 use std::fmt::Display;
 use std::ops::Range;
-use std::str::FromStr;
 
 #[derive(Debug)]
 pub struct CsvParser<'a, T: Display> {
@@ -163,69 +162,6 @@ impl<'a, T: Display> CsvParser<'a, T> {
         bail!("{ctx} does not exist")
     }
 
-    #[allow(dead_code)]
-    pub fn parse_req<R>(&self, row: usize, hdr: &str) -> Result<R>
-    where
-        R: FromStr,
-        <R as FromStr>::Err: std::error::Error + Sync + Send + 'static,
-    {
-        let Section { ref name, .. } = &self.section;
-        let ctx = ParseCtx::HdrRow(name, row + 1);
-        self.find_req(row, hdr).and_then(|val| {
-            val.fragment().parse::<R>().with_context(|| {
-                format!(
-                    "{ctx} has invalid {hdr} '{}' at line: {}, col: {}",
-                    val.fragment(),
-                    val.location_line(),
-                    val.naive_get_utf8_column(),
-                )
-            })
-        })
-    }
-
-    #[allow(dead_code)]
-    pub fn try_into_req<R>(&self, row: usize, hdr: &str) -> Result<R>
-    where
-        R: TryFrom<Span<'a>>,
-        <R as TryFrom<Span<'a>>>::Error: std::error::Error + Sync + Send + 'static,
-    {
-        self.find_req(row, hdr)
-            .and_then(|val| Ok(R::try_from(val.clone())?))
-    }
-
-    #[allow(dead_code)]
-    pub fn parse_opt<R>(&self, row: usize, hdr: &str) -> Result<Option<R>>
-    where
-        R: FromStr,
-        <R as FromStr>::Err: std::error::Error + Send + Sync + 'static,
-    {
-        let Section { ref name, .. } = &self.section;
-        let ctx = ParseCtx::HdrRow(name, row + 1);
-        self.find_opt(row, hdr).and_then(|val| {
-            val.map(|val| {
-                val.fragment().parse::<R>().with_context(|| {
-                    format!(
-                        "{ctx} has invalid {hdr} '{}' at line: {}, col: {}",
-                        val.fragment(),
-                        val.location_line(),
-                        val.naive_get_utf8_column(),
-                    )
-                })
-            })
-            .transpose()
-        })
-    }
-
-    #[allow(dead_code)]
-    pub fn try_into_opt<R>(&self, row: usize, hdr: &str) -> Result<Option<R>>
-    where
-        R: TryFrom<Span<'a>>,
-        <R as TryFrom<Span<'a>>>::Error: std::error::Error + Sync + Send + 'static,
-    {
-        self.find_opt(row, hdr)
-            .and_then(|val| val.map(|val| Ok(R::try_from(val.clone())?)).transpose())
-    }
-
     pub fn rows(&self) -> Range<usize> {
         // skip over the hdr row
         1..self.section.rows.len()
@@ -296,7 +232,9 @@ mod test {
             assert!(res.is_ok());
         } else {
             assert_eq!(
-                format!("[test] row 2 has {expected_row_len} column(s) but the header has {expected_header_len}"),
+                format!(
+                    "[test] row 2 has {expected_row_len} column(s) but the header has {expected_header_len}"
+                ),
                 res.unwrap_err().to_string()
             );
         }

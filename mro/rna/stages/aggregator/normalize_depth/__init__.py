@@ -15,7 +15,6 @@ import numpy as np
 import scipy.sparse as sp_sparse
 
 import cellranger.constants as cr_constants
-import cellranger.h5_constants as h5_constants
 import cellranger.matrix as cr_matrix
 import cellranger.molecule_counter as cr_mol_counter
 import cellranger.rna.library as rna_library
@@ -57,16 +56,15 @@ stage NORMALIZE_DEPTH(
 
 TARGETED_READ_PAIRS_METRIC = "targeted_read_pairs"
 NUM_MOLECULE_INFO_ENTRIES_PER_CHUNK_RUST = 400000000
-# Each barcode is 44 bytes long (matching the definition in lib/rust/barcode)
-MAX_BARCODE_LENGTH = 44
 
 
-def _get_min_rpc_by_lt(library_info: list[dict[str, Any]], usable_rpc: np.ndarray):
-    """Determine lowest depth for each library type."""
-    lt_rpcs = defaultdict(lambda: array.array("d"))
+def _get_non_zero_min_rpc_by_lt(library_info: list[dict[str, Any]], usable_rpc: np.ndarray):
+    """Determine lowest non-zero depth for each library type."""
+    lt_rpcs = {lib[rna_library.LIBRARY_TYPE]: array.array("d") for lib in library_info}
     for lib, rpc in zip(library_info, usable_rpc):
-        lt_rpcs[lib[rna_library.LIBRARY_TYPE]].append(rpc)
-    return {lt: min(rpcs) for lt, rpcs in lt_rpcs.items()}
+        if rpc > 0:
+            lt_rpcs[lib[rna_library.LIBRARY_TYPE]].append(rpc)
+    return {lt: min(rpcs) if len(rpcs) else 0 for lt, rpcs in lt_rpcs.items()}
 
 
 def _adjust_frac_kept(
@@ -152,12 +150,12 @@ def split(args):
         )
 
     # Determine lowest depth for each library type
-    min_rpc_by_lt = _get_min_rpc_by_lt(library_info, usable_rpc)
+    min_rpc_by_lt = _get_non_zero_min_rpc_by_lt(library_info, usable_rpc)
 
     for lib_idx, lib in enumerate(library_info):
         lib_type = lib[rna_library.LIBRARY_TYPE]
         print(f"{lib_type} Usable read pairs per cell: {usable_rpc[lib_idx]}")
-        print("%s Minimum read pairs usable per cell: %d" % (lib_type, min_rpc_by_lt[lib_type]))
+        print(f"{lib_type} Minimum read pairs usable per cell: {min_rpc_by_lt[lib_type]}")
 
     if not downsample:
         frac_reads_kept = np.ones(len(library_info), dtype=float)
@@ -183,6 +181,7 @@ def split(args):
 
     with MoleculeCounter.open(args.molecules, "r") as mc:
         # Number of barcodes in the full matrix
+        is_visium_hd = mc.is_visium_hd()
         num_barcodes = mc.get_ref_column_lazy("barcodes").shape[0]
 
         for chunk_start, chunk_len in mc.get_chunks(tgt_chunk_len, preserve_boundaries=True):
@@ -221,9 +220,10 @@ def split(args):
     # Nonetheless, it needs to load the barcodes, which can get large when many samples
     # are being aggregated.
     # WRITE_MATRICES will use the precise nnz counts to make an appropriate mem request.
-    join_mem_gb = max(1 + (num_barcodes * MAX_BARCODE_LENGTH) / 1e9, h5_constants.MIN_MEM_GB)
-    print(f"{num_barcodes=},{join_mem_gb=}")
-    return {"chunks": chunks, "join": {"__mem_gb": join_mem_gb, "__threads": 2}}
+    barcode_mem_factor = 112 if is_visium_hd else 56
+    join_mem_gib = 1 + round(barcode_mem_factor * num_barcodes / 1024**3, 1)
+    print(f"{num_barcodes=},{join_mem_gib=}")
+    return {"chunks": chunks, "join": {"__mem_gb": join_mem_gib, "__threads": 2}}
 
 
 def summarize_read_matrix(matrix, library_info, barcode_info, barcode_seqs):
@@ -447,7 +447,7 @@ def _update_metrics(
             cur_bcs = barcode_seqs[idx_start:idx_end]  # this can be of size 0
             assert cur_bcs.shape[0] == chnksize, "Expected elements missing from BC array."
             new_bc = cr_utils.format_barcode_seq(cur_bcs[0], gg)
-            barcode_dtype = np.dtype("S%d" % len(new_bc))
+            barcode_dtype = np.dtype(f"S{len(new_bc)}")
             barcode_list.append(
                 np.fromiter(
                     (cr_utils.format_barcode_seq(bc, gg) for bc in cur_bcs),
@@ -607,7 +607,7 @@ def join(args, outs, chunk_defs, chunk_outs):
         for lib_idx in lib_inds:
             aggr_id = library_info[lib_idx]["aggr_id"]
             old_gg = library_info[lib_idx]["old_gem_group"]
-            batch = aggr_id + ("-%d" % old_gg if old_gg > 1 else "")
+            batch = aggr_id + (f"-{old_gg}" if old_gg > 1 else "")
             all_batches[batch] = None
             if IS_SPATIAL:
                 n_cells = summary["num_spots_by_library"][lib_idx]
@@ -618,20 +618,28 @@ def join(args, outs, chunk_defs, chunk_outs):
             lib_metrics = mol_metrics[cr_mol_counter.LIBRARIES_METRIC][str(lib_idx)]
             raw_read_pairs = lib_metrics[cr_mol_counter.TOTAL_READS_METRIC]
             mapped_read_pairs = lib_metrics[cr_mol_counter.USABLE_READS_METRIC]
-            ds_read_pairs = lib_metrics[cr_mol_counter.DOWNSAMPLED_READS_METRIC]
+            # Cast string "NaN" to float("NaN")
+            ds_read_pairs = float(lib_metrics[cr_mol_counter.DOWNSAMPLED_READS_METRIC])
             # these metrics are relatively new and might not exist in older versions of molecule info
             feature_reads = lib_metrics.get(cr_mol_counter.FEATURE_READS_METRIC, 0)
-            ds_feature_reads = lib_metrics.get(cr_mol_counter.DOWNSAMPLED_FEATURE_READS_METRIC, 0)
+            ds_feature_reads = float(
+                lib_metrics.get(cr_mol_counter.DOWNSAMPLED_FEATURE_READS_METRIC, 0)
+            )
 
             total_raw_read_pairs[lib_type_idx] += raw_read_pairs
-            total_ds_raw_read_pairs[lib_type_idx] += ds_read_pairs
+            total_ds_raw_read_pairs[lib_type_idx] += (
+                ds_read_pairs if not np.isnan(ds_read_pairs) else 0
+            )
             total_feature_read_pairs[lib_type_idx] += feature_reads
-            total_ds_feature_read_pairs[lib_type_idx] += ds_feature_reads
+            total_ds_feature_read_pairs[lib_type_idx] += (
+                ds_feature_reads if not np.isnan(ds_feature_reads) else 0
+            )
 
             frac_reads_kept = summary["frac_reads_kept"][lib_idx]
-            min_frac_reads_kept[lib_type_idx] = min(
-                min_frac_reads_kept[lib_type_idx], frac_reads_kept
-            )
+            if not frac_reads_kept is None:
+                min_frac_reads_kept[lib_type_idx] = min(
+                    min_frac_reads_kept[lib_type_idx], frac_reads_kept
+                )
 
             pre_norm_raw_rppc = tk_stats.robust_divide(raw_read_pairs, n_cells)
             pre_norm_mapped_rppc = tk_stats.robust_divide(mapped_read_pairs, n_cells)

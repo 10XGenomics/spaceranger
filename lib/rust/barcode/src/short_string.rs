@@ -1,4 +1,5 @@
 //! A stack-allocated immutable string.
+#![allow(missing_docs)]
 
 use anyhow::{bail, Result};
 use metric::AsMetricPrefix;
@@ -162,7 +163,7 @@ impl<'de, const N: usize> Deserialize<'de> for ShortString<N> {
 
 struct ShortStringVisitor<const N: usize>;
 
-impl<'de, const N: usize> Visitor<'de> for ShortStringVisitor<N> {
+impl<const N: usize> Visitor<'_> for ShortStringVisitor<N> {
     type Value = ShortString<N>;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -188,7 +189,7 @@ mod test {
         type SS = ShortString<TEST_SIZE>;
 
         let too_long = "foobarba";
-        assert_eq!(TEST_SIZE + 1, too_long.as_bytes().len());
+        assert_eq!(TEST_SIZE + 1, too_long.len());
         assert!(SS::try_from(&too_long[..TEST_SIZE]).is_ok());
         assert!(SS::try_from(too_long).is_err());
 

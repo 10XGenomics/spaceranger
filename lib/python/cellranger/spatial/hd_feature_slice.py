@@ -4,6 +4,7 @@
 import csv
 import json
 import os
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 
@@ -16,6 +17,7 @@ import cellranger.h5_constants as h5_constants
 import cellranger.matrix as cr_matrix
 import cellranger.spatial.image_util as image_util
 from cellranger.fast_utils import (  # pylint: disable=no-name-in-module,unused-import
+    CellId,
     SquareBinIndex,
 )
 from cellranger.feature_ref import FeatureReference
@@ -41,6 +43,8 @@ FEATURE_SLICE_H5_FILETYPE = "feature_slice"
 VERSION_ATTR_NAME = "version"
 FEATURE_SLICE_H5_VERSION = "0.1.0"
 READS_GROUP_NAME = "reads"
+SEQUENCED_READS_NAME = "sequenced"
+CORRECTED_READS_GROUP_NAME = "barcode_corrected_sequenced"
 
 MASKS_GROUP_NAME = "masks"
 FILTERED_SPOTS_GROUP_NAME = "filtered"
@@ -61,6 +65,13 @@ CELL_TYPE_IDX_DATASET_NAME = "cell_type_idx"
 CELL_ANNOTATIONS_MATRIX_NAME = "matrix"
 OUT_OF_TISSUE_SENTINEL = "out-of-tissue"
 
+SEGMENTATION_GROUP_NAME = "segmentations"
+NUCLEUS_SEGMENTATION_MASK_NAME = "nucleus_segmentation_mask"
+CELL_SEGMENTATION_MASK_NAME = "cell_segmentation_mask"
+MINIMUM_DISTANCE_TO_NUCLEUS_MASK_NAME = "min_sq_euclidean_distance_to_mask"
+CLOSEST_NUCLEUS_X_COORD_MASK_NAME = "closest_nucleus_x_coord"
+CLOSEST_NUCLEUS_Y_COORD_MASK_NAME = "closest_nucleus_y_coord"
+
 
 class MatrixDataKind(Enum):
     """Data stored as a sparse matrix falls in one of these kinds."""
@@ -70,6 +81,13 @@ class MatrixDataKind(Enum):
     BINARY_MASK = "binary_mask"
     GRAY_IMAGE_U8 = "gray_image_u8"
     FLOAT = "float"
+
+
+class SegmentationKind(Enum):
+    """The type of segmentations held."""
+
+    CELL = "cell"
+    NUCLEUS = "nucleus"
 
 
 class MatrixDataDomain(Enum):
@@ -102,6 +120,10 @@ class HdFeatureSliceMatrixMetadata:
     @classmethod
     def default(cls):
         return cls.new(MatrixDataKind.RAW_COUNTS, MatrixDataDomain.ALL_SPOTS, binning_scale=1)
+
+    @classmethod
+    def default_categorical(cls):
+        return cls.new(MatrixDataKind.CATEGORICAL, MatrixDataDomain.ALL_SPOTS, binning_scale=1)
 
 
 class CooMatrix:
@@ -170,6 +192,18 @@ class CooMatrix:
         for row, col, data in zip(self.row, self.col, self.data):
             result[row // binning_scale, col // binning_scale] += data
         return result
+
+    @classmethod
+    def from_ndarray(cls, arr: np.ndarray):
+        """Generate CooMatrix from numpy ndarray."""
+        row, col, data = list(
+            zip(*((row, col, val) for ((row, col), val) in np.ndenumerate(arr) if val))
+        )
+        return cls(
+            row=list(row),
+            col=list(col),
+            data=list(data),
+        )
 
 
 @dataclass
@@ -337,7 +371,12 @@ def bin_size_um_from_bin_name(bin_name):
     return int(bin_name.removeprefix("square_").removesuffix("um"))
 
 
-class HdFeatureSliceIo:
+def bin_name_from_bin_size_um(bin_size_um):
+    """Get the binning scale from the bin name."""
+    return f"{BINNING_PREFIX}_{bin_size_um:03.0f}{MICROMETERS}"
+
+
+class HdFeatureSliceIo:  # pylint: disable=too-many-public-methods
     """Class for dealing with the HD feature slice H5.
 
     Where we store an "image" for each feature
@@ -434,6 +473,71 @@ class HdFeatureSliceIo:
             nrows=self.nrows(), ncols=self.ncols(), binning_scale=binning_scale
         )
 
+    def get_mask(self, cell_or_nucleus: SegmentationKind = SegmentationKind.CELL):
+        """Get the mask for cell or nucleus."""
+        mask_name = (
+            CELL_SEGMENTATION_MASK_NAME
+            if cell_or_nucleus == SegmentationKind.CELL
+            else NUCLEUS_SEGMENTATION_MASK_NAME
+        )
+        return self.load_counts_from_group_name(f"{SEGMENTATION_GROUP_NAME}/{mask_name}", 1)
+
+    def bin_counts_by_segmentation(
+        self, count_group_name: str, cell_or_nucleus: SegmentationKind = SegmentationKind.CELL
+    ) -> dict[int, float]:
+        """Bin counts by segmentation."""
+        mask = self.get_mask(cell_or_nucleus)
+        unique_cell_ids = np.array(
+            sorted(x for x in np.unique(mask) if x)
+        )  # removing the zero mask
+        feature_per_square = self.load_counts_from_group_name(
+            count_group_name,
+            1,
+        )
+        weighted_sums = np.bincount(mask.flatten(), weights=feature_per_square.flatten())
+        feature_per_cell = weighted_sums[np.array(unique_cell_ids)]
+        return dict(zip(unique_cell_ids, feature_per_cell))
+
+    def bin_reads_per_cell_nuc(
+        self, cell_or_nucleus: SegmentationKind = SegmentationKind.CELL
+    ) -> np.ndarray:
+        """Bin reads per cell or nucleus."""
+        return np.array(
+            list(
+                self.bin_counts_by_segmentation(
+                    f"{READS_GROUP_NAME}/{SEQUENCED_READS_NAME}", cell_or_nucleus
+                ).values()
+            )
+        )
+
+    def squares_per_cell_nuc(self, cell_or_nucleus: SegmentationKind = SegmentationKind.CELL):
+        """Count 2um squares per cell or nucleus. Removes cell key 0 which is outside the capture area."""
+        mask = self.get_mask(cell_or_nucleus)
+        squares_per_feature_2um = Counter(mask.flatten())
+        # remove cell key 0
+        squares_per_feature_2um.pop(0, None)
+        return squares_per_feature_2um
+
+    def uncorrected_reads(self, binning_scale: int = 1):
+        """Return matrix containing read counts with barcodes that don't require correction."""
+        sequenced = CooMatrix.from_hdf5(
+            self.h5_file[READS_GROUP_NAME][SEQUENCED_READS_NAME]
+        ).to_ndarray(self.nrows(), self.ncols(), binning_scale=binning_scale)
+        barcode_corrected = CooMatrix.from_hdf5(
+            self.h5_file[READS_GROUP_NAME][CORRECTED_READS_GROUP_NAME]
+        ).to_ndarray(self.nrows(), self.ncols(), binning_scale=binning_scale)
+        return sequenced - barcode_corrected
+
+    def frac_corrected_reads(self, binning_scale: int = 1):
+        """Return matrix containing fraction of reads that were corrected."""
+        sequenced = CooMatrix.from_hdf5(
+            self.h5_file[READS_GROUP_NAME][SEQUENCED_READS_NAME]
+        ).to_ndarray(self.nrows(), self.ncols(), binning_scale=binning_scale)
+        barcode_corrected = CooMatrix.from_hdf5(
+            self.h5_file[READS_GROUP_NAME][CORRECTED_READS_GROUP_NAME]
+        ).to_ndarray(self.nrows(), self.ncols(), binning_scale=binning_scale)
+        return np.divide(barcode_corrected, sequenced, where=sequenced != 0)
+
     def _load_clustering(
         self,
         binning_scale: int = 4,
@@ -458,9 +562,7 @@ class HdFeatureSliceIo:
             CooMatrix: Sparse matrix sith clusters assigne to all spots.
                 Spots outside tissue are annotated as cluster 0.
         """
-        binned_name = (
-            f"{BINNING_PREFIX}_{self.metadata.spot_pitch*binning_scale:03.0f}{MICROMETERS}"
-        )
+        binned_name = bin_name_from_bin_size_um(self.metadata.spot_pitch * binning_scale)
         clustering_group_name = f"{binned_name}_{feature_used_to_cluster}_{clustering_method}"
         if (
             f"{SECONDARY_ANALYSIS_NAME}/{CLUSTERING_NAME}/{clustering_group_name}"
@@ -493,9 +595,7 @@ class HdFeatureSliceIo:
         self, binning_scale: int = 4, feature_used_to_cluster: str = GENE_EXPRESSION_CLUSTERING
     ):
         """Read UMAP x, y coordinates as two numpy arrays."""
-        binned_name = (
-            f"{BINNING_PREFIX}_{self.metadata.spot_pitch*binning_scale:03.0f}{MICROMETERS}"
-        )
+        binned_name = bin_name_from_bin_size_um(self.metadata.spot_pitch * binning_scale)
         umap_group_name = (
             f"{SECONDARY_ANALYSIS_NAME}/umap/{binned_name}_{feature_used_to_cluster}_2"
         )
@@ -863,7 +963,8 @@ class HdFeatureSliceIo:
             return [
                 x
                 for x in self.h5_file[CELL_ANNOTATIONS_GROUP_NAME].keys()
-                if isinstance(self.h5_file[CELL_ANNOTATIONS_GROUP_NAME][x], h5.Group)
+                if x.startswith(BINNING_PREFIX)
+                and isinstance(self.h5_file[CELL_ANNOTATIONS_GROUP_NAME][x], h5.Group)
             ]
 
     def get_cell_annotations(self, bin_name):
@@ -882,3 +983,107 @@ class HdFeatureSliceIo:
             ][()]
         ]
         return (cell_annotation_idx, cell_annotation_matrix)
+
+    def _write_categorical_data_from_ndarray(self, group_name, matrix_name, ndarray):
+        grp = self._get_or_create_group(group_name=group_name)
+        coomtx = CooMatrix.from_ndarray(ndarray)
+        coomtx.to_hdf5(
+            grp.create_group(matrix_name),
+            HdFeatureSliceMatrixMetadata.default_categorical(),
+        )
+
+    def write_segmentation_masks(
+        self,
+        segmentation_mask_path,
+        cell_segmentation_mask_path,
+        minimum_distance_mask_path,
+        closest_object_mask_path,
+    ):
+        """Write segmentation output masks."""
+        if segmentation_mask_path:
+            nucleus_segmentation_mask = np.load(segmentation_mask_path)
+            self._write_categorical_data_from_ndarray(
+                group_name=SEGMENTATION_GROUP_NAME,
+                matrix_name=NUCLEUS_SEGMENTATION_MASK_NAME,
+                ndarray=nucleus_segmentation_mask,
+            )
+
+        if cell_segmentation_mask_path:
+            cell_segmentation_mask = np.load(cell_segmentation_mask_path)
+            self._write_categorical_data_from_ndarray(
+                group_name=SEGMENTATION_GROUP_NAME,
+                matrix_name=CELL_SEGMENTATION_MASK_NAME,
+                ndarray=cell_segmentation_mask,
+            )
+
+        if minimum_distance_mask_path:
+            minimum_distance_mask = np.load(minimum_distance_mask_path)
+            self._write_categorical_data_from_ndarray(
+                group_name=SEGMENTATION_GROUP_NAME,
+                matrix_name=MINIMUM_DISTANCE_TO_NUCLEUS_MASK_NAME,
+                ndarray=minimum_distance_mask,
+            )
+
+        if closest_object_mask_path:
+            closest_object_mask = np.load(closest_object_mask_path)
+            if closest_object_mask.ndim != 3 or closest_object_mask.shape[2] != 2:
+                raise ValueError(
+                    f"Expect closest_object_mask to be a (nrows, ncols, 2) tensor but its shape is {closest_object_mask.shape}."
+                )
+            self._write_categorical_data_from_ndarray(
+                group_name=SEGMENTATION_GROUP_NAME,
+                matrix_name=CLOSEST_NUCLEUS_X_COORD_MASK_NAME,
+                ndarray=closest_object_mask[:, :, 0],
+            )
+            self._write_categorical_data_from_ndarray(
+                group_name=SEGMENTATION_GROUP_NAME,
+                matrix_name=CLOSEST_NUCLEUS_Y_COORD_MASK_NAME,
+                ndarray=closest_object_mask[:, :, 1],
+            )
+
+    def write_segmented_cas_analysis(self, cas_csv_path):
+        """Write cell annotations of segmented cell types.
+
+        Expects expanded segmentation spot mask to be in the feature slice.
+        """
+        expanded_mask_dataset = f"{SEGMENTATION_GROUP_NAME}/{CELL_SEGMENTATION_MASK_NAME}"
+        if expanded_mask_dataset not in self.h5_file.keys():
+            return
+
+        with open(cas_csv_path) as f:
+            reader = csv.DictReader(f)
+            sorted_cell_types = sorted(set(row[cas.COARSE_CELL_TYPES_KEY] for row in reader))
+        cell_types_with_none_appended = [OUT_OF_TISSUE_SENTINEL] + sorted_cell_types
+        cell_types_to_cell_type_idx = {y: x for x, y in enumerate(cell_types_with_none_appended)}
+
+        grp_bin = self._get_or_create_group(CELL_ANNOTATIONS_GROUP_NAME).create_group(
+            SEGMENTATION_GROUP_NAME
+        )
+        grp_bin.create_dataset(
+            CELL_TYPE_IDX_DATASET_NAME,
+            data=np.array(cell_types_with_none_appended, dtype="S"),
+            chunks=(cr_matrix.HDF5_CHUNK_SIZE,),
+            maxshape=(None,),
+            compression=cr_matrix.HDF5_COMPRESSION,
+            shuffle=True,
+        )
+
+        cell_id_to_cell_type_dict = {0: cell_types_to_cell_type_idx[OUT_OF_TISSUE_SENTINEL]}
+        with open(cas_csv_path) as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                cell_id_to_cell_type_dict[CellId(row[cas.BARCODE_KEY]).id] = (
+                    cell_types_to_cell_type_idx[row[cas.COARSE_CELL_TYPES_KEY]]
+                )
+
+        cell_id_matrix = self.load_counts_from_group_name(expanded_mask_dataset, binning_scale=1)
+        cell_type_matrix = np.vectorize(
+            lambda x: cell_id_to_cell_type_dict.get(
+                x, cell_types_to_cell_type_idx[OUT_OF_TISSUE_SENTINEL]
+            )
+        )(cell_id_matrix)
+        self._write_categorical_data_from_ndarray(
+            group_name=f"{CELL_ANNOTATIONS_GROUP_NAME}/{SEGMENTATION_GROUP_NAME}",
+            matrix_name=CELL_ANNOTATIONS_MATRIX_NAME,
+            ndarray=cell_type_matrix,
+        )

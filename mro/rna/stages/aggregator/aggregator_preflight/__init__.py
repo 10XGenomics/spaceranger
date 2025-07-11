@@ -15,11 +15,7 @@ import cellranger.molecule_counter as cr_mol_counter
 from cellranger.chemistry import CHEMISTRY_SC3P_LT, SC3P_CHEMISTRIES, SC5P_CHEMISTRIES
 from cellranger.molecule_counter import TARGETING_METHOD_METRIC
 from cellranger.molecule_counter_converter import convert_v2_to_v4
-from cellranger.rna.library import (
-    ANTIBODY_LIBRARY_TYPE,
-    FEATURE_LIBRARY_TYPES,
-    GENE_EXPRESSION_LIBRARY_TYPE,
-)
+from cellranger.rna.library import FEATURE_LIBRARY_TYPES
 from cellranger.targeted.targeted_constants import TARGETING_METHOD_HC, TARGETING_METHOD_TL
 from cellranger.utils import string_is_ascii
 
@@ -44,7 +40,7 @@ class AggregatorPreflightStageInputs:
 
 def incompat_msg(reason) -> str:
     return (
-        f"The datasets you are trying to aggregate were created with different {reason}s, "
+        f"TXRNGR10019: The datasets you are trying to aggregate were created with different {reason}s, "
         f"but the 'aggr' command requires identical {reason}s in order to combine datasets. "
         f"Please re-run the original pipeline ('count' or 'multi', as the case may be) with "
         f"uniform {reason} in order to aggregate these data."
@@ -101,6 +97,7 @@ def convert_v2_to_v4_if_needed(filename: str, is_pd: bool) -> str:
 
 
 # pylint: disable=too-many-branches,too-many-statements
+# ruff: noqa: PLR0915, PLR0912
 def main(args: AggregatorPreflightStageInputs, _outs: None):
     if args.normalization_mode is not None and args.normalization_mode not in NORM_MODES:
         martian.exit("Normalization mode must be one of: {}".format(", ".join(NORM_MODES)))
@@ -197,7 +194,7 @@ def main(args: AggregatorPreflightStageInputs, _outs: None):
        Please provide only sample molecule info files from Cellranger Multi (sample_molecule_info.h5) or molecule infos produced by Cellranger Count (molecule_info.h5)."
                 )
 
-            mol_fasta_hash = counter.get_metric("reference_fasta_hash")
+            mol_fasta_hash = counter.get_metric("reference_fasta_hash", "no-transcriptome")
             if global_fasta_hash is None:
                 global_fasta_hash = mol_fasta_hash
             elif global_fasta_hash != mol_fasta_hash:
@@ -256,12 +253,7 @@ def main(args: AggregatorPreflightStageInputs, _outs: None):
                 martian.exit(
                     "Molecule files provided were produced with different --filter-probes settings. All samples must be run with the same --filter-probes setting."
                 )
-            # Agg of Antibody Capture and Gene expression not allowed
-            if {ANTIBODY_LIBRARY_TYPE} in library_types:
-                if {ANTIBODY_LIBRARY_TYPE, GENE_EXPRESSION_LIBRARY_TYPE} in library_types:
-                    martian.exit(
-                        "Aggr with Antibody Capture and Gene Expression + Antibody Capture libraries is not supported."
-                    )
+
             mol_feature_ref = counter.feature_reference
             assert mol_feature_ref is not None
             if global_feature_ref is None:
@@ -303,9 +295,10 @@ def main(args: AggregatorPreflightStageInputs, _outs: None):
             for lib_key, metrics in (counter.get_metric(cr_mol_counter.LIBRARIES_METRIC)).items():
                 lib_total_reads = metrics[cr_mol_counter.TOTAL_READS_METRIC]
                 if lib_total_reads == 0:
-                    martian.exit(
-                        f"Library {lib_key} has zero reads in file: {mol_h5}\n"
-                        f" Please re-run the `count` pipeline without including this gem group."
+                    lib_type = library_info[int(lib_key)]["library_type"]
+                    martian.log_warn(
+                        f"Library {lib_key} ({lib_type}) has zero reads in file: {mol_h5}\n"
+                        "Barcodes from this library will have zero UMI counts."
                     )
 
             # Track targeting-specific fields
@@ -376,12 +369,12 @@ def main(args: AggregatorPreflightStageInputs, _outs: None):
         in gex_rtl_feature_compatibility
     ):
         martian.exit(
-            "Aggr of Fixed RNA Profiling and Gene Expression with Feature Barcode requires that all input analyses include the same probe-set. Please rerun the Gene Expression with Feature Barcode analyses with the same probe-set parameter as used for the Fixed RNA Profiling analyses."
+            "Aggr of Flex and Gene Expression with Feature Barcode requires that all input analyses include the same probe-set. Please rerun the Gene Expression with Feature Barcode analyses with the same probe-set parameter as used for the Flex analyses."
         )
 
     if len(observed_ag_control_features) > 1:
         martian.exit(
-            "The datasets you are trying to aggregate have incompatible control "
+            "TXRNGR10020: The datasets you are trying to aggregate have incompatible control "
             "feature ids. Please re-run the original multi pipelines with uniform "
             "[antigen-specificity] sections."
         )

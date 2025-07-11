@@ -46,6 +46,7 @@ stage CHECK_MOLECULE_INFO_VERSION(
     out map<string> antigen_specificity_controls,
     out csv         feature_reference,
     out bool        disable_antigen_aggr,
+    out bool        is_visium_hd,
     src py          "stages/aggregator/check_molecule_info_version",
 ) split (
     in  int         mol_h5_version,
@@ -146,6 +147,7 @@ stage SUMMARIZE_AGGREGATED_REPORTS(
     in  json   antibody_treemap,
     in  json   crispr_analysis_metrics,
     in  string product_type,
+    in  bool   skip_tsne,
     out json   summary,
     out html   web_summary,
     out json   web_summary_data,

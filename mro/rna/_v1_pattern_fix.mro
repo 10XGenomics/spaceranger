@@ -3,8 +3,36 @@
 #
 
 filetype h5;
+filetype json;
 
 struct V1PatternFixArgs(
     h5  v1_filtered_fbm,
     int v1_pattern_type,
+)
+
+stage COMPUTE_CORRECTION_FACTOR(
+    in  V1PatternFixArgs v1_pattern_fix,
+    in  string           barcodes_whitelist,
+    out float            correction_factor,
+    out json             affected_barcodes,
+    out bool             disable_downsampling,
+    src py               "stages/spatial/compute_correction_factor",
+) using (
+    volatile = strict,
+)
+
+stage DISABLE_CORRECTION_FACTOR(
+    in  V1PatternFixArgs v1_pattern_fix,
+    out bool             disable_correction_factor,
+    src py               "stages/spatial/disable_correction_factor",
+) using (
+    volatile = strict,
+)
+
+stage CHECK_CORRECTION_FACTOR(
+    in  V1PatternFixArgs v1_pattern_fix,
+    in  h5               filtered_fbm,
+    src py               "stages/spatial/check_correction_factor",
+) using (
+    volatile = strict,
 )

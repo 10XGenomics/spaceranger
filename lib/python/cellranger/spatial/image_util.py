@@ -19,6 +19,8 @@ import cellranger.spatial.tiffer as tiffer
 from cellranger.spatial.data_utils import DARK_IMAGES_CHANNELS, DARK_IMAGES_NONE
 
 CYT_IMG_PIXEL_SIZE = 4.625  # in microns
+SD_SPOT_TISSUE_AREA_UM2 = 8660.0  # in sq.microns (100 um) * (100 * sqrt(3)/2 um)
+HD_SPOT_TISSUE_AREA_UM2 = 4.0  # in sq.microns
 XML_HEADER_PREFIXES = ["<?xml", "<OME xml"]  # prefix of an XML string
 IMAGE_DESCRIPTION_TAG_NAME = "imageDescription"
 REGIST_TARGET_IMAGE_MAX_DIM = 6000  # Maximum dimension of the registration target image
@@ -82,6 +84,12 @@ def cv_write_downsampled_image(cvimg, filename, maxres):
     cv2.imwrite(filename, rcvimg, params)
 
     return scalef
+
+
+def cv_read_rgb_image(filepath) -> np.ndarray:
+    """Read an RGB image."""
+    img = cv2.imread(filepath, cv2.IMREAD_COLOR)  # red in BGR fromat
+    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
 
 def cv_composite_labelmap(background, labelmap, colormap, alpha):

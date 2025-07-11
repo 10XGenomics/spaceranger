@@ -1,4 +1,5 @@
 //! Detect accidental duplication of FASTQ files.
+#![deny(missing_docs)]
 
 use super::chemistry_filter::DetectChemistryUnit;
 use anyhow::{bail, Result};
@@ -6,6 +7,7 @@ use fastq_set::read_pair::{ReadPair, ReadPart, WhichRead};
 use metric::{TxHashMap, TxHasher};
 use std::collections::hash_map::Entry;
 use std::hash::Hasher;
+use std::path::Path;
 
 pub(crate) fn check_read_identity(
     unit: &DetectChemistryUnit,
@@ -42,15 +44,33 @@ pub(crate) fn check_read_identity(
 }
 
 pub(crate) fn check_fastq_identity(units: &[DetectChemistryUnit]) -> Result<()> {
+    fn format_unit_fastq(
+        unit: &DetectChemistryUnit,
+        fastq: &fastq_set::read_pair_iter::InputFastqs,
+    ) -> String {
+        format!(
+            "{}\"{}\"",
+            match unit.group {
+                Some(ref g) => format!("{g} in "),
+                None => String::new(),
+            },
+            Path::new(&fastq.r1).parent().unwrap().display(),
+        )
+    }
     let mut hashes = TxHashMap::default();
     for unit in units {
-        for pair_hash in unit.check_read_identity()? {
+        for (fastq, pair_hash) in unit.check_read_identity()? {
             match hashes.entry(pair_hash) {
-                Entry::Occupied(o) => {
-                    bail!("Duplicate FASTQs found between {} and {}", unit, o.get());
-                }
                 Entry::Vacant(v) => {
-                    v.insert(unit);
+                    v.insert((unit, fastq));
+                }
+                Entry::Occupied(o) => {
+                    let (o_unit, o_fastq) = o.get();
+                    bail!(
+                        "duplicate FASTQs found between {} and {}",
+                        format_unit_fastq(unit, fastq),
+                        format_unit_fastq(o_unit, o_fastq),
+                    );
                 }
             }
         }

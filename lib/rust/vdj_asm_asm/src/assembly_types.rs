@@ -1,9 +1,10 @@
+#![allow(missing_docs)]
 use anyhow::Result;
 use cr_types::chemistry::ChemistryDefs;
 use cr_types::rna_read::RnaRead;
 use itertools::Itertools;
 use martian_derive::{martian_filetype, MartianStruct};
-use martian_filetypes::bin_file::{BinaryFormat, BincodeFile};
+use martian_filetypes::bin_file::BincodeFile;
 use martian_filetypes::json_file::JsonFile;
 use martian_filetypes::lz4_file::Lz4;
 use metric::SimpleHistogram;
@@ -15,8 +16,6 @@ martian_filetype!(BamFile, "bam");
 martian_filetype!(BamBaiFile, "bam.bai");
 martian_filetype!(FastaFile, "fasta");
 martian_filetype!(FastqFile, "fastq");
-martian_filetype!(_AsmReadsPerBcFile, "arp");
-pub type AsmReadsPerBcFormat = BinaryFormat<_AsmReadsPerBcFile, SimpleHistogram<String>>;
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 #[serde(try_from = "UmiListString", into = "UmiListString")]
@@ -61,15 +60,9 @@ pub struct UmiSummaryRow {
     pub contigs: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
-pub struct BarcodeSupport {
-    pub barcode: String,
-    // num non-solo surviving umis i.e. xucounts supporting this barcode
-    pub count: usize,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, MartianStruct)]
 pub struct AssemblyStageInputs {
+    pub sample_id: String,
     pub chemistry_defs: ChemistryDefs,
     pub bc_sorted_rna_reads: Vec<Lz4<BincodeFile<Vec<RnaRead>>>>,
     pub vdj_reference_path: Option<PathBuf>,

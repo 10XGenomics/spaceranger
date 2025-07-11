@@ -18,15 +18,23 @@ def rotation_matrix(rad):
     )
 
 
-def translation_matrix(dx, dy):  # pylint: disable=invalid-name
+def translation_matrix(dx, dy, cv2_compliant=False):  # pylint: disable=invalid-name
     """Generate a translation transformation matrix."""
-    return np.array(
-        [
-            [1.0, 0.0, dx],
-            [0.0, 1.0, dy],
-            [0.0, 0.0, 1.0],
-        ]
-    )
+    if cv2_compliant:
+        return np.array(
+            [
+                [1.0, 0.0, dx],
+                [0.0, 1.0, dy],
+            ]
+        )
+    else:
+        return np.array(
+            [
+                [1.0, 0.0, dx],
+                [0.0, 1.0, dy],
+                [0.0, 0.0, 1.0],
+            ]
+        )
 
 
 def scale_matrix(scale):
@@ -74,6 +82,16 @@ def padding_matrix(src_shape_rc: tuple[int, int], out_shape_rc: tuple[int, int])
     mat[0, 2] = w_pad
     mat[1, 2] = h_pad
     return mat
+
+
+def contains_reflection(mat: np.ndarray) -> bool:
+    """Check if a transformation contains reflection over either x or y axis."""
+    assert mat.shape == (3, 3)
+    # Perform SVD on the transform
+    u_mat, _, vt_mat = np.linalg.svd(mat[:2, :2])
+    r_mat = u_mat @ vt_mat
+    # Reflection over either x or y axis exists if determinant of the rotation is <0
+    return np.linalg.det(r_mat) < 0
 
 
 def convert_transform_corner_to_center(transform: np.ndarray) -> np.ndarray:
@@ -230,19 +248,19 @@ def get_warp_scaling_factors(
     return src_sxy, dst_sxy
 
 
-def get_scaled_transform(
+def get_scaled_similarity_transform(
     mat: np.ndarray,
     src_shape_rc: tuple[int, int],
     dst_shape_rc: tuple[int, int],
     transformation_src_shape_rc: tuple[int, int],
     transformation_dst_shape_rc: tuple[int, int],
 ) -> np.ndarray:
-    """Scale a transformation so it can be applied on input/output at new scales.
+    """Scale a similarity transformation so it can be applied on input/output at new scales.
 
     After finding the registration between downsampled images, this function can be used to calculate the corresponding registration between the original images.
 
     Args:
-        mat (np.ndarray): 3x3 affine transformation matrix.
+        mat (np.ndarray): 3x3 similarity transformation matrix without reflection.
         src_shape_rc (tuple[int, int]): shape of image on which the scaled transform will be applied. For example, this could be a larger/smaller version of the image that was used for feature detection.
         dst_shape_rc (tuple[int, int]): shape of image (with shape `src_shape_rc`) after warping.
         transformation_src_shape_rc (tuple[int, int]): shape of image that was used to find the transformation. For example, this could be the original image in which features were detected.
@@ -260,7 +278,8 @@ def get_scaled_transform(
         src_shape_rc=src_shape_rc,
         dst_shape_rc=dst_shape_rc,
     )
-    tform = sktr.ProjectiveTransform()
+    # Similarity transform here does not handle reflection
+    tform = sktr.SimilarityTransform()
     tform.estimate(img_corners_xy, warped_corners)
     scaled_mat = tform.params
     return scaled_mat
@@ -314,12 +333,12 @@ def warp_img(
     """Warp an input image.
 
     Args:
-        img (np.ndarray): the input image.
+        img (np.ndarray): the input image in uint8.
         mat (np.ndarray): the 3x3 transformation matrix
         dst_shape_rc (tuple[int, int] | None, optional): shape of the warped image. If not provided, this will be set big enough to avoid cropping. Defaults to None.
 
     Returns:
-        np.ndarray: the warped image.
+        np.ndarray: the warped image in uint8.
     """
     if dst_shape_rc is None:
         src_corners_rc = get_corners_of_image(img.shape[:2])

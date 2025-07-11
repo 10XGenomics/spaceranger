@@ -1,5 +1,6 @@
 [dependencies]
-numpy = '0.19'
+[dependencies.numpy]
+workspace = true
 
 [dependencies.pyanyhow]
 path = '../pyanyhow'
@@ -14,6 +15,9 @@ path = '../slide_design'
 crate-type = ['staticlib']
 name = 'slide_design_o3'
 test = false
+
+[lints]
+workspace = true
 
 [package]
 authors = ['10x Genomics']

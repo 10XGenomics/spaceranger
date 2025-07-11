@@ -1,5 +1,6 @@
 //!
 //! ALign reads to a contig
+#![deny(missing_docs)]
 
 use bio::alignment::pairwise::{self, banded, MatchParams};
 use bio::alignment::sparse::{find_kmer_matches_seq2_hashed, hash_kmers, HashMapFx};

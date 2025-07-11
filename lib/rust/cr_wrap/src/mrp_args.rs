@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use clap::builder::NonEmptyStringValueParser;
 use clap::Parser;
 

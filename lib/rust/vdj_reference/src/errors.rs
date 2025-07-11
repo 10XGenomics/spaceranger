@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 #![allow(clippy::enum_glob_use)]
 use anyhow::Result;
 use bio::io::fasta::Record;

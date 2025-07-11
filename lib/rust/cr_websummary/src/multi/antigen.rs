@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use anyhow::Result;
 use cr_types::clonotype::ClonotypeId;
 use cr_websummary::{PlotlyChart, RawChartWithHelp, TitleWithHelp};
@@ -111,7 +112,7 @@ impl ClonotypeSpecificity {
 
         for ((clonotype_id, antigen), group_iter) in &rows
             .into_iter()
-            .group_by(|r| (r.clonotype_id(), r.antigen.clone()))
+            .chunk_by(|r| (r.clonotype_id(), r.antigen.clone()))
         {
             if let Some(clonotype_id) = clonotype_id {
                 let specificites: Vec<_> =
@@ -211,7 +212,7 @@ impl ClonotypeSpecificity {
 
         let x = clonotypes
             .into_iter()
-            .map(|cl| cl.parse::<ClonotypeId>().unwrap().id.to_string())
+            .map(|cl| ClonotypeId::parse(&cl).unwrap().id.to_string())
             .collect();
 
         // Unnecessary duplication here since the text needs to be per z-value
@@ -329,7 +330,7 @@ mod tests {
                 raw_clonotype_id: Some(
                     ClonotypeId {
                         id: 1,
-                        sample_number: None,
+                        sample_id: None,
                     }
                     .to_string()
                 ),
