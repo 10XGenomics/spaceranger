@@ -824,7 +824,7 @@ dependencies = [
  "martian-derive",
  "metric",
  "ndarray",
- "rand 0.9.0",
+ "rand 0.9.4",
  "rand_distr 0.5.1",
  "serde",
  "serde_json",
@@ -874,7 +874,7 @@ dependencies = [
  "parameters_toml",
  "parquet",
  "parquet_derive",
- "rand 0.9.0",
+ "rand 0.9.4",
  "rayon",
  "regex",
  "rust-htslib",
@@ -952,7 +952,7 @@ dependencies = [
  "metric",
  "plotly",
  "pretty_assertions",
- "rand 0.9.0",
+ "rand 0.9.4",
  "serde",
  "serde_json",
  "statrs",
@@ -1530,7 +1530,7 @@ dependencies = [
  "itertools 0.13.0",
  "lazy_static",
  "lz4",
- "rand 0.9.0",
+ "rand 0.9.4",
  "regex",
  "serde",
  "thiserror 2.0.12",
@@ -2439,7 +2439,7 @@ source = "git+https://github.com/10XGenomics/scan-rs?branch=main#74f68959021db29
 dependencies = [
  "fxhash",
  "num-traits",
- "rand 0.9.0",
+ "rand 0.9.4",
  "rayon",
 ]
 
@@ -3583,13 +3583,12 @@ dependencies = [
 
 [[package]]
 name = "rand"
-version = "0.9.0"
+version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3779b94aeb87e8bd4e834cee3650289ee9e0d5677f976ecdb6d219e5f4f6cd94"
+checksum = "44c5af06bb1b7d3216d91932aed5265164bf384dc89cd6ba05cf59a35f5f76ea"
 dependencies = [
  "rand_chacha 0.9.0",
  "rand_core 0.9.1",
- "zerocopy 0.8.19",
 ]
 
 [[package]]
@@ -3649,7 +3648,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a8615d50dcf34fa31f7ab52692afec947c4dd0ab803cc87cb3b0b4570ff7463"
 dependencies = [
  "num-traits",
- "rand 0.9.0",
+ "rand 0.9.4",
 ]
 
 [[package]]
@@ -3965,7 +3964,7 @@ dependencies = [
  "ndarray-stats",
  "noisy_float",
  "num-traits",
- "rand 0.9.0",
+ "rand 0.9.4",
  "rand_distr 0.5.1",
  "scan-types",
  "snoop",
@@ -4300,7 +4299,7 @@ dependencies = [
  "ndarray-npy",
  "parquet",
  "parquet_derive",
- "rand 0.9.0",
+ "rand 0.9.4",
  "rand_distr 0.5.1",
  "roi",
  "serde",
@@ -4340,7 +4339,7 @@ dependencies = [
  "multiversion",
  "ndarray",
  "num-traits",
- "rand 0.9.0",
+ "rand 0.9.4",
  "rayon",
  "snoop",
  "sprs",
@@ -4384,7 +4383,7 @@ name = "stats"
 version = "0.1.0"
 dependencies = [
  "num-traits",
- "rand 0.9.0",
+ "rand 0.9.4",
 ]
 
 [[package]]
@@ -4771,7 +4770,7 @@ dependencies = [
  "martian-derive",
  "martian-filetypes",
  "metric",
- "rand 0.9.0",
+ "rand 0.9.4",
  "rust-htslib",
  "serde",
  "strum_macros",
@@ -4808,7 +4807,7 @@ dependencies = [
  "ndarray-linalg",
  "noisy_float",
  "num-traits",
- "rand 0.9.0",
+ "rand 0.9.4",
  "rayon",
  "simd_euclidean",
  "sprs",
